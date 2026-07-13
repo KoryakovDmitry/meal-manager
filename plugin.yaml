@@ -33,3 +33,6 @@ provides_tools:
   - remove_meal_from_plan
   - set_plan_status
   - repeat_week_plan
+  - generate_shopping_list
+  - estimate_plan_cost
+  - split_shopping_list

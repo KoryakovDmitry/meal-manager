@@ -122,6 +122,15 @@ flexible meal lists; there are no breakfast/lunch/dinner slots.
 - `set_plan_status` — advance strictly through `draft → approved → active → archived`.
 - `repeat_week_plan` — copy a past week into a new draft; reports missing
   ingredients and skips references that no longer exist in the catalogs.
+- `generate_shopping_list` — aggregate essential ingredient uses for the whole
+  week, include source ingredients for planned/depleted prep, subtract current
+  fridge presence, and persist the result in the plan.
+- `estimate_plan_cost` — apply an optional ingredient→EUR price map. Partial
+  coverage returns budget status `unknown`; complete estimates use the soft
+  €150/week warning and never block.
+- `split_shopping_list` — after `estimate_plan_cost`, first-fit priced items
+  into trips under the soft €100/trip limit. Unpriced and individually
+  oversized items remain explicit.
 
 Planning is conversational: gather wishes, create or repeat a draft, edit it
 with the household, and advance to `approved` only after explicit confirmation.

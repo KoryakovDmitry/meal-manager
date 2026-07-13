@@ -202,6 +202,13 @@ textarea { resize: vertical; min-height: 60px; }
 .plan-meal { padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
 .plan-note { margin-top: 6px; color: var(--text-dim); font-size: 0.75rem; }
 .status-pill { padding: 3px 8px; border-radius: 12px; background: rgba(108,92,231,0.16); font-size: 0.75rem; }
+.plan-shopping { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.plan-shopping-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.plan-shopping-box { padding: 12px; background: var(--bg); border-radius: 10px; }
+.plan-shopping-item { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 0.84rem; }
+.budget-within { color: var(--success); }
+.budget-over { color: var(--danger); }
+.budget-unknown { color: var(--warning); }
 
 /* ─── Modal ─── */
 .modal-bg {
@@ -742,6 +749,37 @@ async function loadPlan(week) {
   } catch (e) { toast(e.message, true); }
 }
 
+function renderPlanShopping(shopping) {
+  if (!shopping || !Array.isArray(shopping.items)) {
+    return '<div class="empty">Список покупок для недели ещё не сформирован</div>';
+  }
+  const items = shopping.items.map(item => {
+    const cost = Number.isFinite(Number(item.estimated_cost)) ? ` · €${Number(item.estimated_cost).toFixed(2)}` : '';
+    return `<div class="plan-shopping-item"><span>${escapeHtml(item.ingredient)}</span><span>${Number(item.to_buy) || 0} ед.${cost}</span></div>`;
+  }).join('');
+  const prep = (shopping.prep_to_make || []).map(item =>
+    `<div class="plan-shopping-item"><span>${escapeHtml(item.prep_item)}</span><span>${Number(item.available_uses) || 0} → ${Number(item.projected_uses) || 0}</span></div>`
+  ).join('');
+  const status = shopping.weekly_budget_status || 'unknown';
+  const statusLabels = {within:'в бюджете', over:'выше бюджета', unknown:'неполная оценка'};
+  const cost = Number.isFinite(Number(shopping.estimated_cost))
+    ? `€${Number(shopping.estimated_cost).toFixed(2)}` : 'нет оценки';
+  const trips = (shopping.trips || []).map(trip => {
+    const names = (trip.items || []).map(item => escapeHtml(item.ingredient)).join(', ');
+    return `<div class="plan-shopping-item"><span>Поездка ${Number(trip.trip) || 0}: ${names}</span><span>€${Number(trip.estimated_cost || 0).toFixed(2)}</span></div>`;
+  }).join('');
+  const unpriced = (shopping.unpriced_trip_items || shopping.unpriced_items || [])
+    .map(item => escapeHtml(item)).join(', ');
+  return `
+    <div class="section-title">🛒 Покупки и бюджет</div>
+    <div class="plan-shopping-grid">
+      <div class="plan-shopping-box"><strong>Купить</strong>${items || '<div class="empty">Ничего</div>'}</div>
+      <div class="plan-shopping-box"><strong>Подготовить</strong>${prep || '<div class="empty">Нет новых партий</div>'}</div>
+      <div class="plan-shopping-box"><strong>Оценка:</strong> ${cost}<br><span class="budget-${escapeHtml(status)}">${escapeHtml(statusLabels[status] || status)}</span>${unpriced ? `<div class="plan-note">Без цены: ${unpriced}</div>` : ''}</div>
+      ${trips ? `<div class="plan-shopping-box"><strong>Поездки</strong>${trips}</div>` : ''}
+    </div>`;
+}
+
 function renderPlanDetail() {
   const plan = CACHE.selectedPlan;
   const card = document.getElementById('plan-detail-card');
@@ -756,7 +794,8 @@ function renderPlanDetail() {
   document.getElementById('plan-detail').innerHTML = `
     <div class="section-title">${escapeHtml(plan.week)} · <span class="status-pill">${escapeHtml(plan.status)}</span></div>
     ${prep ? `<div style="margin-bottom:12px"><strong>Заготовки:</strong> ${prep}</div>` : ''}
-    <div class="plan-days">${days}</div>`;
+    <div class="plan-days">${days}</div>
+    <div class="plan-shopping">${renderPlanShopping(plan.shopping)}</div>`;
   card.style.display = 'block';
 }
 

@@ -47,6 +47,7 @@ def HANDLER(args: dict, **kwargs):
         if plan.status == "archived":
             raise ValueError("archived plans cannot be edited")
         plan.days[day].meals.append(entry)
+        plan.shopping = {}
         plan_repo.save(plan)
         index = len(plan.days[day].meals) - 1
 

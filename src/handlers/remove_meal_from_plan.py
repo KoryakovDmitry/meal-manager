@@ -46,6 +46,7 @@ def HANDLER(args: dict, **kwargs):
                 f"meal_index {index} is out of range for {day} ({len(meals)} meals)"
             )
         removed = meals.pop(index)
+        plan.shopping = {}
         plan_repo.save(plan)
 
     return {

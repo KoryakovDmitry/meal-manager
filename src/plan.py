@@ -85,6 +85,7 @@ class WeekPlan:
     prep: list[str] = field(default_factory=list)
     days: dict[str, DayPlan] = field(default_factory=dict)
     leftovers: dict = field(default_factory=dict)
+    shopping: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.week_id = self.normalize_week_id(self.week_id)
@@ -93,6 +94,11 @@ class WeekPlan:
                 f"status must be one of {VALID_STATUSES}, got '{self.status}'"
             )
         self.prep = [self.normalize_prep_name(name) for name in self.prep]
+        if not isinstance(self.shopping, dict):
+            raise ValueError("shopping must be a dict")
+        if self.shopping:
+            from .plan_shopping import validate_shopping_snapshot
+            validate_shopping_snapshot(self.shopping)
         # Ensure all days exist
         for day_code in DAYS:
             if day_code not in self.days:
@@ -105,6 +111,7 @@ class WeekPlan:
             "prep": list(self.prep),
             "days": {day: self.days[day].to_dict() for day in DAYS},
             "leftovers": dict(self.leftovers),
+            "shopping": dict(self.shopping),
         }
 
     @classmethod
@@ -122,6 +129,10 @@ class WeekPlan:
         if not isinstance(raw_leftovers, dict):
             raw_leftovers = {}
 
+        raw_shopping = data.get("shopping", {})
+        if not isinstance(raw_shopping, dict):
+            raise ValueError("shopping must be a dict")
+
         raw_days = data.get("days", {})
         if not isinstance(raw_days, dict) or set(raw_days) != set(DAYS):
             raise ValueError("days must contain exactly mon, tue, wed, thu, fri, sat, sun")
@@ -138,6 +149,7 @@ class WeekPlan:
             prep=prep,
             days=days,
             leftovers=raw_leftovers,
+            shopping=raw_shopping,
         )
 
     @staticmethod

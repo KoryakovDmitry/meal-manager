@@ -169,6 +169,9 @@ add_meal_to_plan = _load_handler("add_meal_to_plan")
 remove_meal_from_plan = _load_handler("remove_meal_from_plan")
 set_plan_status = _load_handler("set_plan_status")
 repeat_week_plan = _load_handler("repeat_week_plan")
+generate_shopping_list = _load_handler("generate_shopping_list")
+estimate_plan_cost = _load_handler("estimate_plan_cost")
+split_shopping_list = _load_handler("split_shopping_list")
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -931,6 +934,50 @@ def test_week_plan_lifecycle_and_repeat():
     )
 
 
+def test_phase3_shopping_budget_flow():
+    print("\n-- Phase 3: shopping and soft budget --")
+    with _repos_mod.fridge_repo.lock:
+        _repos_mod.fridge_repo.save(["water"])
+
+    generated = parse(generate_shopping_list({"week": "2026-W31"}))
+    items = {item["ingredient"]: item for item in generated.get("items", [])}
+    check("weekly shopping list generated", set(items) == {"beans", "bones", "carrot", "herbs", "water"}, f"got: {items}")
+    check("shopping subtracts one fridge use", items.get("water", {}).get("to_buy") == 1)
+    check("shopping aggregates repeated dish uses", items.get("carrot", {}).get("to_buy") == 2)
+    check("shopping includes depleted prep source", items.get("herbs", {}).get("to_buy") == 1)
+
+    stored = parse(get_week_plan({"week": "2026-W31"}))
+    check("generated shopping persists in plan", stored.get("shopping", {}).get("items") == generated.get("items"))
+
+    premature_split = parse(split_shopping_list({"week": "2026-W31"}))
+    check("trip split requires prior cost estimate", "error" in premature_split)
+
+    estimated = parse(estimate_plan_cost({
+        "week": "2026-W31",
+        "prices": {"water": 10, "carrot": 30, "bones": 40, "herbs": 30, "beans": 40},
+    }))
+    check("plan cost estimate is complete", estimated.get("complete") is True)
+    check("weekly budget warning is soft over", estimated.get("weekly_budget_status") == "over")
+    check("estimated cost persisted", estimated.get("estimated_cost") == 180.0)
+
+    split = parse(split_shopping_list({"week": "2026-W31", "trip_limit": 100}))
+    check("shopping list split into two trips", len(split.get("trips", [])) == 2, f"got: {split}")
+    check("normal trips stay within soft limit", all(t["estimated_cost"] <= 100 for t in split.get("trips", [])))
+
+    reestimated = parse(estimate_plan_cost({
+        "week": "2026-W31",
+        "prices": {"water": 10, "carrot": 30, "bones": 40, "herbs": 30, "beans": 40},
+    }))
+    check("re-estimate invalidates stale trips", "trips" not in reestimated)
+    check("re-estimate clears stale unpriced trip state", "unpriced_trip_items" not in reestimated)
+
+    add_meal_to_plan({
+        "week": "2026-W31", "day": "sat", "dish": "weekly stew", "portions": 2,
+    })
+    changed = parse(get_week_plan({"week": "2026-W31"}))
+    check("meal edit invalidates stale shopping calculation", changed.get("shopping") == {})
+
+
 def main():
     _setup_tmp_data()
     try:
@@ -983,6 +1030,7 @@ def main():
 
         # Weekly planning (self-contained plans/ state; needs a live catalog).
         test_week_plan_lifecycle_and_repeat()
+        test_phase3_shopping_budget_flow()
 
         # These overwrite dishes.json wholesale — keep them last.
         test_dii_session_id_traversal_rejected()

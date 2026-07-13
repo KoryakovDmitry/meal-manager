@@ -1,8 +1,8 @@
 # Meal Manager — Architecture: Planned Extensions
 
-> Status: **PHASES 1–2 IMPLEMENTED** — prep items and weekly plans are live.
-> Phases 3–5 remain planned. This document is the source of truth for the
-> agreed entities, data models, and tool surface.
+> Status: **PHASES 1–3 IMPLEMENTED** — prep items, weekly plans, and
+> shopping/budget flows are live. Phases 4–5 remain planned. This document is
+> the source of truth for the agreed entities, data models, and tool surface.
 
 ---
 
@@ -156,9 +156,9 @@ Dishes can declare which prep-items they require:
 
 | Tool | Purpose |
 |------|---------|
-| `generate_shopping_list` | Aggregate ingredients from plan, subtract fridge stock |
-| `split_shopping_list` | Break into multiple trips (respecting €100/trip limit) |
-| `estimate_plan_cost` | Soft cost estimate from price DB (when available) |
+| `generate_shopping_list` | Aggregate essential ingredient uses from plan + depleted/planned prep, subtract one current fridge use, persist snapshot |
+| `split_shopping_list` | First-fit priced items into soft €100 trips; retain unpriced/oversized warnings |
+| `estimate_plan_cost` | Apply explicit unit prices until receipt price DB exists; soft €150 weekly status |
 
 ### Leftovers
 
@@ -174,6 +174,19 @@ Dishes can declare which prep-items they require:
 - Max **€100** per shopping trip
 - Max **€150** per week
 - Enforcement: **soft** — warn, don't block. Tune over time.
+- Recipes currently have no gram quantities. Phase 3 therefore counts one
+  ingredient use per planned cooking occurrence; one fridge entry covers one use.
+- Only essential ingredients are included automatically.
+- Planned prep and depleted prep dependencies contribute one batch of essential
+  source ingredients. `make_prep` replaces the old remaining quantity with the
+  fresh batch yield, so projected availability is the yield (not remaining +
+  yield); capacity shortfalls remain explicit warnings.
+- Until receipt ingestion provides a price DB, `estimate_plan_cost` accepts an
+  explicit ingredient → EUR-per-shopping-unit map. Partial coverage reports
+  `weekly_budget_status: unknown`, never a false within-budget result.
+- `split_shopping_list` runs after a cost-estimate snapshot and uses deterministic
+  first-fit decreasing for priced items; unpriced items remain outside
+  cost-limited trips and are reported explicitly.
 - Price data source: uploaded grocery receipts (future feature)
 
 ---
@@ -201,10 +214,12 @@ See `BOARD.md` for the live kanban board.
 - Plan model + repository
 - CRUD tools (create, add/remove meal, status, get, list, repeat)
 
-### Phase 3: Shopping & Budget
-- Aggregated shopping list from plan
-- Split into trips
-- Soft budget check
+### Phase 3: Shopping & Budget ✅
+- Aggregated essential shopping snapshot persisted in each week plan
+- Planned/depleted prep source expansion and capacity warnings
+- Optional explicit-price estimate with incomplete/within/over soft status
+- Deterministic soft-limit trip splitting
+- Read-only shopping/budget/trips view in the weekly-plan UI
 
 ### Phase 4: Leftovers & Calibration
 - Auto-tracking on cook

@@ -38,10 +38,13 @@
 - [x] Model and end-to-end lifecycle tests (133 unit, 136 integration)
 - [x] Focused web validation/GET-only/XSS smoke tests
 
-### Phase 3: Shopping & Budget
-- [ ] `generate_shopping_list` handler
-- [ ] `split_shopping_list` handler
-- [ ] `estimate_plan_cost` handler (soft, price DB optional)
+### Phase 3: Shopping & Budget ✅
+- [x] `generate_shopping_list` handler
+- [x] `split_shopping_list` handler
+- [x] `estimate_plan_cost` handler (soft, explicit prices until price DB exists)
+- [x] Planned/depleted prep source aggregation
+- [x] Read-only shopping, budget, and trip view in weekly-plan details
+- [x] Unit and end-to-end handler coverage (185 unit, 150 integration)
 
 ### Phase 4: Leftovers & Calibration
 - [ ] `record_leftovers` handler

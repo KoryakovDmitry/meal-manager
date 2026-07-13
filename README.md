@@ -2,7 +2,7 @@
 
 An intelligent meal planning and fridge inventory management system structured as an official Hermes plugin. It helps users decide what to cook for dinner and what to buy at the grocery store by analyzing their current fridge contents, recipe catalog, and cooking history.
 
-An AI assistant invokes the 31 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate shopping lists, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
+An AI assistant invokes the 34 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
 
 ---
 
@@ -133,7 +133,7 @@ Reply naturally — *"yes"*, *"skip"*, *"remove X"*, *"also add Y"*, or *"done"*
 
 ### As a Hermes Plugin
 
-The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 31 tools:
+The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 34 tools:
 
 | Tool | Purpose |
 |---|---|
@@ -168,6 +168,9 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `remove_meal_from_plan` | Remove an indexed meal from a day |
 | `set_plan_status` | Advance draft → approved → active → archived |
 | `repeat_week_plan` | Copy a past week into a new adaptable draft |
+| `generate_shopping_list` | Aggregate whole-week essential needs and prep sources |
+| `estimate_plan_cost` | Apply optional unit prices and soft weekly budget status |
+| `split_shopping_list` | Split priced items into soft €100 trips |
 
 All handlers follow the signature `def handler(args: dict, **kwargs) -> str` and return JSON strings.
 
@@ -214,6 +217,7 @@ meal-manager/
 │   ├── dish.py                # Dish dataclass — recipe model (essential/optional ingredients)
 │   ├── prep_item.py           # Semi-finished prep-item domain model
 │   ├── plan.py                # Weekly plan, day, and meal-reference models
+│   ├── plan_shopping.py       # Whole-week needs, soft cost, and trip packing
 │   ├── suggestion.py          # Scoring engine — ranks dishes by availability + recency
 │   ├── shopping.py            # Shopping suggestions — single-ingredient unlock logic
 │   ├── tuning.py              # Online learner — self-adjusts the availability/recency blend

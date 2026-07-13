@@ -9,6 +9,7 @@ import json
 import re
 import threading
 from datetime import date, datetime, timedelta
+from math import isfinite
 from pathlib import Path
 from collections import Counter
 
@@ -49,7 +50,7 @@ def _read_json(path: Path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
         return default
 
 def _write_json(path: Path, data):
@@ -92,6 +93,292 @@ def _valid_iso_week(week_id: str) -> bool:
         return False
     return True
 
+_MAX_SAFE_JS_INTEGER = 9_007_199_254_740_991
+
+
+def _valid_nonnegative_number(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, int):
+        return 0 <= value <= _MAX_SAFE_JS_INTEGER
+    return isfinite(value) and 0 <= value <= _MAX_SAFE_JS_INTEGER
+
+
+def _valid_positive_number(value) -> bool:
+    return _valid_nonnegative_number(value) and value > 0
+
+
+def _valid_string_list(value) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _valid_canonical_name(value) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip().lower()
+    )
+
+
+def _valid_shopping_item(item, *, allow_zero=False, require_price=False) -> bool:
+    base_keys = {
+        "ingredient", "required_uses", "available_uses", "to_buy", "required_by",
+    }
+    price_keys = {"estimated_unit_price", "estimated_cost"}
+    if (
+        not isinstance(item, dict)
+        or frozenset(item) not in {frozenset(base_keys), frozenset(base_keys | price_keys)}
+    ):
+        return False
+    ingredient = item.get("ingredient")
+    required = item.get("required_uses")
+    available = item.get("available_uses")
+    to_buy = item.get("to_buy")
+    if not _valid_canonical_name(ingredient):
+        return False
+    for value, minimum in ((required, 1), (available, 0), (to_buy, 0)):
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not minimum <= value <= _MAX_SAFE_JS_INTEGER
+        ):
+            return False
+    assert isinstance(required, int) and not isinstance(required, bool)
+    assert isinstance(available, int) and not isinstance(available, bool)
+    assert isinstance(to_buy, int) and not isinstance(to_buy, bool)
+    if to_buy != max(0, required - available) or (allow_zero != (to_buy == 0)):
+        return False
+    required_by = item.get("required_by")
+    if not isinstance(required_by, list) or not required_by:
+        return False
+    source_uses = 0
+    for source in required_by:
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"kind", "name", "uses"}
+            or source.get("kind") not in {"dish", "prep"}
+            or not _valid_canonical_name(source.get("name"))
+        ):
+            return False
+        uses = source.get("uses")
+        if not isinstance(uses, int) or isinstance(uses, bool) or not 1 <= uses <= _MAX_SAFE_JS_INTEGER:
+            return False
+        source_uses += uses
+    if source_uses != required:
+        return False
+    has_unit = "estimated_unit_price" in item
+    has_cost = "estimated_cost" in item
+    if has_unit != has_cost:
+        return False
+    if allow_zero and has_unit:
+        return False
+    if has_unit:
+        unit = item["estimated_unit_price"]
+        cost = item["estimated_cost"]
+        if not _valid_positive_number(unit) or not _valid_nonnegative_number(cost):
+            return False
+        raw_cost = unit * to_buy
+        if not isfinite(raw_cost) or raw_cost > _MAX_SAFE_JS_INTEGER or round(raw_cost, 2) != cost:
+            return False
+    return not require_price or has_cost
+
+
+def _valid_prep_schedule(value, *, capacity=False) -> bool:
+    if not isinstance(value, list):
+        return False
+    expected_keys = {
+        "prep_item", "required_uses", "available_uses",
+        "projected_uses", "planned_explicitly",
+    }
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != expected_keys
+            or not _valid_canonical_name(item.get("prep_item"))
+        ):
+            return False
+        values = []
+        for key, minimum in (
+            ("required_uses", 0), ("available_uses", 0), ("projected_uses", 1)
+        ):
+            number = item.get(key)
+            if (
+                not isinstance(number, int)
+                or isinstance(number, bool)
+                or not minimum <= number <= _MAX_SAFE_JS_INTEGER
+            ):
+                return False
+            values.append(number)
+        if not isinstance(item.get("planned_explicitly"), bool):
+            return False
+        if capacity and values[2] >= values[0]:
+            return False
+    return True
+
+
+def _valid_shopping_payload(shopping) -> bool:
+    if not isinstance(shopping, dict):
+        return False
+    if not shopping:
+        return True
+    if shopping.get("basis") != "cooking_occurrences":
+        return False
+    allowed_keys = {
+        "basis", "items", "covered_by_fridge", "prep_to_make",
+        "unresolved_prep_dependencies", "prep_capacity_warnings",
+        "estimated_cost", "complete", "priced_items", "total_items",
+        "unpriced_items", "weekly_limit", "weekly_budget_status", "warning",
+        "trips", "unpriced_trip_items", "trip_limit", "trip_warnings",
+    }
+    if set(shopping) - allowed_keys:
+        return False
+    base_lists = (
+        "items", "covered_by_fridge", "prep_to_make",
+        "unresolved_prep_dependencies", "prep_capacity_warnings",
+    )
+    if not all(isinstance(shopping.get(key), list) for key in base_lists):
+        return False
+    items = shopping["items"]
+    covered = shopping["covered_by_fridge"]
+    if not all(_valid_shopping_item(item) for item in items):
+        return False
+    if not all(_valid_shopping_item(item, allow_zero=True) for item in covered):
+        return False
+    names = [item["ingredient"] for item in items + covered]
+    if len(names) != len(set(names)):
+        return False
+    if not _valid_prep_schedule(shopping["prep_to_make"]):
+        return False
+    prep_names = [item["prep_item"] for item in shopping["prep_to_make"]]
+    if len(prep_names) != len(set(prep_names)):
+        return False
+    if not _valid_prep_schedule(shopping["prep_capacity_warnings"], capacity=True):
+        return False
+    expected_capacity = [
+        item for item in shopping["prep_to_make"]
+        if item["projected_uses"] < item["required_uses"]
+    ]
+    if shopping["prep_capacity_warnings"] != expected_capacity:
+        return False
+    unresolved_names = []
+    for item in shopping["unresolved_prep_dependencies"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"prep_item", "required_uses", "reason"}
+            or not _valid_canonical_name(item.get("prep_item"))
+            or item.get("reason") != "not_defined"
+        ):
+            return False
+        uses = item.get("required_uses")
+        if not isinstance(uses, int) or isinstance(uses, bool) or not 1 <= uses <= _MAX_SAFE_JS_INTEGER:
+            return False
+        unresolved_names.append(item["prep_item"])
+    if len(unresolved_names) != len(set(unresolved_names)):
+        return False
+
+    estimate_keys = {
+        "estimated_cost", "complete", "priced_items", "total_items",
+        "unpriced_items", "weekly_limit", "weekly_budget_status", "warning",
+    }
+    estimate_present = estimate_keys.intersection(shopping)
+    if estimate_present and estimate_present != estimate_keys:
+        return False
+    has_item_pricing = any("estimated_cost" in item for item in items)
+    if has_item_pricing and not estimate_present:
+        return False
+    if estimate_present:
+        if not _valid_nonnegative_number(shopping["estimated_cost"]):
+            return False
+        if not _valid_positive_number(shopping["weekly_limit"]):
+            return False
+        priced_names = sorted(item["ingredient"] for item in items if "estimated_cost" in item)
+        unpriced_names = sorted(item["ingredient"] for item in items if "estimated_cost" not in item)
+        calculated = round(sum(item.get("estimated_cost", 0) for item in items), 2)
+        if not _valid_nonnegative_number(calculated) or calculated != shopping["estimated_cost"]:
+            return False
+        for key in ("priced_items", "total_items"):
+            value = shopping[key]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not 0 <= value <= _MAX_SAFE_JS_INTEGER
+            ):
+                return False
+        if shopping["priced_items"] != len(priced_names) or shopping["total_items"] != len(items):
+            return False
+        if not _valid_string_list(shopping["unpriced_items"]):
+            return False
+        if shopping["unpriced_items"] != unpriced_names:
+            return False
+        complete = shopping["complete"]
+        if not isinstance(complete, bool) or complete != (not unpriced_names):
+            return False
+        expected_status = "unknown" if unpriced_names else (
+            "over" if shopping["estimated_cost"] > shopping["weekly_limit"] else "within"
+        )
+        if shopping["weekly_budget_status"] != expected_status:
+            return False
+        warning = shopping["warning"]
+        expected_warning = None
+        if expected_status == "unknown":
+            expected_warning = "Cost estimate is incomplete; weekly budget status is unknown."
+        elif expected_status == "over":
+            expected_warning = (
+                f"Estimated weekly cost exceeds the soft €{shopping['weekly_limit']:.2f} limit."
+            )
+        if warning != expected_warning:
+            return False
+
+    trip_keys = {"trips", "unpriced_trip_items", "trip_limit", "trip_warnings"}
+    trip_present = trip_keys.intersection(shopping)
+    if trip_present and trip_present != trip_keys:
+        return False
+    if trip_present and not estimate_present:
+        return False
+    if trip_present:
+        if not isinstance(shopping["trips"], list) or not _valid_positive_number(shopping["trip_limit"]):
+            return False
+        assigned = []
+        top_items = {item["ingredient"]: item for item in items}
+        for index, trip in enumerate(shopping["trips"], 1):
+            if (
+                not isinstance(trip, dict)
+                or set(trip) != {"trip", "items", "estimated_cost", "limit", "over_limit"}
+                or trip.get("trip") != index
+                or trip.get("limit") != shopping["trip_limit"]
+                or not isinstance(trip.get("items"), list)
+                or not trip["items"]
+                or not isinstance(trip.get("over_limit"), bool)
+            ):
+                return False
+            if not all(_valid_shopping_item(item, require_price=True) for item in trip["items"]):
+                return False
+            if any(top_items.get(item["ingredient"]) != item for item in trip["items"]):
+                return False
+            calculated = round(sum(item["estimated_cost"] for item in trip["items"]), 2)
+            if not _valid_nonnegative_number(trip.get("estimated_cost")):
+                return False
+            if calculated != trip["estimated_cost"]:
+                return False
+            if trip["over_limit"] != (trip["estimated_cost"] > trip["limit"]):
+                return False
+            assigned.extend(item["ingredient"] for item in trip["items"])
+        priced_names = sorted(item["ingredient"] for item in items if "estimated_cost" in item)
+        unpriced_names = sorted(item["ingredient"] for item in items if "estimated_cost" not in item)
+        if not _valid_string_list(shopping["unpriced_trip_items"]):
+            return False
+        if sorted(assigned) != priced_names or shopping["unpriced_trip_items"] != unpriced_names:
+            return False
+        expected_warnings = []
+        if unpriced_names:
+            expected_warnings.append("Unpriced items are not assigned to cost-limited trips.")
+        if any(trip["over_limit"] for trip in shopping["trips"]):
+            expected_warnings.append("At least one individual item exceeds the soft trip limit.")
+        if shopping["trip_warnings"] != expected_warnings:
+            return False
+    return True
+
+
 def _valid_plan_payload(plan, expected_week: str) -> bool:
     if not isinstance(plan, dict) or plan.get("week") != expected_week:
         return False
@@ -101,7 +388,10 @@ def _valid_plan_payload(plan, expected_week: str) -> bool:
     prep = plan.get("prep", [])
     days = plan.get("days", {})
     leftovers = plan.get("leftovers", {})
+    shopping = plan.get("shopping", {})
     if not isinstance(prep, list) or not all(isinstance(item, str) for item in prep):
+        return False
+    if not _valid_shopping_payload(shopping):
         return False
     if (
         not isinstance(days, dict)

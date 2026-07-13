@@ -6,7 +6,7 @@ Read `AGENTS.md` before starting — it contains additional repository-specific 
 
 ## Project Overview
 
-A meal planning and fridge inventory manager structured as a Hermes plugin. The entry point is `__init__.py:register(ctx)`, which auto-discovers the 31 tool handlers under `src/handlers/` and installs the skill. All state is persisted in JSON files under `data/`.
+A meal planning and fridge inventory manager structured as a Hermes plugin. The entry point is `__init__.py:register(ctx)`, which auto-discovers the 34 tool handlers under `src/handlers/` and installs the skill. All state is persisted in JSON files under `data/`.
 
 Python 3.12+, no external dependencies (stdlib only).
 
@@ -83,19 +83,21 @@ The data directory is injectable via `src.repositories.configure(data_dir)` — 
 
 ## Weekly Planning Extensions
 
-Phases 1–2 are implemented. Prep items live in `data/prep_items.json`; weekly
+Phases 1–3 are implemented. Prep items live in `data/prep_items.json`; weekly
 plans use one file per ISO week under `data/plans/`. `src/plan.py` defines
-`MealEntry`, `DayPlan`, and `WeekPlan`; `JsonPlanRepository` owns plan files;
-seven auto-discovered handlers provide create/get/list/add/remove/status/repeat.
-The web UI has read-only plan history and detail views backed by GET-only plan
-endpoints. Mutations remain in plugin handlers.
+`MealEntry`, `DayPlan`, and `WeekPlan`; `src/plan_shopping.py` provides pure
+whole-week aggregation, soft cost estimation, and deterministic trip packing;
+`JsonPlanRepository` owns plan files. Ten auto-discovered handlers provide
+plan CRUD/status/repeat plus shopping generation, cost estimation, and trip
+splitting. The web UI has read-only plan, shopping, budget, and trip views.
+Mutations remain in plugin handlers.
 
 - **`ARCHITECTURE.md`** — full design spec and remaining phases
 - **`BOARD.md`** — live kanban and implementation status
 
-Phases 3–5 (shopping/budget, leftovers calibration, plan suggestions) remain
-planned. Keep the architecture, board, plugin manifest, skill, tests, and web
-view synchronized when implementing them.
+Phases 4–5 (leftovers calibration, plan suggestions) remain planned. Keep the
+architecture, board, plugin manifest, skill, tests, and web view synchronized
+when implementing them.
 
 ## Key Design Decisions
 

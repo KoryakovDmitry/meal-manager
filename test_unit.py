@@ -9,6 +9,7 @@ Usage:
 
 import copy
 import importlib
+import pathlib
 import sys
 from pathlib import Path
 
@@ -691,6 +692,20 @@ def test_week_plan_roundtrip():
         prep=[" Hybrid Meatballs "],
         days={"mon": DayPlan(meals=[MealEntry("Soup", 4)], note="leftovers")},
         leftovers={"soup": {"remaining": 2}},
+        shopping={
+            "basis": "cooking_occurrences",
+            "items": [{
+                "ingredient": "carrot",
+                "required_uses": 1,
+                "available_uses": 0,
+                "to_buy": 1,
+                "required_by": [{"kind": "dish", "name": "soup", "uses": 1}],
+            }],
+            "covered_by_fridge": [],
+            "prep_to_make": [],
+            "unresolved_prep_dependencies": [],
+            "prep_capacity_warnings": [],
+        },
     )
     restored = WeekPlan.from_dict(plan.to_dict())
     check("plan roundtrip week", restored.week_id == "2026-W30")
@@ -698,6 +713,7 @@ def test_week_plan_roundtrip():
     check("plan roundtrip note", restored.days["mon"].note == "leftovers")
     check("plan prep normalized", restored.prep == ["hybrid meatballs"])
     check("plan leftovers retained", restored.leftovers["soup"]["remaining"] == 2)
+    check("plan shopping retained", restored.shopping["items"][0]["ingredient"] == "carrot")
 
 
 def test_week_plan_invalid_status():
@@ -709,21 +725,342 @@ def test_week_plan_invalid_status():
 
 
 def test_week_plan_rejects_noncanonical_days():
-    partial = WeekPlan(week_id="2026-W30").to_dict()
-    partial["days"].pop("sun")
+    raw = WeekPlan(week_id="2026-W30").to_dict()
+    raw["days"].pop("sun")
     try:
-        WeekPlan.from_dict(partial)
+        WeekPlan.from_dict(raw)
         check("partial persisted day map rejected", False)
     except ValueError:
         check("partial persisted day map rejected", True)
 
-    unknown = WeekPlan(week_id="2026-W30").to_dict()
-    unknown["days"]["holiday"] = {"meals": []}
+    raw = WeekPlan(week_id="2026-W30").to_dict()
+    raw["days"]["holiday"] = {"meals": [], "note": ""}
     try:
-        WeekPlan.from_dict(unknown)
+        WeekPlan.from_dict(raw)
         check("unknown persisted day rejected", False)
     except ValueError:
         check("unknown persisted day rejected", True)
+
+
+def test_week_plan_rejects_malformed_shopping():
+    for malformed in (
+        {"items": []},
+        {"basis": "cooking_occurrences", "items": [{"ingredient": "carrot"}]},
+    ):
+        try:
+            WeekPlan(week_id="2026-W30", shopping=malformed)
+            check("malformed persisted shopping rejected", False)
+        except ValueError:
+            check("malformed persisted shopping rejected", True)
+
+    source_plan = WeekPlan(
+        week_id="2026-W30",
+        days={"mon": DayPlan(meals=[MealEntry("soup")])},
+    )
+    shopping = build_plan_shopping_list(
+        plan=source_plan,
+        dishes=[Dish(name="soup", ingredients={"carrot": True})],
+        prep_items=[],
+        fridge=[],
+    )
+    shopping.update(estimate_shopping_cost(shopping, {"carrot": 2.0}))
+    WeekPlan(week_id="2026-W30", shopping=shopping)
+
+    bad_counts = copy.deepcopy(shopping)
+    bad_counts["priced_items"] = 0
+    try:
+        WeekPlan(week_id="2026-W30", shopping=bad_counts)
+        check("persisted shopping rejects inconsistent price counts", False)
+    except ValueError:
+        check("persisted shopping rejects inconsistent price counts", True)
+
+    split = split_shopping_trips(shopping)
+    with_trips = copy.deepcopy(shopping)
+    with_trips.update({
+        "trips": split["trips"],
+        "trip_limit": split["trip_limit"],
+        "trip_warnings": split["warnings"],
+        "unpriced_trip_items": split["unpriced_items"],
+    })
+    WeekPlan(week_id="2026-W30", shopping=with_trips)
+    bad_trip = copy.deepcopy(with_trips)
+    bad_trip["trips"][0]["estimated_cost"] = 1.0
+    try:
+        WeekPlan(week_id="2026-W30", shopping=bad_trip)
+        check("persisted shopping rejects inconsistent trip totals", False)
+    except ValueError:
+        check("persisted shopping rejects inconsistent trip totals", True)
+
+    extra_empty_trip = copy.deepcopy(with_trips)
+    extra_empty_trip["trips"].append({
+        "trip": 2, "items": [], "estimated_cost": 0.0,
+        "limit": 100.0, "over_limit": False,
+    })
+    try:
+        WeekPlan(week_id="2026-W30", shopping=extra_empty_trip)
+        check("persisted shopping rejects appended empty trip", False)
+    except ValueError:
+        check("persisted shopping rejects appended empty trip", True)
+
+    partial = copy.deepcopy(shopping)
+    partial.update(estimate_shopping_cost(shopping, {}))
+    partial_split = split_shopping_trips(partial, trip_limit=100)
+    partial.update({
+        "trips": [{
+            "trip": 1, "items": [], "estimated_cost": 0.0,
+            "limit": 100.0, "over_limit": False,
+        }],
+        "trip_limit": partial_split["trip_limit"],
+        "trip_warnings": partial_split["warnings"],
+        "unpriced_trip_items": partial_split["unpriced_items"],
+    })
+    try:
+        WeekPlan(week_id="2026-W30", shopping=partial)
+        check("persisted shopping rejects all-empty trip", False)
+    except ValueError:
+        check("persisted shopping rejects all-empty trip", True)
+
+    def rejects_snapshot(label, snapshot):
+        try:
+            WeekPlan(week_id="2026-W30", shopping=snapshot)
+            check(label, False)
+        except ValueError:
+            check(label, True)
+
+    priced_without_estimate = copy.deepcopy(shopping)
+    for key in (
+        "estimated_cost", "complete", "priced_items", "total_items",
+        "unpriced_items", "weekly_limit", "weekly_budget_status", "warning",
+    ):
+        priced_without_estimate.pop(key)
+    rejects_snapshot("persisted item pricing requires estimate metadata", priced_without_estimate)
+
+    capacity_detail = {
+        "prep_item": "stock", "required_uses": 2, "available_uses": 0,
+        "projected_uses": 1, "planned_explicitly": True,
+    }
+    missing_capacity = copy.deepcopy(build_plan_shopping_list(
+        plan=source_plan,
+        dishes=[Dish(name="soup", ingredients={"carrot": True})],
+        prep_items=[],
+        fridge=[],
+    ))
+    missing_capacity["prep_to_make"] = [capacity_detail]
+    rejects_snapshot("persisted shopping requires exact capacity warning", missing_capacity)
+    orphan_capacity = copy.deepcopy(missing_capacity)
+    orphan_capacity["prep_to_make"] = []
+    orphan_capacity["prep_capacity_warnings"] = [capacity_detail]
+    rejects_snapshot("persisted shopping rejects orphan capacity warning", orphan_capacity)
+
+    covered_priced = build_plan_shopping_list(
+        plan=source_plan,
+        dishes=[Dish(name="soup", ingredients={"carrot": True})],
+        prep_items=[],
+        fridge={"carrot"},
+    )
+    covered_priced["covered_by_fridge"][0].update({
+        "estimated_unit_price": 1.0, "estimated_cost": 0.0,
+    })
+    rejects_snapshot("persisted covered item cannot retain pricing", covered_priced)
+
+    noncanonical_prep = copy.deepcopy(missing_capacity)
+    noncanonical_prep["prep_to_make"][0]["prep_item"] = " Stock "
+    noncanonical_prep["prep_capacity_warnings"] = [
+        copy.deepcopy(noncanonical_prep["prep_to_make"][0])
+    ]
+    rejects_snapshot("persisted prep name must be canonical", noncanonical_prep)
+
+    bad_unresolved = copy.deepcopy(missing_capacity)
+    bad_unresolved["prep_to_make"] = []
+    bad_unresolved["unresolved_prep_dependencies"] = [{
+        "prep_item": "stock", "required_uses": 1,
+        "reason": "other", "unexpected": True,
+    }]
+    rejects_snapshot("persisted unresolved prep schema is strict", bad_unresolved)
+
+
+# ── Phase 3 shopping/budget tests ──
+
+_plan_shopping_mod = importlib.import_module(".src.plan_shopping", _PLUGIN_DIR.name)
+build_plan_shopping_list = _plan_shopping_mod.build_plan_shopping_list
+estimate_shopping_cost = _plan_shopping_mod.estimate_shopping_cost
+split_shopping_trips = _plan_shopping_mod.split_shopping_trips
+
+
+def test_build_plan_shopping_list_aggregates_occurrences_and_prep():
+    plan = WeekPlan(
+        week_id="2026-W30",
+        prep=["stock"],
+        days={
+            "mon": DayPlan(meals=[MealEntry("soup", 4)]),
+            "tue": DayPlan(meals=[MealEntry("soup", 2)]),
+        },
+    )
+    dishes = [
+        Dish(
+            name="soup",
+            ingredients={"carrot": True, "water": True, "salt": False},
+        )
+    ]
+    prep_items = [
+        PrepItem(
+            name="stock",
+            ingredients={"bones": True, "water": True, "pepper": False},
+            yield_qty=4,
+        )
+    ]
+
+    result = build_plan_shopping_list(
+        plan=plan,
+        dishes=dishes,
+        prep_items=prep_items,
+        fridge={"carrot", "water"},
+    )
+    items = {item["ingredient"]: item for item in result["items"]}
+    check("shopping includes aggregated carrot shortage", items["carrot"]["to_buy"] == 1)
+    check("shopping aggregates shared water demand", items["water"]["to_buy"] == 2)
+    check("shopping includes planned prep source", items["bones"]["to_buy"] == 1)
+    check("shopping excludes optional dish ingredient", "salt" not in items)
+    check("shopping excludes optional prep ingredient", "pepper" not in items)
+    check("shopping declares occurrence basis", result["basis"] == "cooking_occurrences")
+
+
+def test_build_plan_shopping_list_adds_sources_for_depleted_dependencies():
+    plan = WeekPlan(
+        week_id="2026-W30",
+        days={
+            "mon": DayPlan(meals=[MealEntry("soup")]),
+            "tue": DayPlan(meals=[MealEntry("soup")]),
+        },
+    )
+    dish = Dish(name="soup", ingredients={"water": True})
+    dish.prep_depends = ["stock"]
+    stock = PrepItem(
+        name="stock",
+        ingredients={"bones": True},
+        yield_qty=4,
+        remaining=1,
+    )
+    result = build_plan_shopping_list(
+        plan=plan, dishes=[dish], prep_items=[stock], fridge=set()
+    )
+    items = {item["ingredient"]: item for item in result["items"]}
+    check("depleted prep adds source ingredient", items["bones"]["to_buy"] == 1)
+    check("depleted prep is scheduled for one batch", result["prep_to_make"][0]["prep_item"] == "stock")
+    check("prep demand is reported", result["prep_to_make"][0]["required_uses"] == 2)
+    check("prep current availability is reported", result["prep_to_make"][0]["available_uses"] == 1)
+
+
+def test_explicit_prep_uses_replacement_yield_semantics():
+    plan = WeekPlan(week_id="2026-W30", prep=["stock"])
+    stock = PrepItem(
+        name="stock",
+        ingredients={"bones": True},
+        yield_qty=3,
+        remaining=5,
+    )
+    result = build_plan_shopping_list(
+        plan=plan,
+        dishes={},
+        prep_items=[stock],
+        fridge=[],
+    )
+    prep_plan = result["prep_to_make"][0]
+    check("explicit prep appears in prep schedule", prep_plan["prep_item"] == "stock")
+    check("explicit prep reports current remaining", prep_plan["available_uses"] == 5)
+    check("make prep replacement projects yield, not max", prep_plan["projected_uses"] == 3)
+
+
+def test_estimate_shopping_cost_is_soft_and_partial_safe():
+    shopping = {
+        "items": [
+            {"ingredient": "carrot", "to_buy": 2},
+            {"ingredient": "bones", "to_buy": 1},
+        ]
+    }
+    partial = estimate_shopping_cost(shopping, {"carrot": 1.5})
+    check("partial cost keeps known subtotal", partial["estimated_cost"] == 3.0)
+    check("partial cost is incomplete", partial["complete"] is False)
+    check("partial cost budget status unknown", partial["weekly_budget_status"] == "unknown")
+    check("partial cost lists unpriced ingredient", partial["unpriced_items"] == ["bones"])
+
+    complete = estimate_shopping_cost(
+        shopping,
+        {"carrot": 60.0, "bones": 40.0},
+        weekly_limit=150.0,
+    )
+    check("complete cost sums shopping units", complete["estimated_cost"] == 160.0)
+    check("complete cost reports over budget", complete["weekly_budget_status"] == "over")
+    check("budget overage is informational", complete["warning"] is not None)
+
+    repriced = estimate_shopping_cost(complete, {"carrot": 1.0})
+    repriced_bones = next(item for item in repriced["items"] if item["ingredient"] == "bones")
+    check("partial re-estimate clears stale unit price", "estimated_unit_price" not in repriced_bones)
+    check("partial re-estimate clears stale item cost", "estimated_cost" not in repriced_bones)
+    repriced_trips = split_shopping_trips(repriced)
+    check("trip split treats newly unpriced item as unpriced", repriced_trips["unpriced_items"] == ["bones"])
+
+
+def test_cost_inputs_reject_non_finite_numbers():
+    shopping = {"items": [{"ingredient": "carrot", "to_buy": 1}]}
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        try:
+            estimate_shopping_cost(shopping, {"carrot": bad})
+            check(f"rejects non-finite price {bad}", False)
+        except ValueError:
+            check(f"rejects non-finite price {bad}", True)
+
+    try:
+        estimate_shopping_cost({"items": [{"ingredient": "carrot", "to_buy": 2}]}, {"carrot": 1e308})
+        check("rejects non-finite derived line cost", False)
+    except ValueError:
+        check("rejects non-finite derived line cost", True)
+
+    tiny = estimate_shopping_cost(shopping, {"carrot": 0.001})
+    tiny_split = split_shopping_trips(tiny)
+    check("tiny rounded cost remains splittable", tiny_split["trips"][0]["estimated_cost"] == 0.0)
+
+    huge = 10 ** 1000
+    for label, operation in (
+        ("huge price", lambda: estimate_shopping_cost(shopping, {"carrot": huge})),
+        ("huge weekly limit", lambda: estimate_shopping_cost(shopping, {}, weekly_limit=huge)),
+        ("huge trip limit", lambda: split_shopping_trips(tiny, trip_limit=huge)),
+        ("huge to_buy", lambda: estimate_shopping_cost({**shopping, "items": [{"ingredient": "carrot", "to_buy": huge}]}, {"carrot": 1})),
+    ):
+        try:
+            operation()
+            check(f"rejects {label} without overflow", False)
+        except (ValueError, OverflowError) as exc:
+            check(f"rejects {label} without overflow", isinstance(exc, ValueError))
+
+
+def test_split_shopping_trips_respects_soft_limit():
+    costed = {
+        "items": [
+            {"ingredient": "a", "to_buy": 1, "estimated_cost": 60.0},
+            {"ingredient": "b", "to_buy": 1, "estimated_cost": 50.0},
+            {"ingredient": "c", "to_buy": 1, "estimated_cost": 40.0},
+            {"ingredient": "bones", "to_buy": 1},
+        ]
+    }
+    result = split_shopping_trips(costed, trip_limit=100.0)
+    check("trip splitter creates two priced trips", len(result["trips"]) == 2)
+    check("trip splitter first-fits to exact limit", result["trips"][0]["estimated_cost"] == 100.0)
+    check("trip splitter keeps each normal trip within limit", all(t["estimated_cost"] <= 100.0 for t in result["trips"]))
+    check("trip splitter preserves unpriced items", result["unpriced_items"] == ["bones"])
+
+    oversized = split_shopping_trips(
+        {"items": [{"ingredient": "special", "to_buy": 1, "estimated_cost": 120.0}]},
+        trip_limit=100.0,
+    )
+    check("oversized item gets its own trip", len(oversized["trips"]) == 1)
+    check("oversized item is a soft warning", oversized["trips"][0]["over_limit"] is True)
+
+    try:
+        split_shopping_trips({"items": [{"ingredient": "broken", "estimated_cost": 1.0}]})
+        check("trip split rejects item missing to_buy", False)
+    except ValueError:
+        check("trip split rejects item missing to_buy", True)
 
 
 def main():
@@ -799,6 +1136,15 @@ def main():
     test_week_plan_roundtrip()
     test_week_plan_invalid_status()
     test_week_plan_rejects_noncanonical_days()
+    test_week_plan_rejects_malformed_shopping()
+
+    print("\n-- Phase 3 shopping/budget --")
+    test_build_plan_shopping_list_aggregates_occurrences_and_prep()
+    test_build_plan_shopping_list_adds_sources_for_depleted_dependencies()
+    test_explicit_prep_uses_replacement_yield_semantics()
+    test_estimate_shopping_cost_is_soft_and_partial_safe()
+    test_cost_inputs_reject_non_finite_numbers()
+    test_split_shopping_trips_respects_soft_limit()
 
     print(f"\n{'='*40}")
     print(f"  {_passed} passed, {_failed} failed")

@@ -164,11 +164,13 @@ catalog/fridge/history/tuning core. The full specification lives in
   read as all-`fridge`.
 - **Extended dish** — optional `prep_depends: [prep_item_name, ...]` field.
 
-Phases 1–2 are implemented. Weekly-plan tools use the same auto-discovery
-pattern and persist one validated ISO-week file under `data/plans/`. The web
-UI exposes read-only plan history/detail endpoints; mutations remain in plugin
-handlers. Phases 3–5 remain planned. Keep `ARCHITECTURE.md`, `BOARD.md`,
-`plugin.yaml`, `skill.md`, and web views synchronized as later phases land.
+Phases 1–3 are implemented. Weekly-plan tools use the same auto-discovery
+pattern and persist one validated ISO-week file under `data/plans/`. Shopping
+state is a persisted snapshot inside the plan: essential occurrence counts,
+prep-source expansion, optional unit-price estimates, and deterministic trip
+splits. The web UI exposes read-only plan/shopping/budget views; mutations
+remain in plugin handlers. Phases 4–5 remain planned. Keep `ARCHITECTURE.md`,
+`BOARD.md`, `plugin.yaml`, `skill.md`, and web views synchronized.
 
 ## Editing Rules
 
@@ -183,7 +185,7 @@ handlers. Phases 3–5 remain planned. Keep `ARCHITECTURE.md`, `BOARD.md`,
 
 ## Testing
 
-- `test_unit.py` covers pure logic in `src/dish.py`, `src/suggestion.py`, `src/shopping.py`, `src/tuning.py`, and `_normalize_ingredients`.
+- `test_unit.py` covers pure logic in `src/dish.py`, `src/suggestion.py`, `src/shopping.py`, `src/plan_shopping.py`, `src/tuning.py`, and `_normalize_ingredients`.
 - `test_integration.py` is the end-to-end smoke test for all tool handlers.
 - The integration script creates a throw-away tmp directory, points the repositories and DII session store at it via `configure()`, seeds deterministic fixtures, and removes the directory when finished. The real `data/` files are never touched.
 - It intentionally exercises error cases and may print stack traces for expected failures.
