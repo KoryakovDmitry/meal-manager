@@ -164,12 +164,11 @@ catalog/fridge/history/tuning core. The full specification lives in
   read as all-`fridge`.
 - **Extended dish** — optional `prep_depends: [prep_item_name, ...]` field.
 
-New tool modules will follow the existing auto-discovery pattern: drop a
-module in `src/handlers/`, export `NAME`, `SCHEMA`, `HANDLER`, and it is
-picked up automatically. Remember to update `plugin.yaml`.
-
-These extensions are not yet implemented. Do not write handler code or
-repository code for them until the board moves a task to DOING.
+Phases 1–2 are implemented. Weekly-plan tools use the same auto-discovery
+pattern and persist one validated ISO-week file under `data/plans/`. The web
+UI exposes read-only plan history/detail endpoints; mutations remain in plugin
+handlers. Phases 3–5 remain planned. Keep `ARCHITECTURE.md`, `BOARD.md`,
+`plugin.yaml`, `skill.md`, and web views synchronized as later phases land.
 
 ## Editing Rules
 

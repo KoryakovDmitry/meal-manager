@@ -26,3 +26,10 @@ provides_tools:
   - list_prep_items
   - delete_prep_item
   - make_prep
+  - create_week_plan
+  - get_week_plan
+  - list_week_plans
+  - add_meal_to_plan
+  - remove_meal_from_plan
+  - set_plan_status
+  - repeat_week_plan

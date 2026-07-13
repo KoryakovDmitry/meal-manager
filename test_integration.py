@@ -1,4 +1,4 @@
-"""Integration smoke test for all 20 meal_manager tools.
+"""Integration smoke test for meal_manager tool flows.
 
 The test creates a throw-away data directory under ``tempfile.gettempdir()``
 and points the repositories + DII session store at it via the package-level
@@ -162,6 +162,13 @@ dii_clear_all = _load_handler("dii_clear_all")
 finalize_ingredient_session = _load_handler("finalize_ingredient_session")
 dii_get_state = _load_handler("dii_get_state")
 get_tuning_state = _load_handler("get_tuning_state")
+create_week_plan = _load_handler("create_week_plan")
+get_week_plan = _load_handler("get_week_plan")
+list_week_plans = _load_handler("list_week_plans")
+add_meal_to_plan = _load_handler("add_meal_to_plan")
+remove_meal_from_plan = _load_handler("remove_meal_from_plan")
+set_plan_status = _load_handler("set_plan_status")
+repeat_week_plan = _load_handler("repeat_week_plan")
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -786,6 +793,144 @@ def test_dish_load_preserves_malformed():
 # Runner
 # ---------------------------------------------------------------------------
 
+def test_week_plan_lifecycle_and_repeat():
+    print("\n-- weekly plans: CRUD, lifecycle, history, repeat --")
+    add_dish({
+        "name": "weekly soup",
+        "ingredients": {"water": True, "carrot": True},
+    })
+    add_dish({
+        "name": "weekly stew",
+        "ingredients": {"beans": True},
+    })
+    dish_repo = _repos_mod.dish_repo
+    with dish_repo.lock:
+        dishes = dish_repo.load()
+        weekly_soup = next(d for d in dishes if d.name == "weekly soup")
+        weekly_soup.prep_depends = ["planned stock", "depleted garnish"]
+        weekly_stew = next(d for d in dishes if d.name == "weekly stew")
+        weekly_stew.prep_depends = ["depleted garnish"]
+        dish_repo.save(dishes)
+
+    prep_mod = importlib.import_module(".src.prep_item", _PLUGIN_DIR.name)
+    with _repos_mod.prep_repo.lock:
+        _repos_mod.prep_repo.save([
+            prep_mod.PrepItem(
+                name="planned stock",
+                ingredients={"bones": True},
+                yield_qty=4,
+                remaining=0,
+            ),
+            prep_mod.PrepItem(
+                name="depleted garnish",
+                ingredients={"herbs": True},
+                yield_qty=4,
+                remaining=1,
+            ),
+        ])
+
+    bad_week = parse(create_week_plan({"week": "2026-W99"}))
+    check("invalid ISO week rejected", "error" in bad_week, f"got: {bad_week}")
+    try:
+        _repos_mod.plan_repo.load("../../etc/passwd")
+        check("plan repository blocks path traversal", False)
+    except ValueError:
+        check("plan repository blocks path traversal", True)
+
+    assert _TMP_DATA_DIR is not None
+    plans_dir = _TMP_DATA_DIR / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    plan_mod = importlib.import_module(".src.plan", _PLUGIN_DIR.name)
+    (plans_dir / "2026-W29.json").write_text(
+        json.dumps(plan_mod.WeekPlan(week_id="2026-W28").to_dict()),
+        encoding="utf-8",
+    )
+    check(
+        "plan repository rejects filename/embedded-week mismatch",
+        _repos_mod.plan_repo.load("2026-W29") is None,
+    )
+
+    created = parse(create_week_plan({
+        "week": "2026-W30", "prep": ["planned stock"],
+    }))
+    check("plan created as draft", created.get("status") == "draft", f"got: {created}")
+    check("plan created with seven days", len(created.get("days", {})) == 7)
+
+    duplicate = parse(create_week_plan({"week": "2026-W30"}))
+    check("duplicate week rejected", "error" in duplicate, f"got: {duplicate}")
+
+    added = parse(add_meal_to_plan({
+        "week": "2026-W30", "day": "mon", "dish": "Weekly Soup", "portions": 4,
+    }))
+    check("meal added by catalog reference", added.get("meal", {}).get("dish") == "weekly soup")
+    check("meal index returned", added.get("meal_index") == 0)
+
+    bad_dish = parse(add_meal_to_plan({
+        "week": "2026-W30", "day": "tue", "dish": "not in catalog",
+    }))
+    check("unknown dish reference rejected", "error" in bad_dish)
+
+    fetched = parse(get_week_plan({"week": "2026-W30"}))
+    check("get returns planned portions", fetched["days"]["mon"]["meals"][0]["portions"] == 4)
+
+    history = parse(list_week_plans({}))
+    row = next((item for item in history if item["week"] == "2026-W30"), None)
+    check("week appears in history", row is not None)
+    check("history counts meals", row is not None and row["meals_count"] == 1)
+
+    removed = parse(remove_meal_from_plan({
+        "week": "2026-W30", "day": "mon", "meal_index": 0,
+    }))
+    check("indexed meal removed", removed.get("removed", {}).get("dish") == "weekly soup")
+
+    add_meal_to_plan({
+        "week": "2026-W30", "day": "wed", "dish": "weekly soup", "portions": 3,
+    })
+    add_meal_to_plan({
+        "week": "2026-W30", "day": "thu", "dish": "weekly soup", "portions": 2,
+    })
+    add_meal_to_plan({
+        "week": "2026-W30", "day": "fri", "dish": "weekly stew", "portions": 2,
+    })
+    skipped = parse(set_plan_status({"week": "2026-W30", "status": "active"}))
+    check("status cannot skip stage", "error" in skipped)
+    for status in ("approved", "active", "archived"):
+        result = parse(set_plan_status({"week": "2026-W30", "status": status}))
+        check(f"status advances to {status}", result.get("status") == status, f"got: {result}")
+
+    archived_edit = parse(add_meal_to_plan({
+        "week": "2026-W30", "day": "sat", "dish": "weekly soup",
+    }))
+    check("archived plan is immutable", "error" in archived_edit)
+
+    repeated = parse(repeat_week_plan({
+        "source_week": "2026-W30", "target_week": "2026-W31",
+    }))
+    target = repeated.get("target_plan", {})
+    check("repeat creates target draft", target.get("status") == "draft")
+    check("repeat copies meal structure", target["days"]["wed"]["meals"][0]["portions"] == 3)
+    check("repeat clears leftovers", target.get("leftovers") == {})
+    adaptation = repeated.get("adaptation", {})
+    check("repeat returns adaptation report", bool(adaptation))
+    unavailable = adaptation.get("unavailable_prep_items", [])
+    check(
+        "repeat aggregates shared prep demand across dishes",
+        any(
+            item.get("prep_item") == "depleted garnish"
+            and item.get("required_uses") == 3
+            and item.get("available_uses") == 1
+            and item.get("consumer_dishes") == ["weekly soup", "weekly stew"]
+            for item in unavailable
+        ),
+        f"got: {unavailable}",
+    )
+    check(
+        "repeat reports missing sources for planned prep",
+        adaptation.get("missing_prep_source_essentials", {}).get("planned stock") == ["bones"],
+        f"got: {adaptation}",
+    )
+
+
 def main():
     _setup_tmp_data()
     try:
@@ -835,6 +980,9 @@ def main():
         # Online weight tuning (self-contained; runs late so it cannot perturb
         # the fridge/catalog state the earlier assertions depend on).
         test_online_weight_tuning()
+
+        # Weekly planning (self-contained plans/ state; needs a live catalog).
+        test_week_plan_lifecycle_and_repeat()
 
         # These overwrite dishes.json wholesale — keep them last.
         test_dii_session_id_traversal_rejected()

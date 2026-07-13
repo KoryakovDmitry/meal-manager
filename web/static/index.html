@@ -188,6 +188,21 @@ textarea { resize: vertical; min-height: 60px; }
 .history-item .date { font-size: 0.8rem; color: var(--text-dim); }
 .history-item .actions { display: flex; gap: 8px; }
 
+/* ─── Weekly plans ─── */
+.plan-history { display: grid; gap: 8px; margin-bottom: 16px; }
+.plan-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px; border: 1px solid var(--border); border-radius: 10px;
+  cursor: pointer; transition: border-color 0.2s, background 0.2s;
+}
+.plan-row:hover, .plan-row.active { border-color: var(--accent); background: rgba(108,92,231,0.08); }
+.plan-days { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.plan-day { padding: 12px; background: var(--bg); border-radius: 10px; min-height: 90px; }
+.plan-day h4 { margin-bottom: 8px; color: var(--accent-light); }
+.plan-meal { padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+.plan-note { margin-top: 6px; color: var(--text-dim); font-size: 0.75rem; }
+.status-pill { padding: 3px 8px; border-radius: 12px; background: rgba(108,92,231,0.16); font-size: 0.75rem; }
+
 /* ─── Modal ─── */
 .modal-bg {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -252,6 +267,7 @@ textarea { resize: vertical; min-height: 60px; }
     <button class="tab" data-tab="fridge">🥶 Холодильник</button>
     <button class="tab" data-tab="suggestions">💡 Рекомендации</button>
     <button class="tab" data-tab="shopping">🛒 Покупки</button>
+    <button class="tab" data-tab="plans">🗓 Планы</button>
     <button class="tab" data-tab="history">📜 История</button>
   </div>
 
@@ -317,6 +333,20 @@ textarea { resize: vertical; min-height: 60px; }
     </div>
   </div>
 
+  <!-- ═══ Weekly Plans ═══ -->
+  <div class="page" id="page-plans">
+    <div class="card">
+      <div class="section-title">🗓 История недельных планов</div>
+      <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:12px">
+        Read-only просмотр. План создаётся и меняется через meal_manager flow.
+      </p>
+      <div id="plans-history" class="plan-history"></div>
+    </div>
+    <div class="card" id="plan-detail-card" style="display:none">
+      <div id="plan-detail"></div>
+    </div>
+  </div>
+
   <!-- ═══ History ═══ -->
   <div class="page" id="page-history">
     <div class="card">
@@ -331,7 +361,7 @@ textarea { resize: vertical; min-height: 60px; }
 
 <script>
 const API = '';
-let CACHE = { dishes: [], fridge: [], suggestions: [], shopping: [], history: [], stats: {} };
+let CACHE = { dishes: [], fridge: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, stats: {} };
 
 // ─── API helpers ───
 async function api(path, method='GET', body=null) {
@@ -366,15 +396,16 @@ document.querySelectorAll('.tab').forEach(t => {
 // ─── Load all data ───
 async function refreshAll() {
   try {
-    const [dishes, fridge, suggestions, shopping, history, stats] = await Promise.all([
+    const [dishes, fridge, suggestions, shopping, history, plans, stats] = await Promise.all([
       api('/api/dishes'), api('/api/fridge'), api('/api/suggestions'),
-      api('/api/shopping'), api('/api/history'), api('/api/stats')
+      api('/api/shopping'), api('/api/history'), api('/api/plans'), api('/api/stats')
     ]);
     CACHE.dishes = dishes.dishes || [];
     CACHE.fridge = fridge.ingredients || [];
     CACHE.suggestions = suggestions.suggestions || [];
     CACHE.shopping = shopping.items || [];
     CACHE.history = history.history || [];
+    CACHE.plans = plans.plans || [];
     CACHE.stats = stats;
     renderAll();
   } catch (e) {
@@ -383,7 +414,7 @@ async function refreshAll() {
 }
 
 function renderAll() {
-  renderStats(); renderDishes(); renderFridge(); renderSuggestions(); renderShopping(); renderHistory();
+  renderStats(); renderDishes(); renderFridge(); renderSuggestions(); renderShopping(); renderPlans(); renderHistory();
 }
 
 // ─── Stats ───
@@ -679,6 +710,54 @@ async function buyShoppingItem(ing) {
     toast(`Добавлено в холодильник: ${ing}`);
     await refreshAll();
   } catch (e) { toast(e.message, true); }
+}
+
+// ─── Weekly plans (read-only) ───
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+}
+
+function renderPlans() {
+  const c = document.getElementById('plans-history');
+  if (CACHE.plans.length === 0) {
+    c.innerHTML = '<div class="empty">Недельных планов пока нет</div>';
+    document.getElementById('plan-detail-card').style.display = 'none';
+    return;
+  }
+  c.innerHTML = CACHE.plans.map(p => `
+    <div class="plan-row ${CACHE.selectedPlan?.week===p.week?'active':''}" onclick="loadPlan('${p.week}')">
+      <div><strong>${escapeHtml(p.week)}</strong><div style="color:var(--text-dim);font-size:0.78rem">${p.meals_count} блюд · ${p.prep_count} заготовок</div></div>
+      <span class="status-pill">${escapeHtml(p.status)}</span>
+    </div>`).join('');
+}
+
+async function loadPlan(week) {
+  try {
+    const response = await api('/api/plans/' + encodeURIComponent(week));
+    CACHE.selectedPlan = response.plan;
+    renderPlans();
+    renderPlanDetail();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderPlanDetail() {
+  const plan = CACHE.selectedPlan;
+  const card = document.getElementById('plan-detail-card');
+  if (!plan) { card.style.display = 'none'; return; }
+  const labels = {mon:'Пн',tue:'Вт',wed:'Ср',thu:'Чт',fri:'Пт',sat:'Сб',sun:'Вс'};
+  const prep = (plan.prep || []).map(x => `<span class="ingredient-tag have">${escapeHtml(x)}</span>`).join(' ');
+  const days = Object.entries(labels).map(([code, label]) => {
+    const day = plan.days?.[code] || {meals: []};
+    const meals = (day.meals || []).map(m => `<div class="plan-meal">${escapeHtml(m.dish)} · ${Number(m.portions) || 0} порц.</div>`).join('');
+    return `<div class="plan-day"><h4>${label}</h4>${meals || '<span style="color:var(--text-dim);font-size:0.8rem">свободно</span>'}${day.note ? `<div class="plan-note">${escapeHtml(day.note)}</div>` : ''}</div>`;
+  }).join('');
+  document.getElementById('plan-detail').innerHTML = `
+    <div class="section-title">${escapeHtml(plan.week)} · <span class="status-pill">${escapeHtml(plan.status)}</span></div>
+    ${prep ? `<div style="margin-bottom:12px"><strong>Заготовки:</strong> ${prep}</div>` : ''}
+    <div class="plan-days">${days}</div>`;
+  card.style.display = 'block';
 }
 
 // ─── History ───

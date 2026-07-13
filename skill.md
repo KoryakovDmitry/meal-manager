@@ -109,6 +109,25 @@ Empties the fridge completely (saves an empty list).
   - The user wants to reset the fridge inventory.
   - The user says they've emptied the fridge, moved, or wants to start from scratch.
 
+## Weekly planning tools
+
+Weekly plans are stored one file per ISO week under `data/plans/`. Days contain
+flexible meal lists; there are no breakfast/lunch/dinner slots.
+
+- `create_week_plan` — create a `draft` plan, optionally with prep references.
+- `get_week_plan` — read one plan; defaults to the current ISO week.
+- `list_week_plans` — browse plan history, newest first.
+- `add_meal_to_plan` — append a catalog dish and portion count to a day.
+- `remove_meal_from_plan` — remove one day entry by zero-based `meal_index`.
+- `set_plan_status` — advance strictly through `draft → approved → active → archived`.
+- `repeat_week_plan` — copy a past week into a new draft; reports missing
+  ingredients and skips references that no longer exist in the catalogs.
+
+Planning is conversational: gather wishes, create or repeat a draft, edit it
+with the household, and advance to `approved` only after explicit confirmation.
+Archived plans are immutable. Dish entries are references to catalog names,
+not recipe snapshots.
+
 ## Behavior directives
 
 ### Recipe onboarding

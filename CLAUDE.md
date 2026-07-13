@@ -6,7 +6,7 @@ Read `AGENTS.md` before starting — it contains additional repository-specific 
 
 ## Project Overview
 
-A meal planning and fridge inventory manager structured as a Hermes plugin. The entry point is `__init__.py:register(ctx)`, which auto-discovers the twenty tool handlers under `src/handlers/` and installs the skill. All state is persisted in JSON files under `data/`.
+A meal planning and fridge inventory manager structured as a Hermes plugin. The entry point is `__init__.py:register(ctx)`, which auto-discovers the 31 tool handlers under `src/handlers/` and installs the skill. All state is persisted in JSON files under `data/`.
 
 Python 3.12+, no external dependencies (stdlib only).
 
@@ -54,7 +54,7 @@ One module per registered tool. Each public submodule (anything not prefixed wit
 
 ### Persistence layer (`src/repositories/`)
 
-All file-backed state lives behind repository singletons defined in `src/repositories/__init__.py` (`dish_repo`, `fridge_repo`, `history_repo`, `tuning_repo`). Consumers depend on the `Protocol` types in `base.py`, not on the concrete `Json*Repository` classes — this is the seam that lets tests swap implementations without monkey-patching module-level functions.
+All file-backed state lives behind repository singletons defined in `src/repositories/__init__.py` (`dish_repo`, `fridge_repo`, `history_repo`, `tuning_repo`, `prep_repo`, `plan_repo`). Consumers depend on the `Protocol` types in `base.py`, not on the concrete `Json*Repository` classes — this is the seam that lets tests swap implementations without monkey-patching module-level functions.
 
 The data directory is injectable via `src.repositories.configure(data_dir)` — this mutates the existing singletons' `path` attributes in place so modules that already imported `dish_repo` / `fridge_repo` / `history_repo` / `tuning_repo` keep a valid reference. The default (when `configure` is never called) is `<plugin_root>/data/`.
 
@@ -81,17 +81,21 @@ The data directory is injectable via `src.repositories.configure(data_dir)` — 
 - `tuning.json` — (created lazily on the first learning event) Online-learner state for the suggestion blend: candidate grid, discounted reward/count sums (`S`/`C`), `observations`, and the `deployed_match_weight` / `deployed_time_weight`. Missing/corrupt files fall back to a fresh initialized state.
 - `sessions/` — (created lazily) Per-session DII JSON backups for crash recovery. Files are named `{session_id}.json` and auto-cleaned after 30 minutes.
 
-## Planned Extensions
+## Weekly Planning Extensions
 
-A weekly meal planning system is in the design phase. Four new entities
-(prep items, weekly plans, extended fridge with storage tags, extended dish
-with prep dependencies) and ~15 new tools are specified in:
+Phases 1–2 are implemented. Prep items live in `data/prep_items.json`; weekly
+plans use one file per ISO week under `data/plans/`. `src/plan.py` defines
+`MealEntry`, `DayPlan`, and `WeekPlan`; `JsonPlanRepository` owns plan files;
+seven auto-discovered handlers provide create/get/list/add/remove/status/repeat.
+The web UI has read-only plan history and detail views backed by GET-only plan
+endpoints. Mutations remain in plugin handlers.
 
-- **`ARCHITECTURE.md`** — full design spec (entities, data models, tools, budget rules, lifecycle)
-- **`BOARD.md`** — kanban board tracking implementation progress
+- **`ARCHITECTURE.md`** — full design spec and remaining phases
+- **`BOARD.md`** — live kanban and implementation status
 
-These are **not yet implemented**. See those files before adding any new
-handler or repository code.
+Phases 3–5 (shopping/budget, leftovers calibration, plan suggestions) remain
+planned. Keep the architecture, board, plugin manifest, skill, tests, and web
+view synchronized when implementing them.
 
 ## Key Design Decisions
 

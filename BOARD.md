@@ -24,16 +24,19 @@
 - [x] `register_cooked_meal` consumes prep items
 - [x] Tests (11 new unit tests, all 115 passing)
 
-### Phase 2: Weekly Plans
-- [ ] Plan model + `data/plans/` directory
-- [ ] Plan repository (`src/repositories/json_plan.py`)
-- [ ] `create_week_plan` handler
-- [ ] `get_week_plan` handler
-- [ ] `list_week_plans` handler
-- [ ] `add_meal_to_plan` handler
-- [ ] `remove_meal_from_plan` handler
-- [ ] `set_plan_status` handler
-- [ ] `repeat_week_plan` handler
+### Phase 2: Weekly Plans ✅
+- [x] Plan model + `data/plans/` directory
+- [x] Plan repository (`src/repositories/json_plan.py`)
+- [x] `create_week_plan` handler
+- [x] `get_week_plan` handler
+- [x] `list_week_plans` handler
+- [x] `add_meal_to_plan` handler
+- [x] `remove_meal_from_plan` handler
+- [x] `set_plan_status` handler
+- [x] `repeat_week_plan` handler
+- [x] Read-only weekly-plan history and detail view in web UI
+- [x] Model and end-to-end lifecycle tests (133 unit, 136 integration)
+- [x] Focused web validation/GET-only/XSS smoke tests
 
 ### Phase 3: Shopping & Budget
 - [ ] `generate_shopping_list` handler
@@ -57,4 +60,4 @@
 - [ ] Suggestion engine integration for plan generation
 - [ ] Plate ratio checker (Harvard Healthy Eating Plate)
 - [ ] Seasonality auto-hints
-- [ ] Web UI dashboard for plans
+- [ ] Web UI editing controls for plans (read-only view implemented in Phase 2)

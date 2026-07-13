@@ -1,8 +1,8 @@
 # Meal Manager — Architecture: Planned Extensions
 
-> Status: **DESIGN PHASE** — not yet implemented. This document is the source
-> of truth for the new entities, data models, and tool surface agreed during
-> the July 2026 architecture session with Dima & Iliana.
+> Status: **PHASES 1–2 IMPLEMENTED** — prep items and weekly plans are live.
+> Phases 3–5 remain planned. This document is the source of truth for the
+> agreed entities, data models, and tool surface.
 
 ---
 
@@ -39,10 +39,12 @@ intermediate ingredient that other dishes depend on.
 ```
 
 **Lifecycle:**
-1. `make_prep("hybrid-meatballs")` — consumes source ingredients from
-   fridge, creates the prep-item in the freezer zone.
-2. When a dish with `prep_depends: ["hybrid-meatballs"]` is cooked,
-   the prep-item is consumed (qty decremented).
+1. `add_prep_item(...)` defines the prep item; inventory remains unchanged and
+   `remaining` starts at 0.
+2. `make_prep("hybrid-meatballs")` consumes essential source ingredients from
+   the fridge and sets `remaining` to the configured yield.
+3. When a dish with `prep_depends: ["hybrid-meatballs"]` is cooked,
+   the prep-item quantity is decremented.
 
 **File:** `data/prep_items.json`
 
@@ -133,9 +135,10 @@ Dishes can declare which prep-items they require:
 
 | Tool | Purpose |
 |------|---------|
-| `add_prep_item` | Create a prep-item (consumes ingredients from fridge) |
+| `add_prep_item` | Define a prep-item (does not consume inventory) |
 | `list_prep_items` | Show all prep-items with remaining quantities |
-| `delete_prep_item` | Remove a prep-item |
+| `delete_prep_item` | Remove a prep-item definition |
+| `make_prep` | Produce a batch, consuming source ingredients |
 
 ### Weekly Plans
 

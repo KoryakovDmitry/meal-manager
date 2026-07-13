@@ -2,7 +2,7 @@
 
 An intelligent meal planning and fridge inventory management system structured as an official Hermes plugin. It helps users decide what to cook for dinner and what to buy at the grocery store by analyzing their current fridge contents, recipe catalog, and cooking history.
 
-An AI assistant invokes the twenty tool handlers registered via `__init__.py:register(ctx)` to deliver personalized dinner suggestions, generate optimized shopping lists, manage fridge inventory, manage the recipe catalog, track cooked meals, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
+An AI assistant invokes the 31 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate shopping lists, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
 
 ---
 
@@ -133,7 +133,7 @@ Reply naturally — *"yes"*, *"skip"*, *"remove X"*, *"also add Y"*, or *"done"*
 
 ### As a Hermes Plugin
 
-The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers twenty tools:
+The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 31 tools:
 
 | Tool | Purpose |
 |---|---|
@@ -157,6 +157,17 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `dii_clear_all` | Clear all selected ingredients from the session |
 | `finalize_ingredient_session` | Commit session results to fridge and/or dish catalog |
 | `dii_get_state` | Get current DII session state without modifying it |
+| `add_prep_item` | Define a semi-finished prep item |
+| `list_prep_items` | List prep items and remaining quantities |
+| `delete_prep_item` | Remove a prep-item definition |
+| `make_prep` | Produce a prep batch and consume source ingredients |
+| `create_week_plan` | Create an empty draft for an ISO week |
+| `get_week_plan` | Read a weekly plan (current week by default) |
+| `list_week_plans` | Browse weekly-plan history |
+| `add_meal_to_plan` | Add a dish reference and portions to a day |
+| `remove_meal_from_plan` | Remove an indexed meal from a day |
+| `set_plan_status` | Advance draft → approved → active → archived |
+| `repeat_week_plan` | Copy a past week into a new adaptable draft |
 
 All handlers follow the signature `def handler(args: dict, **kwargs) -> str` and return JSON strings.
 
@@ -188,9 +199,9 @@ Swap `get_meal_suggestions` for any other module under `src/handlers/`, for exam
 python3 test_integration.py
 ```
 
-This script creates a throw-away temp directory, points the repositories and DII session store at it via `configure()`, seeds its own fixtures, and exercises all twenty tools end-to-end. The real `data/` files are never touched — the temp directory is deleted on teardown.
+This script creates a throw-away temp directory, points the repositories and DII session store at it via `configure()`, seeds its own fixtures, and exercises the tool flows end-to-end, including weekly-plan lifecycle and repetition. The real `data/` files are never touched — the temp directory is deleted on teardown.
 
-For the fastest feedback on pure domain logic, run `python3 test_unit.py`. It covers the dataclass, scoring, shopping, weight-tuning, and ingredient-normalization helpers without touching `data/`.
+For the fastest feedback on pure domain logic, run `python3 test_unit.py`. It covers the dataclass, scoring, shopping, weight-tuning, and ingredient-normalization helpers without touching `data/`. Run `python3 web/test_web_plans.py` for focused validation of the read-only weekly-plan API and frontend escaping hooks.
 
 ---
 
@@ -201,6 +212,8 @@ meal-manager/
 ├── src/
 │   ├── __init__.py            # Package marker + atomic_write_json helper
 │   ├── dish.py                # Dish dataclass — recipe model (essential/optional ingredients)
+│   ├── prep_item.py           # Semi-finished prep-item domain model
+│   ├── plan.py                # Weekly plan, day, and meal-reference models
 │   ├── suggestion.py          # Scoring engine — ranks dishes by availability + recency
 │   ├── shopping.py            # Shopping suggestions — single-ingredient unlock logic
 │   ├── tuning.py              # Online learner — self-adjusts the availability/recency blend
@@ -233,7 +246,9 @@ meal-manager/
 │   │   ├── json_dish.py       # Recipe catalog persistence (data/dishes.json)
 │   │   ├── json_fridge.py     # Fridge inventory persistence (data/fridge.json)
 │   │   ├── json_history.py    # Cooking history persistence (data/history.json)
-│   │   └── json_tuning.py     # Online-learner state persistence (data/tuning.json)
+│   │   ├── json_tuning.py     # Online-learner state persistence (data/tuning.json)
+│   │   ├── json_prep_item.py  # Prep-item persistence (data/prep_items.json)
+│   │   └── json_plan.py       # One-file-per-week persistence (data/plans/)
 │   └── dii/                   # Dynamic Ingredient Interface
 │       ├── __init__.py        # Public API + configure(session_dir)
 │       ├── session.py         # DIISession dataclass + serialization
@@ -246,7 +261,10 @@ meal-manager/
 │   ├── fridge.json            # Current fridge inventory (list of ingredients)
 │   ├── history.json           # Cooking history (dish name → last-cooked ISO date)
 │   ├── tuning.json            # (created lazily) Online-learner state for the suggestion blend
+│   ├── prep_items.json        # (created lazily) Prep-item definitions and remaining quantities
+│   ├── plans/                 # (created lazily) One JSON file per ISO week
 │   └── sessions/              # (created lazily) DII session backups for crash recovery
+├── web/                       # FastAPI + SPA; includes read-only weekly-plan views
 ├── plugin.yaml                # Hermes plugin manifest (name + provided tools)
 ├── __init__.py                # Plugin entry point — register(ctx, *, data_dir=None)
 ├── test_unit.py               # Unit tests for domain logic modules

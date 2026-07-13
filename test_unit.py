@@ -653,6 +653,79 @@ def test_dish_prep_depends_backward_compat():
     check("legacy dish to_dict has no prep_depends key", "prep_depends" not in d.to_dict())
 
 
+# ── Weekly plan model tests ──
+
+_plan_mod = importlib.import_module(".src.plan", _PLUGIN_DIR.name)
+MealEntry = _plan_mod.MealEntry
+DayPlan = _plan_mod.DayPlan
+WeekPlan = _plan_mod.WeekPlan
+
+
+def test_meal_entry_validation():
+    meal = MealEntry(dish="  Soup  ", portions=4)
+    check("meal dish normalized", meal.dish == "soup")
+    check("meal portions retained", meal.portions == 4)
+    for bad in (0, -1, True, 1.5):
+        try:
+            MealEntry(dish="soup", portions=bad)
+            check(f"rejects invalid portions {bad!r}", False)
+        except ValueError:
+            check(f"rejects invalid portions {bad!r}", True)
+    try:
+        MealEntry(dish="   ", portions=1)
+        check("rejects blank dish reference", False)
+    except ValueError:
+        check("rejects blank dish reference", True)
+
+
+def test_week_plan_defaults_all_days():
+    plan = WeekPlan(week_id="2026-W30")
+    check("week plan starts draft", plan.status == "draft")
+    check("week plan has seven days", set(plan.days) == set(_plan_mod.DAYS))
+    check("week plan days start empty", all(not day.meals for day in plan.days.values()))
+
+
+def test_week_plan_roundtrip():
+    plan = WeekPlan(
+        week_id="2026-W30",
+        prep=[" Hybrid Meatballs "],
+        days={"mon": DayPlan(meals=[MealEntry("Soup", 4)], note="leftovers")},
+        leftovers={"soup": {"remaining": 2}},
+    )
+    restored = WeekPlan.from_dict(plan.to_dict())
+    check("plan roundtrip week", restored.week_id == "2026-W30")
+    check("plan roundtrip meal", restored.days["mon"].meals[0].dish == "soup")
+    check("plan roundtrip note", restored.days["mon"].note == "leftovers")
+    check("plan prep normalized", restored.prep == ["hybrid meatballs"])
+    check("plan leftovers retained", restored.leftovers["soup"]["remaining"] == 2)
+
+
+def test_week_plan_invalid_status():
+    try:
+        WeekPlan(week_id="2026-W30", status="finished")
+        check("invalid plan status rejected", False)
+    except ValueError:
+        check("invalid plan status rejected", True)
+
+
+def test_week_plan_rejects_noncanonical_days():
+    partial = WeekPlan(week_id="2026-W30").to_dict()
+    partial["days"].pop("sun")
+    try:
+        WeekPlan.from_dict(partial)
+        check("partial persisted day map rejected", False)
+    except ValueError:
+        check("partial persisted day map rejected", True)
+
+    unknown = WeekPlan(week_id="2026-W30").to_dict()
+    unknown["days"]["holiday"] = {"meals": []}
+    try:
+        WeekPlan.from_dict(unknown)
+        check("unknown persisted day rejected", False)
+    except ValueError:
+        check("unknown persisted day rejected", True)
+
+
 def main():
     test_dish_normalize_ingredient()
     test_dish_normalize_name()
@@ -718,6 +791,14 @@ def main():
     test_dish_prep_depends_serialized()
     test_dish_prep_depends_from_dict()
     test_dish_prep_depends_backward_compat()
+
+    # ── Weekly plan model ──
+    print("\n-- Weekly plan model --")
+    test_meal_entry_validation()
+    test_week_plan_defaults_all_days()
+    test_week_plan_roundtrip()
+    test_week_plan_invalid_status()
+    test_week_plan_rejects_noncanonical_days()
 
     print(f"\n{'='*40}")
     print(f"  {_passed} passed, {_failed} failed")

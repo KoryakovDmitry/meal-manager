@@ -8,9 +8,11 @@ without coupling them to a specific base class.
 """
 
 import threading
+from pathlib import Path
 from typing import Protocol
 
 from ..dish import Dish
+from ..plan import WeekPlan
 
 
 class DishRepository(Protocol):
@@ -59,6 +61,18 @@ class PrepItemRepository(Protocol):
 
     def load(self) -> list: ...
     def save(self, items: list) -> None: ...
+
+
+class PlanRepository(Protocol):
+    """Persistence boundary for one-file-per-week meal plans."""
+
+    lock: threading.Lock
+    plans_dir: Path
+
+    def load(self, week_id: str) -> WeekPlan | None: ...
+    def save(self, plan: WeekPlan) -> None: ...
+    def delete(self, week_id: str) -> bool: ...
+    def list_weeks(self) -> list[dict]: ...
 
 
 class TuningRepository(Protocol):

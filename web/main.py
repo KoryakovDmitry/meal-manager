@@ -6,8 +6,9 @@ ensuring full synchronization between the Telegram bot, agent, and web UI.
 """
 
 import json
+import re
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from collections import Counter
 
@@ -26,6 +27,10 @@ DISHES_PATH = DATA_DIR / "dishes.json"
 FRIDGE_PATH = DATA_DIR / "fridge.json"
 HISTORY_PATH = DATA_DIR / "history.json"
 TUNING_PATH = DATA_DIR / "tuning.json"
+PLANS_DIR = DATA_DIR / "plans"
+
+_WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
+_PLAN_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 
 RECENCY_COOLDOWN_DAYS = 2
 
@@ -76,6 +81,88 @@ def save_history(entries):
 
 def load_tuning():
     return _read_json(TUNING_PATH, {})
+
+def _valid_iso_week(week_id: str) -> bool:
+    match = _WEEK_ID_RE.fullmatch(week_id)
+    if not match:
+        return False
+    try:
+        date.fromisocalendar(int(week_id[:4]), int(week_id[-2:]), 1)
+    except ValueError:
+        return False
+    return True
+
+def _valid_plan_payload(plan, expected_week: str) -> bool:
+    if not isinstance(plan, dict) or plan.get("week") != expected_week:
+        return False
+    status = plan.get("status", "draft")
+    if not isinstance(status, str) or status not in {"draft", "approved", "active", "archived"}:
+        return False
+    prep = plan.get("prep", [])
+    days = plan.get("days", {})
+    leftovers = plan.get("leftovers", {})
+    if not isinstance(prep, list) or not all(isinstance(item, str) for item in prep):
+        return False
+    if (
+        not isinstance(days, dict)
+        or set(days) != _PLAN_DAYS
+        or not isinstance(leftovers, dict)
+    ):
+        return False
+    for day in days.values():
+        if not isinstance(day, dict):
+            return False
+        meals = day.get("meals", [])
+        if not isinstance(meals, list) or not isinstance(day.get("note", ""), str):
+            return False
+        for meal in meals:
+            if (
+                not isinstance(meal, dict)
+                or not isinstance(meal.get("dish"), str)
+                or not meal["dish"].strip()
+            ):
+                return False
+            portions = meal.get("portions", 2)
+            if not isinstance(portions, int) or isinstance(portions, bool) or portions < 1:
+                return False
+    return True
+
+def _read_valid_week_plan(week_id: str):
+    if not _valid_iso_week(week_id):
+        return None
+    plan = _read_json(PLANS_DIR / f"{week_id}.json", None)
+    return plan if _valid_plan_payload(plan, week_id) else None
+
+def load_week_plan(week_id: str):
+    if not _valid_iso_week(week_id):
+        raise HTTPException(400, "Invalid ISO week; expected a real YYYY-Www week")
+    plan = _read_valid_week_plan(week_id)
+    if plan is None:
+        raise HTTPException(404, f"Plan '{week_id}' not found or malformed")
+    return plan
+
+def list_week_plans():
+    if not PLANS_DIR.exists():
+        return []
+    result = []
+    for path in sorted(PLANS_DIR.glob("*.json"), reverse=True):
+        if not _valid_iso_week(path.stem):
+            continue
+        plan = _read_valid_week_plan(path.stem)
+        if plan is None:
+            continue
+        days = plan["days"]
+        meal_count = sum(
+            len(days[day_code].get("meals", []))
+            for day_code in _PLAN_DAYS
+        )
+        result.append({
+            "week": path.stem,
+            "status": plan.get("status", "draft"),
+            "meals_count": meal_count,
+            "prep_count": len(plan.get("prep", [])),
+        })
+    return result
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 def _normalize(name: str) -> str:
@@ -311,6 +398,15 @@ def delete_history_entry(entry_index: int):
         history.pop(entry_index)
         save_history(history)
     return {"status": "ok"}
+
+# ─── API: Weekly plans (read-only view) ─────────────────────────────────
+@app.get("/api/plans")
+def get_week_plans():
+    return {"plans": list_week_plans()}
+
+@app.get("/api/plans/{week_id}")
+def get_week_plan_view(week_id: str):
+    return {"plan": load_week_plan(week_id)}
 
 # ─── API: Stats ─────────────────────────────────────────────────────────
 @app.get("/api/stats")
