@@ -6,6 +6,7 @@ provides_tools:
   - get_quick_shopping_list
   - get_tuning_state
   - update_fridge_inventory
+  - rename_fridge_item
   - register_cooked_meal
   - delete_history_entry
   - list_fridge

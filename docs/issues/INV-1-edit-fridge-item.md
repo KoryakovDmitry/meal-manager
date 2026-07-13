@@ -1,6 +1,6 @@
 # INV-1 — Edit/rename an item in kitchen inventory
 
-**Status:** 📐 Ready
+**Status:** 🔨 Doing
 **Requested by:** Dmitrii Koriakov
 **Source:** Meal Planning Development, after successful live inventory intake for week 2026-W29
 

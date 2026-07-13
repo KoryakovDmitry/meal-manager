@@ -535,6 +535,10 @@ class FridgeUpdate(BaseModel):
 class FridgeAddRemove(BaseModel):
     ingredient: str
 
+class FridgeRename(BaseModel):
+    old_ingredient: str
+    new_ingredient: str
+
 class CookedMeal(BaseModel):
     dish: str
     date: str | None = None  # ISO date, defaults to today
@@ -614,6 +618,35 @@ def remove_from_fridge(payload: FridgeAddRemove):
         fridge = [i for i in fridge if i != ing]
         save_fridge(fridge)
     return {"ingredients": fridge}
+
+@app.put("/api/fridge/item")
+def rename_fridge_item(payload: FridgeRename):
+    old_name = _normalize(payload.old_ingredient)
+    new_name = _normalize(payload.new_ingredient)
+    if not old_name or not new_name:
+        raise HTTPException(400, "Ingredient names must not be blank")
+    if len(old_name) > 200 or len(new_name) > 200:
+        raise HTTPException(400, "Ingredient names must be at most 200 characters")
+
+    with _lock:
+        fridge = load_fridge()
+        if old_name not in fridge:
+            raise HTTPException(404, f"Ingredient '{old_name}' not found")
+        if old_name == new_name:
+            return {
+                "ingredients": fridge,
+                "renamed": {"old_ingredient": old_name, "new_ingredient": new_name},
+                "changed": False,
+            }
+        if new_name in fridge:
+            raise HTTPException(409, f"Ingredient '{new_name}' already exists")
+        fridge = [new_name if item == old_name else item for item in fridge]
+        save_fridge(fridge)
+    return {
+        "ingredients": fridge,
+        "renamed": {"old_ingredient": old_name, "new_ingredient": new_name},
+        "changed": True,
+    }
 
 @app.delete("/api/fridge")
 def clear_fridge():

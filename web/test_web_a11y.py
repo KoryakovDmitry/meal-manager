@@ -114,6 +114,7 @@ setTimeout(async () => {
   const attack = `<img src=x onerror="console.error('QA_XSS_EXECUTED')">`;
   CACHE.dishes = [
     {name: 'суп', ingredients: {'лук': true, 'укроп': false}},
+    {name: 'лук', ingredients: {'лук': true}},
     {name: attack, ingredients: {[attack]: true}}
   ];
   CACHE.fridge = ['лук', attack];
@@ -136,6 +137,36 @@ setTimeout(async () => {
   renderShopping();
   renderHistory();
   renderPlans();
+
+  document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
+  document.getElementById('page-fridge').classList.add('active');
+  const fridgeEdit = document.querySelector('#fridge-container [data-action="edit"]');
+  fridgeEdit.focus();
+  fridgeEdit.click();
+  const fridgeInput = document.getElementById('fridge-edit-input');
+  const fridgeEditFocus = document.activeElement === fridgeInput;
+  fridgeInput.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  const fridgeCancelRestore = document.activeElement ===
+    document.querySelector('#fridge-container [data-action="edit"]');
+
+  let resolveRename;
+  api = async (path) => {
+    if (path === '/api/fridge/item') {
+      return new Promise(resolve => { resolveRename = resolve; });
+    }
+    return {};
+  };
+  refreshAll = async () => {};
+  document.querySelector('#fridge-container [data-action="edit"]').click();
+  document.getElementById('fridge-edit-input').value = 'лук новый';
+  const pendingRename = saveFridgeItemEdit();
+  cancelFridgeItemEdit();
+  document.querySelectorAll('#fridge-container [data-action="edit"]')[1]?.click();
+  const inFlightEditLocked = editingFridgeItem === 'лук';
+  resolveRename({ingredients: ['лук новый', attack]});
+  await pendingRename;
+  const fridgeSaveRestore = document.activeElement ===
+    document.querySelector('#fridge-container [data-action="edit"][data-value="лук новый"]');
 
   const dishesPage = document.getElementById('page-dishes');
   document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
@@ -199,7 +230,7 @@ setTimeout(async () => {
   opener.focus();
   opener.click();
   dialog = document.querySelector('#modal-container [role="dialog"]');
-  const controls = [...document.querySelectorAll('.icon-action, .fridge-item .remove, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
+  const controls = [...document.querySelectorAll('.icon-action, .fridge-item .edit, .fridge-item .remove, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
   const controlDetails = controls.map(control => {
     const page = control.closest('.page');
     const previousDisplay = page?.style.display || '';
@@ -222,6 +253,8 @@ setTimeout(async () => {
     document.getElementById('sidebar-backdrop').tabIndex,
     xssSafe, planNative, modalSemantics, modalReverseOk, modalForwardOk,
     cancelRestore, backdropRestore, escapeRestore, saveRestore, stateOpacityOk,
+    fridgeEditFocus, fridgeCancelRestore,
+    inFlightEditLocked, fridgeSaveRestore,
     window.__qaErrors.length
   ].join(';'));
 }, 500);
@@ -240,7 +273,7 @@ setTimeout(() => {
   showEditDishModal('суп');
   const toggle = document.getElementById('sidebar-toggle');
   const rect = toggle.getBoundingClientRect();
-  const compact = [...document.querySelectorAll('.icon-action, .fridge-item .remove, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
+  const compact = [...document.querySelectorAll('.icon-action, .fridge-item .edit, .fridge-item .remove, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
   const compactOk = compact.every(control => {
     const page = control.closest('.page');
     const previousDisplay = page?.style.display || '';
@@ -297,7 +330,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            "true;true;true;true;true;true;true;true;true;true;0"
+            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"

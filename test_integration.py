@@ -210,6 +210,18 @@ def test_registered_update_fridge_schema_exposes_required_arguments():
         "registered schema requires action and ingredients",
         set(parameters.get("required", [])) == {"action", "ingredients"},
     )
+    rename_parameters = ctx.tools["rename_fridge_item"].get("parameters", {})
+    check(
+        "registered rename schema requires both names",
+        set(rename_parameters.get("required", []))
+        == {"old_ingredient", "new_ingredient"}
+        and set(rename_parameters.get("properties", {}))
+        >= {"old_ingredient", "new_ingredient"}
+        and all(
+            rename_parameters["properties"][name].get("maxLength") == 200
+            for name in ("old_ingredient", "new_ingredient")
+        ),
+    )
     check(
         "registration covers exactly the auto-discovered handlers",
         set(ctx.tools) == set(discovered),
@@ -266,6 +278,71 @@ def test_update_fridge_remove():
 
     fridge = parse(list_fridge({}))
     check("huevos removed", "huevos" not in fridge)
+
+
+def test_rename_fridge_item_success():
+    print("\n-- rename_fridge_item (success) --")
+    try:
+        rename = _load_handler("rename_fridge_item")
+    except ModuleNotFoundError:
+        check("rename handler exists", False, "src.handlers.rename_fridge_item is missing")
+        return
+
+    before = parse(list_fridge({}))
+    result = parse(rename({
+        "old_ingredient": "  POLLO  ",
+        "new_ingredient": "Muslos de pollo",
+    }))
+    after = parse(list_fridge({}))
+
+    check("rename succeeds", isinstance(result, str) and "renamed" in result.lower())
+    check("old normalized name disappears", "pollo" not in after)
+    check("new normalized name appears once", after.count("muslos de pollo") == 1)
+    check("unrelated inventory order is preserved", [x for x in after if x != "muslos de pollo"] == [x for x in before if x != "pollo"])
+
+
+def test_rename_fridge_item_rejects_destructive_edges():
+    print("\n-- rename_fridge_item (non-destructive edges) --")
+    rename = _load_handler("rename_fridge_item")
+    baseline = parse(list_fridge({}))
+
+    collision = parse(rename({
+        "old_ingredient": "muslos de pollo",
+        "new_ingredient": "arroz",
+    }))
+    check("duplicate target is rejected", isinstance(collision, dict) and "already exists" in collision.get("error", ""))
+    check("collision leaves inventory unchanged", parse(list_fridge({})) == baseline)
+
+    missing = parse(rename({
+        "old_ingredient": "missing ingredient",
+        "new_ingredient": "replacement",
+    }))
+    check("missing source is rejected", isinstance(missing, dict) and "not found" in missing.get("error", ""))
+    check("missing source leaves inventory unchanged", parse(list_fridge({})) == baseline)
+
+    same = parse(rename({
+        "old_ingredient": " MUSLOS DE POLLO ",
+        "new_ingredient": "muslos de pollo",
+    }))
+    check("normalized same-name rename is explicit no-op", isinstance(same, str) and "no changes" in same.lower())
+    check("same-name no-op leaves inventory unchanged", parse(list_fridge({})) == baseline)
+
+    for payload, expected_error in (
+        ({"old_ingredient": " ", "new_ingredient": "replacement"}, "cannot be empty"),
+        ({"old_ingredient": "muslos de pollo", "new_ingredient": "x" * 201}, "too long"),
+    ):
+        invalid = parse(rename(payload))
+        check(
+            f"invalid rename rejected: {expected_error}",
+            isinstance(invalid, dict) and expected_error in invalid.get("error", ""),
+        )
+        check("invalid rename leaves inventory unchanged", parse(list_fridge({})) == baseline)
+
+    restored = parse(rename({
+        "old_ingredient": "muslos de pollo",
+        "new_ingredient": "pollo",
+    }))
+    check("test fixture name restored", isinstance(restored, str) and "renamed" in restored.lower())
 
 
 def test_get_meal_suggestions():
@@ -1042,6 +1119,8 @@ def main():
         test_update_fridge_add()
         test_update_fridge_add_duplicate()
         test_update_fridge_remove()
+        test_rename_fridge_item_success()
+        test_rename_fridge_item_rejects_destructive_edges()
         test_get_meal_suggestions()
         test_get_quick_shopping_list()
         test_register_cooked_meal()

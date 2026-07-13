@@ -306,6 +306,37 @@ def main():
         )
         try:
             stats = web.get_stats()
+            try:
+                rename_payload = web.FridgeRename(
+                    old_ingredient=" БАНАН ",
+                    new_ingredient="Жёлтый банан",
+                )
+                renamed = web.rename_fridge_item(rename_payload)
+            except AttributeError as exc:
+                raise AssertionError("web fridge rename API is missing") from exc
+            assert renamed["renamed"] == {
+                "old_ingredient": "банан",
+                "new_ingredient": "жёлтый банан",
+            }
+            assert web.load_fridge() == ["лук", "морковь", "жёлтый банан"]
+
+            no_op = web.rename_fridge_item(web.FridgeRename(
+                old_ingredient=" ЖЁЛТЫЙ БАНАН ",
+                new_ingredient="жёлтый банан",
+            ))
+            assert no_op["changed"] is False
+            baseline_fridge = web.load_fridge()
+            for payload, expected_status in (
+                (web.FridgeRename(old_ingredient="жёлтый банан", new_ingredient="лук"), 409),
+                (web.FridgeRename(old_ingredient="нет такого", new_ingredient="замена"), 404),
+                (web.FridgeRename(old_ingredient="жёлтый банан", new_ingredient="   "), 400),
+            ):
+                try:
+                    web.rename_fridge_item(payload)
+                    raise AssertionError(f"rename edge unexpectedly succeeded: {payload}")
+                except HTTPException as exc:
+                    assert exc.status_code == expected_status
+                assert web.load_fridge() == baseline_fridge
         finally:
             web.DISHES_PATH, web.FRIDGE_PATH, web.HISTORY_PATH = original_paths
         assert stats["fridge_utility"] == {"лук": 2, "морковь": 1, "банан": 0}
@@ -354,6 +385,15 @@ def main():
     assert 'data-action="edit" data-value="${suggestionName}" aria-label="Изменить рецепт ${suggestionName}"' in html
     assert 'aria-label="Удалить запись истории ${dishName}"' in html
     assert 'aria-label="Удалить продукт ${safeItem}"' in html
+    assert 'aria-label="Редактировать название продукта ${safeItem}"' in html
+    assert 'data-action="edit" data-value="${safeItem}"' in html
+    assert "function startFridgeItemEdit" in html
+    assert "function saveFridgeItemEdit" in html
+    assert "function cancelFridgeItemEdit" in html
+    assert "'/api/fridge/item', 'PUT'" in html
+    assert 'class="fridge-edit-input"' in html
+    assert 'data-edit-action="save"' in html
+    assert 'data-edit-action="cancel"' in html
     assert 'aria-label="Удалить ингредиент ${safeName}"' in html
     assert "bindDataActions" in html
     unsafe_inline_data = re.compile(

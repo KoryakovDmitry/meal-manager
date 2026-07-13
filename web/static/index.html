@@ -225,6 +225,14 @@ body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
   cursor: pointer; color: var(--accent); font-weight: bold; font-size: 1.1rem;
   border: none; background: none; padding: 0; line-height: 1;
 }
+.fridge-item .edit {
+  cursor: pointer; color: var(--text-muted); border: none; background: none;
+  padding: 0; line-height: 1; font-size: 1rem;
+}
+.fridge-item.editing { flex: 1 1 420px; max-width: 100%; }
+.fridge-edit-input { min-width: 0; flex: 1 1 240px; }
+.fridge-edit-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.fridge-edit-actions .btn { min-width: 44px; min-height: 44px; }
 
 /* ─── Forms ─── */
 .form-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -263,6 +271,7 @@ textarea { resize: vertical; min-height: 60px; }
   background: none; border: none; color: var(--accent); cursor: pointer; font-size: 1.1rem;
 }
 .fridge-item .remove,
+.fridge-item .edit,
 .ing-editor-row .toggle-ess,
 .ing-editor-row .del-ing { min-width: 44px; min-height: 44px; display: inline-grid; place-items: center; flex: 0 0 auto; }
 .sr-only {
@@ -539,6 +548,8 @@ textarea { resize: vertical; min-height: 60px; }
 <script>
 const API = '';
 let CACHE = { dishes: [], fridge: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, stats: {} };
+let editingFridgeItem = null;
+let fridgeEditSaving = false;
 
 // ─── API helpers ───
 async function api(path, method='GET', body=null) {
@@ -1003,13 +1014,86 @@ function renderFridge() {
   c.innerHTML = CACHE.fridge.map(item => {
     const uses = utility[item] || 0;
     const safeItem = escapeHtml(item);
+    if (editingFridgeItem === item) {
+      return `<div class="fridge-item editing ${uses===0?'unused':''}" data-editing-item="${safeItem}">
+        <label class="sr-only" for="fridge-edit-input">Новое название продукта ${safeItem}</label>
+        <input class="fridge-edit-input" id="fridge-edit-input" type="text" value="${safeItem}" maxlength="200">
+        <span class="fridge-edit-actions">
+          <button class="btn btn-primary btn-sm" data-edit-action="save" aria-label="Сохранить новое название продукта ${safeItem}">✓</button>
+          <button class="btn btn-sm" data-edit-action="cancel" aria-label="Отменить редактирование продукта ${safeItem}">Отмена</button>
+        </span>
+      </div>`;
+    }
     return `<div class="fridge-item ${uses===0?'unused':''}">
       <span>${safeItem}</span>
       ${uses > 0 ? `<span class="uses">${Number(uses) || 0} рец.</span>` : '<span class="uses">—</span>'}
+      <button class="edit" data-action="edit" data-value="${safeItem}" aria-label="Редактировать название продукта ${safeItem}" title="Редактировать название продукта ${safeItem}">✎</button>
       <button class="remove" data-action="remove" data-value="${safeItem}" aria-label="Удалить продукт ${safeItem}" title="Удалить продукт ${safeItem}">✕</button>
     </div>`;
   }).join('');
-  bindDataActions(c, {remove: removeFridgeItem});
+  bindDataActions(c, {edit: startFridgeItemEdit, remove: removeFridgeItem});
+  const input = c.querySelector('.fridge-edit-input');
+  if (input) {
+    input.focus();
+    input.select();
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') saveFridgeItemEdit();
+      if (event.key === 'Escape') cancelFridgeItemEdit();
+    });
+    c.querySelector('[data-edit-action="save"]')?.addEventListener('click', saveFridgeItemEdit);
+    c.querySelector('[data-edit-action="cancel"]')?.addEventListener('click', cancelFridgeItemEdit);
+  }
+}
+
+function startFridgeItemEdit(item, control) {
+  if (fridgeEditSaving) return;
+  editingFridgeItem = item;
+  renderFridge();
+}
+
+function cancelFridgeItemEdit() {
+  if (fridgeEditSaving) return;
+  const editedItem = editingFridgeItem;
+  editingFridgeItem = null;
+  renderFridge();
+  document.querySelector(`#fridge-container [data-action="edit"][data-value="${CSS.escape(editedItem || '')}"]`)?.focus();
+}
+
+async function saveFridgeItemEdit() {
+  if (fridgeEditSaving || !editingFridgeItem) return;
+  const input = document.getElementById('fridge-edit-input');
+  const newName = input?.value.trim() || '';
+  if (!newName) {
+    toast('Название продукта не может быть пустым', true);
+    input?.focus();
+    return;
+  }
+  const sourceItem = editingFridgeItem;
+  fridgeEditSaving = true;
+  input.disabled = true;
+  input.closest('.fridge-item')?.querySelectorAll('button').forEach(button => {
+    button.disabled = true;
+  });
+  try {
+    const result = await api('/api/fridge/item', 'PUT', {
+      old_ingredient: sourceItem,
+      new_ingredient: newName,
+    });
+    if (Array.isArray(result.ingredients)) CACHE.fridge = result.ingredients;
+    editingFridgeItem = null;
+    renderFridge();
+    await refreshAll();
+    document.querySelector(`#fridge-container [data-action="edit"][data-value="${CSS.escape(newName.toLowerCase())}"]`)?.focus();
+  } catch (e) {
+    toast(e.message, true);
+    input.disabled = false;
+    input.closest('.fridge-item')?.querySelectorAll('button').forEach(button => {
+      button.disabled = false;
+    });
+    input.focus();
+  } finally {
+    fridgeEditSaving = false;
+  }
 }
 
 async function addFridgeItem() {

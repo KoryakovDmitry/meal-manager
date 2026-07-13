@@ -29,7 +29,13 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
-Активных промежуточных issues нет.
+### INV-1 — Edit/rename kitchen inventory item 🔨
+
+**Цель.** Добавить native `rename_fridge_item(old_ingredient, new_ingredient)` и accessible inline rename в web UI с одинаковыми normalization/collision/no-op semantics.
+
+**Статус.** TDD-реализация native + web vertical slice начата.
+
+Подробный ticket: [`docs/issues/INV-1-edit-fridge-item.md`](docs/issues/INV-1-edit-fridge-item.md).
 
 ## 📐 READY INTERMEDIATE ISSUES
 
@@ -42,16 +48,6 @@
 **Ключевая граница.** Phase 1 хранит один slot на normalized product name и не моделирует отдельные партии. Quantities сохраняются и показываются, но пока не доказывают количественную достаточность рецепта.
 
 Подробный ticket: [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md).
-
-### INV-1 — Edit/rename kitchen inventory item
-
-**Проблема.** Обычную позицию кухонного запаса можно добавить или удалить, но нельзя атомарно переименовать. В web UI у каждого chip есть только `✕`, поэтому исправление опечатки, бренда или варианта продукта требует delete + add.
-
-**Результат.** Добавить native `rename_fridge_item(old_ingredient, new_ingredient)` для агента и доступный inline rename flow в личном web UI Димы. Оба пути должны иметь одинаковые normalization/collision/no-op semantics, сохранять XSS-safe rendering и обновлять availability-derived views.
-
-**Граница.** INV-1 редактирует только название позиции. Количество (`2 кг`), число пачек, storage zones и metadata проектируются отдельно в INV-2; rename flow должен переиспользовать его structured mutation, если INV-2 реализуется первым.
-
-Подробный ticket: [`docs/issues/INV-1-edit-fridge-item.md`](docs/issues/INV-1-edit-fridge-item.md).
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
 

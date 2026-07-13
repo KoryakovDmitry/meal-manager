@@ -42,6 +42,10 @@ Adds or removes ingredients from the fridge. Accepts an action ("add" or "remove
   - The user says an ingredient has run out or been used up -> action "remove".
   - The user lists what they have in the fridge and wants to update it.
 
+### `rename_fridge_item`
+
+Atomically renames one existing kitchen-inventory item. Accepts `old_ingredient` and `new_ingredient`. Use it to correct a typo, brand, product variant, or naming convention without issuing separate remove/add calls. A missing source or duplicate target is an error; a normalized same-name request is a no-op. This changes inventory only, not recipe ingredient names.
+
 ### `register_cooked_meal`
 
 Registers that a dish was cooked today so the suggestion engine doesn't recommend it again too soon.
