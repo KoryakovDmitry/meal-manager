@@ -145,6 +145,32 @@ python3 -c "import sys, importlib, pathlib; sys.path.insert(0, str(pathlib.Path(
 - DII sessions reveal suggestions one at a time through the probability funnel.
 - Removing an essential ingredient in a DII session should signal that recalculation is needed.
 
+## Planned Extensions (Design Phase — July 2026)
+
+A weekly meal planning system is being designed on top of the existing
+catalog/fridge/history/tuning core. The full specification lives in
+`ARCHITECTURE.md` and the task board in `BOARD.md`. New entities:
+
+- **Prep items** (`data/prep_items.json`) — semi-finished products (e.g.
+  hybrid meatballs) with their own ingredients, yield, and storage zone.
+  Consuming source ingredients from the fridge creates them; cooking a dish
+  with `prep_depends` consumes them.
+- **Weekly plans** (`data/plans/2026-WXX.json`) — one file per ISO week.
+  Flexible day structure (no breakfast/lunch/dinner slots), dish references
+  by name, portion counts, leftovers tracking, status lifecycle
+  (`draft → approved → active → archived`).
+- **Extended fridge** — flat array gains optional storage tags
+  (`fridge` / `freezer` / `pantry`). Backward-compatible: old flat arrays
+  read as all-`fridge`.
+- **Extended dish** — optional `prep_depends: [prep_item_name, ...]` field.
+
+New tool modules will follow the existing auto-discovery pattern: drop a
+module in `src/handlers/`, export `NAME`, `SCHEMA`, `HANDLER`, and it is
+picked up automatically. Remember to update `plugin.yaml`.
+
+These extensions are not yet implemented. Do not write handler code or
+repository code for them until the board moves a task to DOING.
+
 ## Editing Rules
 
 - Make the smallest correct change.

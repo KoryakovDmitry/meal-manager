@@ -81,6 +81,18 @@ The data directory is injectable via `src.repositories.configure(data_dir)` — 
 - `tuning.json` — (created lazily on the first learning event) Online-learner state for the suggestion blend: candidate grid, discounted reward/count sums (`S`/`C`), `observations`, and the `deployed_match_weight` / `deployed_time_weight`. Missing/corrupt files fall back to a fresh initialized state.
 - `sessions/` — (created lazily) Per-session DII JSON backups for crash recovery. Files are named `{session_id}.json` and auto-cleaned after 30 minutes.
 
+## Planned Extensions
+
+A weekly meal planning system is in the design phase. Four new entities
+(prep items, weekly plans, extended fridge with storage tags, extended dish
+with prep dependencies) and ~15 new tools are specified in:
+
+- **`ARCHITECTURE.md`** — full design spec (entities, data models, tools, budget rules, lifecycle)
+- **`BOARD.md`** — kanban board tracking implementation progress
+
+These are **not yet implemented**. See those files before adding any new
+handler or repository code.
+
 ## Key Design Decisions
 
 - **Essential vs optional ingredients**: In `Dish.ingredients`, `True` = essential (must have to cook), `False` = optional (improves score but not required).
