@@ -1,6 +1,6 @@
 # TOOLS-1 — Plugin tool schemas lose handler arguments
 
-**Status:** 🔨 Doing
+**Status:** ✅ Done
 **Reported from:** Meal Planning, inventory intake for week 2026-W29
 **Affected workflow:** adding 2 kg of raw chicken drumsticks through `update_fridge_inventory`
 
@@ -55,12 +55,12 @@ The defect is fixed at the plugin registration boundary rather than duplicating 
 - [x] `update_fridge_inventory.function.parameters.properties` contains `action` and `ingredients`.
 - [x] Both fields remain required.
 - [x] Every one of the 34 tools exposes an object parameter schema after registration.
-- [ ] Full `python3 test_unit.py` passes.
-- [ ] Full `python3 test_integration.py` passes.
-- [ ] Independent fail-closed review passes for the frozen staged snapshot.
-- [ ] Fix is committed and pushed to `origin/main`.
-- [ ] Gateway is restarted/reloaded and a fresh runtime schema is verified.
-- [ ] Meal Planning receives a completion report and can resume the original chicken-drumstick inventory operation.
+- [x] Full `python3 test_unit.py` passes (185 tests).
+- [x] Full `python3 test_integration.py` passes (157 tests).
+- [x] Independent fail-closed review passes for the frozen staged snapshot.
+- [x] Fix is committed and pushed to `origin/main` as `b249312`.
+- [x] Gateway is restarted/reloaded and a fresh runtime schema is verified.
+- [x] Meal Planning receives a completion report and can resume the original chicken-drumstick inventory operation in a fresh conversation.
 
 ## Dependencies
 
