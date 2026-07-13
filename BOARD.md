@@ -33,13 +33,23 @@
 
 ## 📐 READY INTERMEDIATE ISSUES
 
+### INV-2 — Structured kitchen inventory item model
+
+**Проблема.** Flat `fridge.json` хранит только названия и теряет фактически сообщаемые данные: `2 кг`, количество штук/пачек, единицу измерения, storage zone, срок годности и комментарий.
+
+**Результат.** Ввести versioned `InventoryItem` с stable ID и nullable metadata, безопасно мигрировать legacy string list, добавить native structured CRUD и item-oriented web API/UI. Старые suggestions/shopping продолжают использовать derived name presence до отдельной quantity-aware recipe phase.
+
+**Ключевая граница.** Phase 1 хранит один slot на normalized product name и не моделирует отдельные партии. Quantities сохраняются и показываются, но пока не доказывают количественную достаточность рецепта.
+
+Подробный ticket: [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md).
+
 ### INV-1 — Edit/rename kitchen inventory item
 
 **Проблема.** Обычную позицию кухонного запаса можно добавить или удалить, но нельзя атомарно переименовать. В web UI у каждого chip есть только `✕`, поэтому исправление опечатки, бренда или варианта продукта требует delete + add.
 
 **Результат.** Добавить native `rename_fridge_item(old_ingredient, new_ingredient)` для агента и доступный inline rename flow в личном web UI Димы. Оба пути должны иметь одинаковые normalization/collision/no-op semantics, сохранять XSS-safe rendering и обновлять availability-derived views.
 
-**Граница.** INV-1 редактирует только название позиции. Количество (`2 кг`, число пачек), storage zones и metadata остаются отдельными feature requests.
+**Граница.** INV-1 редактирует только название позиции. Количество (`2 кг`), число пачек, storage zones и metadata проектируются отдельно в INV-2; rename flow должен переиспользовать его structured mutation, если INV-2 реализуется первым.
 
 Подробный ticket: [`docs/issues/INV-1-edit-fridge-item.md`](docs/issues/INV-1-edit-fridge-item.md).
 
@@ -258,7 +268,6 @@
 ## 📋 BACKLOG
 
 - [ ] Luxembourg seasonality auto-hints и market availability.
-- [ ] Three-zone storage view: fridge / freezer / pantry tags.
 - [ ] Prep-day workflow и aggregated weekend batch plan.
 - [ ] Pantry staples и low-stock thresholds.
 - [ ] Budget trend view по неделям и магазинам.

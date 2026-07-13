@@ -124,7 +124,8 @@ Each inventory chip gets a separate edit button in addition to delete:
 
 ## Dependencies
 
-- Existing flat `fridge.json` inventory model and normalization rules.
+- Existing flat `fridge.json` inventory model and normalization rules until INV-2 lands.
+- INV-2 structured inventory contract: if implemented first, INV-1 must edit the existing stable item rather than introducing a competing persistence path; the user-visible rename/collision/no-op behavior remains unchanged.
 - Existing native repository locking/atomic-write contract.
 - Existing web fridge add/remove API and chip renderer.
 - Correct function-tool schema envelope delivered by TOOLS-1.

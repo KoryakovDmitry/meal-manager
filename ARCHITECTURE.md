@@ -89,24 +89,37 @@ with portion counts.
 
 **File:** `data/plans/2026-WXX.json` (one file per week)
 
-### 3. Extended Fridge — Storage Tags
+### 3. Structured Kitchen Inventory Item (planned — INV-2)
 
-The flat fridge list gains optional storage metadata per ingredient.
-Ingredients without metadata default to `"fridge"`.
+The flat fridge list migrates to a versioned envelope of structured stock slots. One slot exists per normalized product name in phase 1.
 
 ```json
 {
-  "молоко": {"storage": "fridge"},
-  "hybrid-meatballs": {"storage": "freezer", "qty": "20шт"},
-  "тунец консервированный": {"storage": "pantry", "qty": "3"},
-  "чечевица": {"storage": "pantry", "qty": "500г"}
+  "schema_version": 2,
+  "items": [
+    {
+      "id": "inv_01J...",
+      "name": "куриные голени",
+      "quantity": "2",
+      "unit": "kg",
+      "package_count": 1,
+      "storage": "fridge",
+      "expires_on": "2026-07-17",
+      "comment": "сырые; приготовить или заморозить",
+      "created_at": "2026-07-14T01:15:00+02:00",
+      "updated_at": "2026-07-14T01:15:00+02:00"
+    }
+  ]
 }
 ```
 
-**Migration:** Existing `fridge.json` (flat array) is read as all-`"fridge"`.
-New writes use the tagged format.
+Only `id` and normalized `name` are required; migrated metadata remains null/unknown until supplied. Storage values are `fridge`, `freezer`, `pantry`, and `counter`. Quantity is persisted as a canonical decimal string with an explicit unit; package count, expiry, and comment are optional.
 
-**File:** `data/fridge.json` (format extended, backward-compatible)
+**Compatibility:** Legacy `fridge.json` flat arrays remain readable. Existing recipes, suggestions, cooking, and weekly shopping consume a derived set/list of available names. Structured quantity is persisted and displayed but does not drive recipe sufficiency or shopping arithmetic until recipes gain quantity requirements.
+
+**Detailed contract:** [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md).
+
+**File:** `data/fridge.json` (versioned envelope after migration)
 
 ### 4. Extended Dish — Prep Dependencies
 
@@ -205,10 +218,16 @@ Dishes can declare which prep-items they require:
 
 See `BOARD.md` for the live kanban board.
 
-### Phase 1: Data Layer
+### Phase 1: Prep Data Layer ✅
 - Prep-items entity + repository + handler
-- Fridge storage tags (backward-compatible migration)
 - Dish `prep_depends` field
+- Structured ordinary inventory was deferred and is now specified separately as INV-2
+
+### INV-2: Structured Kitchen Inventory (Ready)
+- Versioned `InventoryItem` model and legacy flat-list migration
+- Quantity/unit, package count, storage, expiry, and comment metadata
+- Backward-compatible name projection for existing recipe/suggestion/shopping flows
+- Native structured CRUD plus item-oriented web API/UI
 
 ### Phase 2: Weekly Plans
 - Plan model + repository
