@@ -31,6 +31,18 @@
 
 Активных промежуточных issues нет.
 
+## 📐 READY INTERMEDIATE ISSUES
+
+### INV-1 — Edit/rename kitchen inventory item
+
+**Проблема.** Обычную позицию кухонного запаса можно добавить или удалить, но нельзя атомарно переименовать. В web UI у каждого chip есть только `✕`, поэтому исправление опечатки, бренда или варианта продукта требует delete + add.
+
+**Результат.** Добавить native `rename_fridge_item(old_ingredient, new_ingredient)` для агента и доступный inline rename flow в личном web UI Димы. Оба пути должны иметь одинаковые normalization/collision/no-op semantics, сохранять XSS-safe rendering и обновлять availability-derived views.
+
+**Граница.** INV-1 редактирует только название позиции. Количество (`2 кг`, число пачек), storage zones и metadata остаются отдельными feature requests.
+
+Подробный ticket: [`docs/issues/INV-1-edit-fridge-item.md`](docs/issues/INV-1-edit-fridge-item.md).
+
 ## ✅ COMPLETED INTERMEDIATE ISSUES
 
 ### TOOLS-1 — Plugin tool schema envelope ✅
