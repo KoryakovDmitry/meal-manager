@@ -557,6 +557,102 @@ def test_tuning_compute_rewards_no_signal():
     check("normal cook produces rewards", isinstance(rewards2, dict) and len(rewards2) > 0)
 
 
+# ── PrepItem tests ──
+
+_prep_mod = importlib.import_module(".src.prep_item", _PLUGIN_DIR.name)
+PrepItem = _prep_mod.PrepItem
+
+
+def test_prep_item_basic():
+    item = PrepItem(name="Hybrid Meatballs", yield_qty=40, yield_unit="шт", storage="freezer")
+    check("basic name normalized", item.name == "hybrid meatballs")
+    check("yield stored", item.yield_qty == 40)
+    check("storage stored", item.storage == "freezer")
+    check("remaining defaults to 0", item.remaining == 0)
+
+
+def test_prep_item_normalizes_name():
+    item = PrepItem(name="  Lentil Sauce  ")
+    check("name stripped+lowercased", item.name == "lentil sauce")
+
+
+def test_prep_item_normalizes_ingredients():
+    item = PrepItem(name="x", ingredients={"Говядина": True, " Лук ": True})
+    check("ingredient keys normalized", "говядина" in item.ingredients and "лук" in item.ingredients)
+
+
+def test_prep_item_invalid_storage():
+    try:
+        PrepItem(name="bad", storage="cellar")
+        check("invalid storage raises", False)
+    except ValueError:
+        check("invalid storage raises", True)
+
+
+def test_prep_item_from_dict():
+    data = {
+        "name": "Meatballs",
+        "ingredients": {"говядина": True, "чечевица": True},
+        "yield": 40,
+        "yield_unit": "шт",
+        "storage": "freezer",
+        "remaining": 20,
+    }
+    item = PrepItem.from_dict(data)
+    check("from_dict name", item.name == "meatballs")
+    check("from_dict yield", item.yield_qty == 40)
+    check("from_dict remaining", item.remaining == 20)
+    check("from_dict ingredients", "говядина" in item.ingredients)
+
+
+def test_prep_item_to_dict_roundtrip():
+    item = PrepItem(name="test prep", yield_qty=10, storage="pantry", remaining=5)
+    item.ingredients["salt"] = False
+    d = item.to_dict()
+    restored = PrepItem.from_dict(d)
+    check("roundtrip name", restored.name == item.name)
+    check("roundtrip yield", restored.yield_qty == item.yield_qty)
+    check("roundtrip remaining", restored.remaining == item.remaining)
+    check("roundtrip storage", restored.storage == item.storage)
+    check("roundtrip ingredients", "salt" in restored.ingredients)
+
+
+def test_prep_item_remaining_default():
+    """When from_dict has no 'remaining', it defaults to yield."""
+    data = {"name": "auto", "ingredients": {}, "yield": 30}
+    item = PrepItem.from_dict(data)
+    check("remaining defaults to yield when absent", item.remaining == 30)
+
+
+# ── Dish prep_depends tests ──
+
+
+def test_dish_prep_depends_default_empty():
+    d = Dish(name="test dish")
+    check("prep_depends defaults to empty list", d.prep_depends == [])
+
+
+def test_dish_prep_depends_serialized():
+    d = Dish(name="test", prep_depends=["hybrid-meatballs"])
+    data = d.to_dict()
+    check("prep_depends in to_dict", "prep_depends" in data)
+    check("prep_depends value", data["prep_depends"] == ["hybrid-meatballs"])
+
+
+def test_dish_prep_depends_from_dict():
+    data = {"name": "soup", "ingredients": {"water": True}, "prep_depends": ["meatballs"]}
+    d = Dish.from_dict(data)
+    check("prep_depends loaded from dict", d.prep_depends == ["meatballs"])
+
+
+def test_dish_prep_depends_backward_compat():
+    """Old dishes without prep_depends still load fine."""
+    data = {"name": "legacy", "ingredients": {"flour": True}}
+    d = Dish.from_dict(data)
+    check("legacy dish has empty prep_depends", d.prep_depends == [])
+    check("legacy dish to_dict has no prep_depends key", "prep_depends" not in d.to_dict())
+
+
 def main():
     test_dish_normalize_ingredient()
     test_dish_normalize_name()
@@ -605,6 +701,23 @@ def main():
     test_tuning_cold_start()
     test_tuning_shift_after_warmup()
     test_tuning_hysteresis()
+
+    # ── PrepItem model ──
+    print("\n-- PrepItem model --")
+    test_prep_item_basic()
+    test_prep_item_normalizes_name()
+    test_prep_item_normalizes_ingredients()
+    test_prep_item_invalid_storage()
+    test_prep_item_from_dict()
+    test_prep_item_to_dict_roundtrip()
+    test_prep_item_remaining_default()
+
+    # ── Dish prep_depends ──
+    print("\n-- Dish prep_depends --")
+    test_dish_prep_depends_default_empty()
+    test_dish_prep_depends_serialized()
+    test_dish_prep_depends_from_dict()
+    test_dish_prep_depends_backward_compat()
 
     print(f"\n{'='*40}")
     print(f"  {_passed} passed, {_failed} failed")

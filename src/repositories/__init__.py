@@ -24,11 +24,13 @@ from .base import (
     DishRepository,
     FridgeRepository,
     HistoryRepository,
+    PrepItemRepository,
     TuningRepository,
 )
 from .json_dish import JsonDishRepository
 from .json_fridge import JsonFridgeRepository
 from .json_history import JsonHistoryRepository
+from .json_prep_item import JsonPrepItemRepository
 from .json_tuning import JsonTuningRepository
 
 # ---------------------------------------------------------------------------
@@ -44,6 +46,7 @@ dish_repo: DishRepository = JsonDishRepository(_DEFAULT_DATA_DIR / "dishes.json"
 fridge_repo: FridgeRepository = JsonFridgeRepository(_DEFAULT_DATA_DIR / "fridge.json")
 history_repo: HistoryRepository = JsonHistoryRepository(_DEFAULT_DATA_DIR / "history.json")
 tuning_repo: TuningRepository = JsonTuningRepository(_DEFAULT_DATA_DIR / "tuning.json")
+prep_repo: PrepItemRepository = JsonPrepItemRepository(_DEFAULT_DATA_DIR / "prep_items.json")
 
 
 def configure(data_dir) -> None:
@@ -63,20 +66,24 @@ def configure(data_dir) -> None:
     fridge_repo.path = data_dir / "fridge.json"
     history_repo.path = data_dir / "history.json"
     tuning_repo.path = data_dir / "tuning.json"
+    prep_repo.path = data_dir / "prep_items.json"
 
 
 __all__ = [
     "DishRepository",
     "FridgeRepository",
     "HistoryRepository",
+    "PrepItemRepository",
     "TuningRepository",
     "JsonDishRepository",
     "JsonFridgeRepository",
     "JsonHistoryRepository",
+    "JsonPrepItemRepository",
     "JsonTuningRepository",
     "configure",
     "dish_repo",
     "fridge_repo",
     "history_repo",
+    "prep_repo",
     "tuning_repo",
 ]

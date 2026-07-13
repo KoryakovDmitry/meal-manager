@@ -10,16 +10,19 @@
 - [x] Notes system (`data/meal_planning_notes.md`)
 - [x] Seasonal notes (`data/seasonal_notes.md`)
 - [x] Architecture design document (`ARCHITECTURE.md`)
+- [x] Web interface moved into repo (`web/`)
 
 ---
 
 ## 📐 DESIGN (ready to implement)
 
-### Phase 1: Data Layer
-- [ ] Prep-items entity + `data/prep_items.json`
-- [ ] Prep-item repository (`src/repositories/json_prep.py`)
-- [ ] Fridge storage tags (backward-compatible: flat array → tagged dict)
-- [ ] Dish `prep_depends` field
+### Phase 1: Data Layer ✅
+- [x] PrepItem model (`src/prep_item.py`)
+- [x] Prep-item repository (`src/repositories/json_prep_item.py`)
+- [x] Dish `prep_depends` field (backward-compatible)
+- [x] Handlers: `add_prep_item`, `list_prep_items`, `delete_prep_item`, `make_prep`
+- [x] `register_cooked_meal` consumes prep items
+- [x] Tests (11 new unit tests, all 115 passing)
 
 ### Phase 2: Weekly Plans
 - [ ] Plan model + `data/plans/` directory

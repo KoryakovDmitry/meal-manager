@@ -22,3 +22,7 @@ provides_tools:
   - dii_clear_all
   - finalize_ingredient_session
   - dii_get_state
+  - add_prep_item
+  - list_prep_items
+  - delete_prep_item
+  - make_prep

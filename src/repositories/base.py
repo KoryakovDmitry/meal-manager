@@ -52,6 +52,15 @@ class HistoryRepository(Protocol):
     ) -> bool: ...
 
 
+class PrepItemRepository(Protocol):
+    """Persistence boundary for prep items (semi-finished products)."""
+
+    lock: threading.Lock
+
+    def load(self) -> list: ...
+    def save(self, items: list) -> None: ...
+
+
 class TuningRepository(Protocol):
     """Persistence boundary for the online suggestion-weight learner.
 

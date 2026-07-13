@@ -4,7 +4,7 @@ import logging
 from datetime import date
 
 from .. import tuning
-from ..repositories import dish_repo, fridge_repo, history_repo, tuning_repo
+from ..repositories import dish_repo, fridge_repo, history_repo, prep_repo, tuning_repo
 from ._common import (
     days_since_last_cook,
     normalize_dish_name,
@@ -71,6 +71,24 @@ def HANDLER(args: dict, **kwargs):
             logger.exception("register_cooked_meal rollback failed")
         raise
 
+    removed_msg = f" Removed from fridge: {', '.join(removed)}." if removed else ""
+
+    # Consume prep items that this dish depends on
+    prep_consumed = []
+    if dish.prep_depends:
+        with prep_repo.lock:
+            items = prep_repo.load()
+            for dep_name in dish.prep_depends:
+                dep_item = next((it for it in items if it.name == dep_name), None)
+                if dep_item is not None and dep_item.remaining > 0:
+                    dep_item.remaining -= 1
+                    prep_consumed.append(dep_name)
+            prep_repo.save(items)
+
+    prep_msg = ""
+    if prep_consumed:
+        prep_msg = f" Consumed prep items: {', '.join(prep_consumed)}."
+
     # Best-effort online weight tuning. This must never fail or roll back the
     # cook registration: any error here is logged and swallowed.
     try:
@@ -86,5 +104,4 @@ def HANDLER(args: dict, **kwargs):
     except Exception:
         logger.exception("weight tuning update failed (non-critical)")
 
-    removed_msg = f" Removed from fridge: {', '.join(removed)}." if removed else ""
-    return f"Registered '{dish.name}' as cooked on {today_iso}.{removed_msg}"
+    return f"Registered '{dish.name}' as cooked on {today_iso}.{removed_msg}{prep_msg}"

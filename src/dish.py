@@ -13,6 +13,7 @@ class Dish:
 
     name: str
     ingredients: dict = field(default_factory=dict)
+    prep_depends: list = field(default_factory=list)  # prep item names this dish needs
 
     def __post_init__(self):
         self.name = self.normalize_name(self.name)
@@ -54,10 +55,13 @@ class Dish:
         return True
 
     def to_dict(self):
-        return {
+        result = {
             "name": self.name,
-            "ingredients": self.ingredients
+            "ingredients": self.ingredients,
         }
+        if self.prep_depends:
+            result["prep_depends"] = list(self.prep_depends)
+        return result
 
     @classmethod
     def from_dict(cls, data):
@@ -72,7 +76,13 @@ class Dish:
         if not isinstance(raw_ingredients, dict):
             raise ValueError("ingredients must be a dict")
 
-        dish = cls(name=name)
+        raw_prep_depends = data.get("prep_depends", [])
+        if not isinstance(raw_prep_depends, list):
+            raw_prep_depends = []
+
+        dish = cls(name=name, prep_depends=[
+            cls.normalize_name(pd) for pd in raw_prep_depends if isinstance(pd, str)
+        ])
         for ingredient_name, is_essential in raw_ingredients.items():
             dish.add_ingredient(ingredient_name, is_essential)
         return dish
