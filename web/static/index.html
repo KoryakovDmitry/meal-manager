@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🍽 Meal Planning</title>
+<style>
+:root {
+  --bg: #0f0f1a;
+  --bg-card: #1a1a2e;
+  --bg-card-hover: #22223a;
+  --bg-input: #16162a;
+  --accent: #e94560;
+  --accent-hover: #ff5e7a;
+  --accent-green: #0f3460;
+  --green: #4ecca3;
+  --green-dim: #2d8f6f;
+  --orange: #ffa931;
+  --text: #eee;
+  --text-dim: #888;
+  --text-muted: #555;
+  --border: #2a2a4a;
+  --radius: 12px;
+  --shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+/* ─── Layout ─── */
+.app { max-width: 1280px; margin: 0 auto; padding: 16px; }
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 0; margin-bottom: 8px;
+}
+header h1 { font-size: 1.6rem; }
+header h1 span { color: var(--accent); }
+
+/* ─── Tabs ─── */
+.tabs {
+  display: flex; gap: 4px; margin-bottom: 20px;
+  background: var(--bg-card); border-radius: var(--radius); padding: 4px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; -ms-overflow-style: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab {
+  flex: 1 0 auto; padding: 10px 14px; border: none; background: none;
+  color: var(--text-dim); font-size: 0.85rem; font-weight: 600; cursor: pointer;
+  border-radius: 8px; transition: all 0.2s; white-space: nowrap; min-width: max-content;
+}
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--accent); color: white; }
+
+/* ─── Cards ─── */
+.card {
+  background: var(--bg-card); border-radius: var(--radius); padding: 20px;
+  box-shadow: var(--shadow); margin-bottom: 16px;
+}
+
+/* ─── Stats Grid ─── */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+.stat-box {
+  background: var(--bg-card); border-radius: var(--radius); padding: 16px;
+  text-align: center; border: 1px solid var(--border);
+}
+.stat-box .num { font-size: 2rem; font-weight: 700; }
+.stat-box .label { font-size: 0.8rem; color: var(--text-dim); margin-top: 4px; }
+.stat-box.green .num { color: var(--green); }
+.stat-box.orange .num { color: var(--orange); }
+.stat-box.accent .num { color: var(--accent); }
+
+/* ─── Dish cards ─── */
+.dishes-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.dish-card {
+  background: var(--bg-card); border-radius: var(--radius); padding: 16px;
+  border: 1px solid var(--border); transition: all 0.2s; position: relative;
+}
+.dish-card:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+.dish-card.cookable { border-left: 3px solid var(--green); }
+.dish-card.recent { opacity: 0.55; }
+.dish-card h3 { font-size: 1.1rem; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+.dish-card .score {
+  font-size: 0.75rem; padding: 2px 8px; border-radius: 20px; background: var(--bg-input);
+  color: var(--text-dim);
+}
+.badge {
+  display: inline-block; font-size: 0.7rem; padding: 2px 8px; border-radius: 20px;
+  margin-left: 6px; font-weight: 600;
+}
+.badge.cook { background: rgba(78,204,163,0.15); color: var(--green); }
+.badge.miss { background: rgba(255,169,49,0.15); color: var(--orange); }
+.badge.recent { background: rgba(233,69,96,0.15); color: var(--accent); }
+
+.ingredient-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.ingredient-tag {
+  font-size: 0.75rem; padding: 3px 8px; border-radius: 6px;
+  background: var(--bg-input); color: var(--text-dim);
+}
+.ingredient-tag.have { background: rgba(78,204,163,0.12); color: var(--green); }
+.ingredient-tag.missing { background: rgba(255,169,49,0.1); color: var(--orange); }
+.ingredient-tag.optional { opacity: 0.6; text-decoration: line-through; }
+
+/* ─── Fridge ─── */
+.fridge-grid {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.fridge-item {
+  background: var(--bg-input); border-radius: 8px; padding: 8px 14px;
+  display: flex; align-items: center; gap: 8px; border: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+.fridge-item .uses {
+  font-size: 0.7rem; color: var(--text-dim); background: var(--bg-card);
+  padding: 1px 6px; border-radius: 10px;
+}
+.fridge-item.unused { opacity: 0.5; border-style: dashed; }
+.fridge-item .remove {
+  cursor: pointer; color: var(--accent); font-weight: bold; font-size: 1.1rem;
+  border: none; background: none; padding: 0; line-height: 1;
+}
+
+/* ─── Forms ─── */
+.form-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+input[type="text"], textarea, select {
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; color: var(--text); font-size: 0.9rem; outline: none;
+  transition: border-color 0.2s; flex: 1; min-width: 120px;
+}
+input[type="text"]:focus, textarea:focus { border-color: var(--accent); }
+textarea { resize: vertical; min-height: 60px; }
+
+.btn {
+  padding: 10px 20px; border: none; border-radius: 8px; font-weight: 600;
+  cursor: pointer; transition: all 0.2s; font-size: 0.9rem; white-space: nowrap;
+}
+.btn-primary { background: var(--accent); color: white; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-success { background: var(--green); color: #0f0f1a; }
+.btn-success:hover { background: var(--green-dim); }
+.btn-ghost { background: var(--bg-input); color: var(--text-dim); border: 1px solid var(--border); }
+.btn-ghost:hover { color: var(--text); }
+.btn-sm { padding: 5px 10px; font-size: 0.8rem; }
+.btn-danger { background: rgba(233,69,96,0.15); color: var(--accent); border: 1px solid rgba(233,69,96,0.3); }
+
+/* ─── Ingredient editor for dish ─── */
+.ing-editor { margin-top: 12px; }
+.ing-editor-row {
+  display: flex; gap: 8px; align-items: center; margin-bottom: 6px;
+}
+.ing-editor-row .ing-name { flex: 1; }
+.ing-editor-row .toggle-ess { cursor: pointer; font-size: 0.8rem; padding: 4px 10px; border-radius: 6px; }
+.ing-editor-row .toggle-ess.ess { background: rgba(78,204,163,0.15); color: var(--green); }
+.ing-editor-row .toggle-ess.opt { background: var(--bg-input); color: var(--text-dim); }
+.ing-editor-row .del-ing {
+  background: none; border: none; color: var(--accent); cursor: pointer; font-size: 1.1rem;
+}
+
+/* ─── Shopping list ─── */
+.shopping-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.shopping-item:last-child { border-bottom: none; }
+.shopping-item .ing-name { font-weight: 600; }
+.shopping-item .unlocks { font-size: 0.8rem; color: var(--text-dim); }
+
+/* ─── History ─── */
+.history-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+}
+.history-item .dish-name { font-weight: 600; }
+.history-item .date { font-size: 0.8rem; color: var(--text-dim); }
+.history-item .actions { display: flex; gap: 8px; }
+
+/* ─── Modal ─── */
+.modal-bg {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center;
+  z-index: 100; padding: 16px;
+}
+.modal {
+  background: var(--bg-card); border-radius: var(--radius); padding: 24px;
+  max-width: 500px; width: 100%; max-height: 85vh; overflow-y: auto;
+}
+.modal h2 { margin-bottom: 16px; }
+
+/* ─── Misc ─── */
+.page { display: none; }
+.page.active { display: block; }
+.empty { text-align: center; padding: 40px; color: var(--text-dim); }
+.loading { text-align: center; padding: 20px; color: var(--text-dim); }
+.toast {
+  position: fixed; bottom: 20px; right: 20px; z-index: 200;
+  background: var(--green); color: #0f0f1a; padding: 12px 20px;
+  border-radius: 8px; font-weight: 600; box-shadow: var(--shadow);
+  animation: slideIn 0.3s ease; max-width: 300px;
+}
+.toast.error { background: var(--accent); color: white; }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+.section-title { font-size: 1.2rem; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.add-btn { font-size: 1.2rem; }
+
+/* Mini bar chart */
+.chart-container { display: flex; gap: 4px; align-items: flex-end; height: 80px; margin-top: 8px; }
+.chart-bar {
+  flex: 1; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 4px;
+  position: relative; transition: height 0.3s;
+}
+.chart-bar .day { position: absolute; bottom: -20px; left: 0; right: 0; text-align: center; font-size: 0.65rem; color: var(--text-dim); }
+
+/* ─── Mobile responsive ─── */
+@media (max-width: 768px) {
+  .app { padding: 10px; }
+  header h1 { font-size: 1.3rem; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .dishes-grid { grid-template-columns: 1fr; }
+  .stat-box .num { font-size: 1.5rem; }
+  .form-row { flex-direction: column; }
+  .form-row input, .form-row .btn { width: 100%; }
+  .modal { padding: 16px; max-width: 100%; }
+  .ing-editor-row { flex-wrap: wrap; }
+  .shopping-item { flex-direction: column; align-items: flex-start; gap: 8px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>🍽 <span>Meal</span> Planning</h1>
+    <button class="btn btn-ghost btn-sm" onclick="refreshAll()">↻ Обновить</button>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="overview">📊 Обзор</button>
+    <button class="tab" data-tab="dishes">🍳 Рецепты</button>
+    <button class="tab" data-tab="fridge">🥶 Холодильник</button>
+    <button class="tab" data-tab="suggestions">💡 Рекомендации</button>
+    <button class="tab" data-tab="shopping">🛒 Покупки</button>
+    <button class="tab" data-tab="history">📜 История</button>
+  </div>
+
+  <!-- ═══ Overview ═══ -->
+  <div class="page active" id="page-overview">
+    <div class="stats-grid" id="stats-grid">
+      <div class="loading">Загрузка...</div>
+    </div>
+    <div class="card" id="chart-card" style="display:none">
+      <div class="section-title">📊 Готовка за неделю</div>
+      <div class="chart-container" id="week-chart"></div>
+    </div>
+    <div class="card" id="unused-card" style="display:none">
+      <div class="section-title">⚠️ Неиспользуемые продукты в холодильнике</div>
+      <div id="unused-list"></div>
+    </div>
+    <div class="card" id="top-ing-card" style="display:none">
+      <div class="section-title">🔥 Топ ингредиентов в рецептах</div>
+      <div id="top-ing-list"></div>
+    </div>
+  </div>
+
+  <!-- ═══ Dishes ═══ -->
+  <div class="page" id="page-dishes">
+    <div class="form-row">
+      <input type="text" id="dish-search" placeholder="🔍 Поиск рецепта..." oninput="renderDishes()">
+    </div>
+    <div id="dishes-container">
+      <div class="loading">Загрузка...</div>
+    </div>
+  </div>
+
+  <!-- ═══ Fridge ═══ -->
+  <div class="page" id="page-fridge">
+    <div class="card">
+      <div class="section-title">🥶 Что в холодильнике</div>
+      <div class="form-row">
+        <input type="text" id="fridge-add-input" placeholder="Добавить продукт..." onkeydown="if(event.key==='Enter')addFridgeItem()">
+        <button class="btn btn-primary" onclick="addFridgeItem()">+ Добавить</button>
+      </div>
+      <div id="fridge-container" class="fridge-grid"></div>
+      <div style="margin-top:16px">
+        <button class="btn btn-danger btn-sm" onclick="clearFridge()">🗑 Очистить холодильник</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Suggestions ═══ -->
+  <div class="page" id="page-suggestions">
+    <div id="suggestions-container">
+      <div class="loading">Загрузка...</div>
+    </div>
+  </div>
+
+  <!-- ═══ Shopping ═══ -->
+  <div class="page" id="page-shopping">
+    <div class="card">
+      <div class="section-title">🛒 Что докупить</div>
+      <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:12px">
+        Ингредиенты, которых не хватает ровно для одного рецепта. Купить один — разблокировать новое блюдо.
+      </p>
+      <div id="shopping-container"></div>
+    </div>
+  </div>
+
+  <!-- ═══ History ═══ -->
+  <div class="page" id="page-history">
+    <div class="card">
+      <div class="section-title">📜 История готовки</div>
+      <div id="history-container"></div>
+    </div>
+  </div>
+</div>
+
+<div id="modal-container"></div>
+<div id="toast-container"></div>
+
+<script>
+const API = '';
+let CACHE = { dishes: [], fridge: [], suggestions: [], shopping: [], history: [], stats: {} };
+
+// ─── API helpers ───
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(API + path, opts);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({detail: res.statusText}));
+    throw new Error(err.detail || 'Error');
+  }
+  return res.json();
+}
+
+function toast(msg, isError=false) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (isError ? ' error' : '');
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ─── Tab navigation ───
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('page-' + t.dataset.tab).classList.add('active');
+  };
+});
+
+// ─── Load all data ───
+async function refreshAll() {
+  try {
+    const [dishes, fridge, suggestions, shopping, history, stats] = await Promise.all([
+      api('/api/dishes'), api('/api/fridge'), api('/api/suggestions'),
+      api('/api/shopping'), api('/api/history'), api('/api/stats')
+    ]);
+    CACHE.dishes = dishes.dishes || [];
+    CACHE.fridge = fridge.ingredients || [];
+    CACHE.suggestions = suggestions.suggestions || [];
+    CACHE.shopping = shopping.items || [];
+    CACHE.history = history.history || [];
+    CACHE.stats = stats;
+    renderAll();
+  } catch (e) {
+    toast('Ошибка: ' + e.message, true);
+  }
+}
+
+function renderAll() {
+  renderStats(); renderDishes(); renderFridge(); renderSuggestions(); renderShopping(); renderHistory();
+}
+
+// ─── Stats ───
+function renderStats() {
+  const s = CACHE.stats;
+  if (!s.total_dishes && !s.total_fridge_items) {
+    document.getElementById('stats-grid').innerHTML = '<div class="empty">Нет данных. Добавьте рецепты и наполните холодильник.</div>';
+    return;
+  }
+  document.getElementById('stats-grid').innerHTML = `
+    <div class="stat-box accent"><div class="num">${s.total_dishes}</div><div class="label">Рецептов</div></div>
+    <div class="stat-box"><div class="num">${s.total_fridge_items}</div><div class="label">В холодильнике</div></div>
+    <div class="stat-box green"><div class="num">${s.cookable_now}</div><div class="label">Можно готовить</div></div>
+    <div class="stat-box orange"><div class="num">${s.recently_cooked}</div><div class="label">Недавно готовили</div></div>
+  `;
+
+  // Week chart
+  if (s.cooks_last_7_days) {
+    const days = Object.keys(s.cooks_last_7_days);
+    const vals = Object.values(s.cooks_last_7_days);
+    const max = Math.max(...vals, 1);
+    document.getElementById('chart-card').style.display = 'block';
+    document.getElementById('week-chart').innerHTML = vals.map((v, i) => {
+      const h = (v / max) * 70;
+      const label = new Date(days[i]).toLocaleDateString('ru', {weekday: 'short'});
+      return `<div class="chart-bar" style="height:${Math.max(h,4)}px"><div class="day">${label}</div></div>`;
+    }).join('');
+  }
+
+  // Unused fridge items
+  if (s.unused_fridge_items && s.unused_fridge_items.length > 0) {
+    document.getElementById('unused-card').style.display = 'block';
+    document.getElementById('unused-list').innerHTML = s.unused_fridge_items
+      .map(i => `<span class="ingredient-tag" style="background:rgba(255,169,49,0.1);color:var(--orange)">${i}</span>`).join(' ');
+  } else {
+    document.getElementById('unused-card').style.display = 'none';
+  }
+
+  // Top ingredients
+  if (s.top_ingredients && s.top_ingredients.length > 0) {
+    document.getElementById('top-ing-card').style.display = 'block';
+    document.getElementById('top-ing-list').innerHTML = s.top_ingredients
+      .map(([ing, count]) => `<span class="ingredient-tag have">${ing} (${count})</span>`).join(' ');
+  } else {
+    document.getElementById('top-ing-card').style.display = 'none';
+  }
+}
+
+// ─── Dishes ───
+function renderDishes() {
+  const search = (document.getElementById('dish-search')?.value || '').toLowerCase();
+  const fridge = new Set(CACHE.fridge);
+  let dishes = CACHE.dishes;
+  if (search) dishes = dishes.filter(d => d.name.includes(search) || Object.keys(d.ingredients||{}).some(i => i.includes(search)));
+
+  const c = document.getElementById('dishes-container');
+  if (dishes.length === 0) {
+    c.innerHTML = `<div class="empty">Нет рецептов. <a href="#" onclick="showAddDishModal();return false" style="color:var(--accent)">Добавить первый →</a></div>
+    <div style="text-center;margin-top:12px"><button class="btn btn-primary" onclick="showAddDishModal()">+ Новый рецепт</button></div>`;
+    return;
+  }
+
+  let html = `<div style="margin-bottom:12px"><button class="btn btn-primary btn-sm" onclick="showAddDishModal()">+ Новый рецепт</button></div>`;
+  html += '<div class="dishes-grid">';
+  for (const d of dishes) {
+    const ings = d.ingredients || {};
+    const missing = Object.entries(ings).filter(([i,e]) => e && !fridge.has(i)).map(([i]) => i);
+    const have = Object.entries(ings).filter(([i]) => fridge.has(i)).map(([i]) => i);
+    const optional = Object.entries(ings).filter(([i,e]) => !e && !fridge.has(i)).map(([i]) => i);
+    const canCook = missing.length === 0;
+    html += `<div class="dish-card ${canCook ? 'cookable' : ''}">
+      <h3>${d.name} ${canCook ? '<span class="badge cook">✓ готово</span>' : `<span class="badge miss">—${missing.length}</span>`}</h3>
+      <div class="ingredient-list">
+        ${have.map(i => `<span class="ingredient-tag have">${i}</span>`).join('')}
+        ${missing.map(i => `<span class="ingredient-tag missing">${i}</span>`).join('')}
+        ${optional.map(i => `<span class="ingredient-tag optional">${i}?</span>`).join('')}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="showEditDishModal('${d.name}')">✏️ Изменить</button>
+        <button class="btn btn-success btn-sm" onclick="cookDish('${d.name}')" ${!canCook?'disabled style="opacity:0.4"':''}>🍳 Приготовить</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteDish('${d.name}')">🗑</button>
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+  c.innerHTML = html;
+}
+
+// ─── Dish modal ───
+let modalIngredients = {};
+
+function showAddDishModal() {
+  modalIngredients = {};
+  renderDishModal('Новый рецепт', '', null);
+}
+
+function showEditDishModal(name) {
+  const d = CACHE.dishes.find(x => x.name === name);
+  if (!d) return;
+  modalIngredients = {...d.ingredients};
+  renderDishModal('Изменить рецепт', d.name, d);
+}
+
+function renderDishModal(title, name, existing) {
+  const isEdit = !!existing;
+  document.getElementById('modal-container').innerHTML = `
+    <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+      <div class="modal">
+        <h2>${title}</h2>
+        <div class="form-row">
+          <input type="text" id="modal-dish-name" placeholder="Название блюда" value="${name}">
+        </div>
+        <div class="ing-editor" id="modal-ing-editor"></div>
+        <div class="form-row" style="margin-top:8px">
+          <input type="text" id="modal-new-ing" placeholder="Добавить ингредиент..." onkeydown="if(event.key==='Enter')modalAddIng()">
+          <button class="btn btn-ghost btn-sm" onclick="modalAddIng()">+ Ингредиент</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn btn-primary" onclick="saveDish(${isEdit?'true':'false'}, '${name}')">Сохранить</button>
+          <button class="btn btn-ghost" onclick="closeModal()">Отмена</button>
+        </div>
+      </div>
+    </div>`;
+  renderModalIngredients();
+  document.getElementById('modal-dish-name').focus();
+}
+
+function renderModalIngredients() {
+  const entries = Object.entries(modalIngredients);
+  if (entries.length === 0) {
+    document.getElementById('modal-ing-editor').innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">Нет ингредиентов</p>';
+    return;
+  }
+  document.getElementById('modal-ing-editor').innerHTML = entries.map(([name, ess]) => `
+    <div class="ing-editor-row">
+      <span class="ing-name">${name}</span>
+      <button class="toggle-ess ${ess?'ess':'opt'}" onclick="toggleEss('${name}')">${ess?'обязательный':'опциональный'}</button>
+      <button class="del-ing" onclick="modalDelIng('${name}')">✕</button>
+    </div>`).join('');
+}
+
+function modalAddIng() {
+  const input = document.getElementById('modal-new-ing');
+  const name = input.value.trim().toLowerCase();
+  if (!name) return;
+  if (!(name in modalIngredients)) modalIngredients[name] = true;
+  input.value = '';
+  renderModalIngredients();
+}
+
+function modalDelIng(name) {
+  delete modalIngredients[name];
+  renderModalIngredients();
+}
+
+function toggleEss(name) {
+  modalIngredients[name] = !modalIngredients[name];
+  renderModalIngredients();
+}
+
+async function saveDish(isEdit, oldName) {
+  const name = document.getElementById('modal-dish-name').value.trim();
+  if (!name) { toast('Введите название', true); return; }
+  try {
+    if (isEdit) {
+      await api('/api/dishes/' + encodeURIComponent(oldName), 'PUT', { name, ingredients: modalIngredients });
+    } else {
+      await api('/api/dishes', 'POST', { name, ingredients: modalIngredients });
+    }
+    closeModal();
+    toast('Рецепт сохранён');
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteDish(name) {
+  if (!confirm(`Удалить рецепт "${name}"?`)) return;
+  try {
+    await api('/api/dishes/' + encodeURIComponent(name), 'DELETE');
+    toast('Рецепт удалён');
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function cookDish(name) {
+  try {
+    await api('/api/history', 'POST', { dish: name });
+    toast(`🍳 ${name} приготовлен! Ингредиенты списаны.`);
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+function closeModal() {
+  document.getElementById('modal-container').innerHTML = '';
+}
+
+// ─── Fridge ───
+function renderFridge() {
+  const c = document.getElementById('fridge-container');
+  if (CACHE.fridge.length === 0) {
+    c.innerHTML = '<p style="color:var(--text-dim)">Холодильник пуст</p>';
+    return;
+  }
+  const utility = CACHE.stats.fridge_utility || {};
+  c.innerHTML = CACHE.fridge.map(item => {
+    const uses = utility[item] || 0;
+    return `<div class="fridge-item ${uses===0?'unused':''}">
+      <span>${item}</span>
+      ${uses > 0 ? `<span class="uses">${uses} рец.</span>` : '<span class="uses">—</span>'}
+      <button class="remove" onclick="removeFridgeItem('${item}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+async function addFridgeItem() {
+  const input = document.getElementById('fridge-add-input');
+  const val = input.value.trim();
+  if (!val) return;
+  try {
+    await api('/api/fridge/add', 'POST', { ingredient: val });
+    input.value = '';
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function removeFridgeItem(item) {
+  try {
+    await api('/api/fridge/remove', 'POST', { ingredient: item });
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function clearFridge() {
+  if (!confirm('Очистить весь холодильник?')) return;
+  try {
+    await api('/api/fridge', 'DELETE');
+    toast('Холодильник очищен');
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ─── Suggestions ───
+function renderSuggestions() {
+  const c = document.getElementById('suggestions-container');
+  if (CACHE.suggestions.length === 0) {
+    c.innerHTML = '<div class="empty">Нет рекомендаций. Добавьте рецепты и заполните холодильник.</div>';
+    return;
+  }
+  let html = '<div class="dishes-grid">';
+  for (const s of CACHE.suggestions) {
+    const pct = Math.round(s.score * 100);
+    const canCook = s.can_cook;
+    html += `<div class="dish-card ${canCook?'cookable':''} ${s.recently_cooked?'recent':''}">
+      <h3>${s.name}
+        ${canCook ? '<span class="badge cook">✓ можно</span>' : ''}
+        ${s.recently_cooked ? '<span class="badge recent">недавно</span>' : ''}
+        ${!canCook && !s.recently_cooked ? `<span class="score">${pct}%</span>` : ''}
+      </h3>
+      ${s.missing_essentials.length > 0 ? `<div style="margin:6px 0"><span style="font-size:0.75rem;color:var(--orange)">Не хватает: ${s.missing_essentials.join(', ')}</span></div>` : ''}
+      ${s.missing_optional.length > 0 ? `<div style="margin:4px 0"><span style="font-size:0.75rem;color:var(--text-dim)">Опционально: ${s.missing_optional.join(', ')}</span></div>` : ''}
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button class="btn btn-success btn-sm" onclick="cookDish('${s.name}')" ${!canCook?'disabled style="opacity:0.4"':''}>🍳 Приготовить</button>
+        <button class="btn btn-ghost btn-sm" onclick="showEditDishModal('${s.name}')">✏️</button>
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+  c.innerHTML = html;
+}
+
+// ─── Shopping ───
+function renderShopping() {
+  const c = document.getElementById('shopping-container');
+  if (CACHE.shopping.length === 0) {
+    c.innerHTML = '<p style="color:var(--text-dim)">Все базовые ингредиенты для ваших рецептов в наличии, либо не хватает больше одного.</p>';
+    return;
+  }
+  c.innerHTML = CACHE.shopping.map(item => `
+    <div class="shopping-item">
+      <div>
+        <div class="ing-name">${item.ingredient}</div>
+        <div class="unlocks">Разблокирует: ${item.unlocks.join(', ')}</div>
+      </div>
+      <div>
+        <button class="btn btn-success btn-sm" onclick="buyShoppingItem('${item.ingredient}')">Куплено ✓</button>
+      </div>
+    </div>`).join('');
+}
+
+async function buyShoppingItem(ing) {
+  try {
+    await api('/api/fridge/add', 'POST', { ingredient: ing });
+    toast(`Добавлено в холодильник: ${ing}`);
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ─── History ───
+function renderHistory() {
+  const c = document.getElementById('history-container');
+  if (CACHE.history.length === 0) {
+    c.innerHTML = '<p style="color:var(--text-dim)">История пуста</p>';
+    return;
+  }
+  const sorted = [...CACHE.history].reverse();
+  c.innerHTML = sorted.map((h, revIdx) => {
+    const realIdx = CACHE.history.length - 1 - revIdx;
+    const date = new Date(h.date);
+    const dateStr = date.toLocaleDateString('ru') + ' ' + date.toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+    return `<div class="history-item">
+      <div>
+        <div class="dish-name">${h.dish}</div>
+        <div class="date">${dateStr}</div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-danger btn-sm" onclick="deleteHistory(${realIdx})">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteHistory(idx) {
+  try {
+    await api('/api/history/' + idx, 'DELETE');
+    toast('Запись удалена');
+    await refreshAll();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ─── Init ───
+refreshAll();
+setInterval(refreshAll, 30000); // auto-refresh every 30s
+</script>
+</body>
+</html>
