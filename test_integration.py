@@ -30,6 +30,7 @@ _pkg = importlib.import_module(_PLUGIN_DIR.name)
 _repos_mod = importlib.import_module(".src.repositories", _PLUGIN_DIR.name)
 _dii_mod = importlib.import_module(".src.dii", _PLUGIN_DIR.name)
 _tuning_mod = importlib.import_module(".src.tuning", _PLUGIN_DIR.name)
+_handlers_mod = importlib.import_module(".src.handlers", _PLUGIN_DIR.name)
 
 # ---------------------------------------------------------------------------
 # Tmp data directory lifecycle
@@ -176,6 +177,61 @@ split_shopping_list = _load_handler("split_shopping_list")
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_registered_update_fridge_schema_exposes_required_arguments():
+    print("\n-- plugin registration schema (update_fridge_inventory) --")
+
+    class CaptureContext:
+        def __init__(self):
+            self.tools = {}
+
+        def register_tool(self, name, toolset, schema, handler):
+            self.tools[name] = schema
+
+        def inject_message(self, content):
+            pass
+
+    discovered = {
+        name: schema
+        for name, schema, _handler in _handlers_mod.iter_tools()
+    }
+    originals = json.loads(json.dumps(discovered))
+    ctx = CaptureContext()
+    _pkg.register(ctx)
+    schema = ctx.tools["update_fridge_inventory"]
+    parameters = schema.get("parameters", {})
+    properties = parameters.get("properties", {})
+
+    check("registered schema contains parameters", parameters.get("type") == "object")
+    check("registered schema exposes action", "action" in properties)
+    check("registered schema exposes ingredients", "ingredients" in properties)
+    check(
+        "registered schema requires action and ingredients",
+        set(parameters.get("required", [])) == {"action", "ingredients"},
+    )
+    check(
+        "registration covers exactly the auto-discovered handlers",
+        set(ctx.tools) == set(discovered),
+    )
+    check(
+        "every registered tool preserves its complete input schema",
+        all(
+            tool_schema.get("name") == tool_name
+            and tool_schema.get("description") == originals[tool_name]["description"]
+            and tool_schema.get("parameters")
+            == {
+                key: value
+                for key, value in originals[tool_name].items()
+                if key != "description"
+            }
+            for tool_name, tool_schema in ctx.tools.items()
+        ),
+    )
+    check(
+        "registration does not mutate handler-owned schemas",
+        discovered == originals,
+    )
 
 
 def test_list_fridge():
@@ -981,6 +1037,7 @@ def test_phase3_shopping_budget_flow():
 def main():
     _setup_tmp_data()
     try:
+        test_registered_update_fridge_schema_exposes_required_arguments()
         test_list_fridge()
         test_update_fridge_add()
         test_update_fridge_add_duplicate()

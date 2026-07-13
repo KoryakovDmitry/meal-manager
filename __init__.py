@@ -13,6 +13,19 @@ from .src.repositories import configure as _configure_repos
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 
+def _function_schema(name: str, schema: dict) -> dict:
+    """Wrap a handler's JSON input schema in Hermes' function-tool shape."""
+    return {
+        "name": name,
+        "description": schema.get("description", ""),
+        "parameters": {
+            key: value
+            for key, value in schema.items()
+            if key != "description"
+        },
+    }
+
+
 def register(ctx, *, data_dir: Path | str | None = None):
     """Register all meal_manager tools and the skill with the Hermes context.
 
@@ -33,7 +46,12 @@ def register(ctx, *, data_dir: Path | str | None = None):
         _configure_dii(data_dir / "sessions")
 
     for name, schema, handler in iter_tools():
-        ctx.register_tool(name, "meal_manager", schema, handler)
+        ctx.register_tool(
+            name,
+            "meal_manager",
+            _function_schema(name, schema),
+            handler,
+        )
 
     skill_path = Path(__file__).parent / "skill.md"
     ctx.inject_message(skill_path.read_text(encoding="utf-8"))

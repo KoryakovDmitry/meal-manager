@@ -27,6 +27,18 @@
 
 ---
 
+## 🔨 ACTIVE INTERMEDIATE ISSUES
+
+### TOOLS-1 — Plugin tool schema envelope
+
+**Проблема.** Все 34 handler-схемы передавались в Hermes как body JSON Schema без обязательной function-tool оболочки `name/description/parameters`. В результате модель видела инструменты без аргументов; `update_fridge_inventory` нельзя было вызвать с обязательными `action` и `ingredients`.
+
+**Scope и acceptance.** Исправить единый registration boundary, покрыть реальный `register(ctx)` seam регрессией, проверить полный gate, выполнить независимое ревью, commit/push, gateway reload и live-schema verification.
+
+Подробный ticket: [`docs/issues/TOOLS-1-plugin-tool-schema-envelope.md`](docs/issues/TOOLS-1-plugin-tool-schema-envelope.md).
+
+---
+
 ## ✅ COMPLETED INTERMEDIATE ISSUES
 
 ### UIX-1 — Web shell UX refresh ✅
