@@ -743,6 +743,7 @@ def get_stats():
         "cookable_now": cookable,
         "recently_cooked": len(recent),
         "unused_fridge_items": unused_fridge,
+        "fridge_utility": fridge_utility,
         "top_ingredients": total_ingredients_used.most_common(10),
         "most_cooked": cook_counts.most_common(5),
         "cooks_last_7_days": cooks_by_day,
@@ -750,6 +751,10 @@ def get_stats():
     }
 
 # ─── Serve frontend ─────────────────────────────────────────────────────
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     html_path = Path(__file__).parent / "static" / "index.html"

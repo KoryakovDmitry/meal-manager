@@ -5,6 +5,7 @@ Usage: python3 web/test_web_plans.py
 
 import importlib.util
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,23 @@ if spec is None or spec.loader is None:
     raise RuntimeError("could not load web/main.py")
 web: Any = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(web)
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    def luminance(color: str) -> float:
+        channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [
+            value / 12.92
+            if value <= 0.04045
+            else ((value + 0.055) / 1.055) ** 2.4
+            for value in channels
+        ]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    light, dark = sorted(
+        (luminance(foreground), luminance(background)), reverse=True
+    )
+    return (light + 0.05) / (dark + 0.05)
 
 
 def write_plan(directory: Path, week: str, payload) -> None:
@@ -272,6 +290,27 @@ def main():
         except HTTPException as exc:
             assert exc.status_code == 400
 
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        original_paths = (web.DISHES_PATH, web.FRIDGE_PATH, web.HISTORY_PATH)
+        web.DISHES_PATH = data_dir / "dishes.json"
+        web.FRIDGE_PATH = data_dir / "fridge.json"
+        web.HISTORY_PATH = data_dir / "history.json"
+        web.DISHES_PATH.write_text(json.dumps({"dishes": [
+            {"name": "суп", "ingredients": {"лук": True, "морковь": True}},
+            {"name": "паста", "ingredients": {"лук": True, "томаты": True}},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        web.FRIDGE_PATH.write_text(
+            json.dumps(["лук", "морковь", "банан"], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        try:
+            stats = web.get_stats()
+        finally:
+            web.DISHES_PATH, web.FRIDGE_PATH, web.HISTORY_PATH = original_paths
+        assert stats["fridge_utility"] == {"лук": 2, "морковь": 1, "банан": 0}
+        assert stats["unused_fridge_items"] == ["банан"]
+
     plan_routes = {
         route.path: route.methods
         for route in web.app.routes
@@ -291,6 +330,65 @@ def main():
     assert "escapeHtml(item.ingredient)" in html
     assert "weekly_budget_status" in html
     assert "unpriced_trip_items" in html
+
+    # UI/UX navigation contract: local favicon, vertical collapsible sidebar,
+    # persisted desktop state, and dismissible mobile drawer.
+    assert '<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">' in html
+    assert (WEB_DIR / "static" / "favicon.svg").is_file()
+    assert any(route.path == "/static" for route in web.app.routes)
+    assert '<aside class="sidebar" id="app-sidebar"' in html
+    assert 'id="sidebar-toggle"' in html
+    assert 'aria-controls="app-sidebar"' in html
+    assert "Развернуть подписи меню" in html
+    assert 'id="mobile-menu-toggle"' in html
+    assert 'id="mobile-menu-close"' in html
+    assert 'id="sidebar-backdrop"' in html
+    assert '<div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>' in html
+    assert "function trapMobileNavigationFocus(event)" in html
+    assert "event.shiftKey" in html
+    assert ".fridge-item .remove," in html
+    assert ".ing-editor-row .toggle-ess," in html
+    assert ".ing-editor-row .del-ing { min-width: 44px; min-height: 44px" in html
+    assert ".icon-action { min-width: 44px; min-height: 44px" in html
+    assert 'data-action="delete" data-value="${dishName}" aria-label="Удалить рецепт ${dishName}"' in html
+    assert 'data-action="edit" data-value="${suggestionName}" aria-label="Изменить рецепт ${suggestionName}"' in html
+    assert 'aria-label="Удалить запись истории ${dishName}"' in html
+    assert 'aria-label="Удалить продукт ${safeItem}"' in html
+    assert 'aria-label="Удалить ингредиент ${safeName}"' in html
+    assert "bindDataActions" in html
+    unsafe_inline_data = re.compile(
+        r'on(?:click|keydown|change)="[^"]*\$\{(?:d\.name|s\.name|h\.dish|item|name)'
+    )
+    assert unsafe_inline_data.search(html) is None
+    assert 'role="dialog" aria-modal="true" aria-labelledby="dish-modal-title"' in html
+    assert "function trapModalFocus(event)" in html
+    assert "modalReturnFocus" in html
+    assert "document.querySelector('.app').setAttribute('inert', '')" in html
+    assert '<button class="plan-row ' in html
+    assert ".toast.error { background: var(--primary); color: white; }" in html
+    assert '<div class="tabs">' not in html
+    assert "meal-sidebar-collapsed" in html
+    assert "aria-current" in html
+    assert "event.key === 'Escape'" in html
+    assert "sidebar.setAttribute('inert', '')" in html
+    assert "sidebar.removeAttribute('inert')" in html
+    assert "mobileMenuClose.focus()" in html
+    assert "returnTarget.focus()" in html
+    assert ".sidebar-toggle { width: 44px; height: 44px" in html
+    assert "--text-muted: #78808d;" in html
+    assert _contrast_ratio("#78808d", "#0e1015") >= 4.5
+    assert _contrast_ratio("#78808d", "#12141a") >= 4.5
+    assert ".ingredient-tag.optional { color: var(--text-muted);" in html
+    assert ".fridge-item.unused { color: var(--text-muted);" in html
+    assert ".dish-card.recent { border-style: dashed; }" in html
+    assert ".ingredient-tag.optional { opacity:" not in html
+    assert ".fridge-item.unused { opacity:" not in html
+    assert ".dish-card.recent { opacity:" not in html
+    assert "--primary: #cf3b55;" in html
+    assert "--primary-hover: #c4314d;" in html
+    assert _contrast_ratio("#ffffff", "#cf3b55") >= 4.5
+    assert _contrast_ratio("#ffffff", "#c4314d") >= 4.5
+    assert "@media (max-width: 768px)" in html
     print("web weekly-plan tests: PASS")
 
 

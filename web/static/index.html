@@ -3,67 +3,158 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🍽 Meal Planning</title>
+<title>Meal Planning</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b0c10">
 <style>
 :root {
-  --bg: #0f0f1a;
-  --bg-card: #1a1a2e;
-  --bg-card-hover: #22223a;
-  --bg-input: #16162a;
-  --accent: #e94560;
-  --accent-hover: #ff5e7a;
-  --accent-green: #0f3460;
-  --green: #4ecca3;
-  --green-dim: #2d8f6f;
-  --orange: #ffa931;
-  --text: #eee;
-  --text-dim: #888;
-  --text-muted: #555;
-  --border: #2a2a4a;
-  --radius: 12px;
-  --shadow: 0 4px 20px rgba(0,0,0,0.3);
+  --bg: #0b0c10;
+  --bg-card: #12141a;
+  --bg-card-hover: #171a22;
+  --bg-input: #0f1117;
+  --sidebar: #0e1015;
+  --accent: #f0526b;
+  --accent-hover: #ff6b82;
+  --primary: #cf3b55;
+  --primary-hover: #c4314d;
+  --accent-soft: rgba(240,82,107,0.12);
+  --accent-green: #173d38;
+  --green: #55d6b0;
+  --green-dim: #36a987;
+  --orange: #f5b85c;
+  --text: #f3f4f6;
+  --text-dim: #9ca3af;
+  --text-muted: #78808d;
+  --border: rgba(255,255,255,0.075);
+  --border-strong: rgba(255,255,255,0.12);
+  --radius: 10px;
+  --shadow: 0 12px 40px rgba(0,0,0,0.18);
+  --success: var(--green);
+  --warning: var(--orange);
+  --danger: var(--accent);
+  --accent-light: #ff8294;
+  --sidebar-width: 248px;
+  --sidebar-collapsed-width: 76px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+html { background: var(--bg); }
 body {
-  font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv01", "ss03";
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
-  line-height: 1.6;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, textarea, select { font: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
 }
 
-/* ─── Layout ─── */
-.app { max-width: 1280px; margin: 0 auto; padding: 16px; }
-
-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 0; margin-bottom: 8px;
+/* ─── App shell ─── */
+.app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  transition: grid-template-columns 180ms ease;
 }
-header h1 { font-size: 1.6rem; }
-header h1 span { color: var(--accent); }
+body.sidebar-collapsed .app { grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr); }
 
-/* ─── Tabs ─── */
-.tabs {
-  display: flex; gap: 4px; margin-bottom: 20px;
-  background: var(--bg-card); border-radius: var(--radius); padding: 4px;
-  overflow-x: auto; -webkit-overflow-scrolling: touch;
-  scrollbar-width: none; -ms-overflow-style: none;
+.content-shell { min-width: 0; }
+.topbar {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px clamp(20px, 3vw, 40px);
+  border-bottom: 1px solid var(--border);
+  background: rgba(11,12,16,0.9);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(14px);
 }
-.tabs::-webkit-scrollbar { display: none; }
+.topbar-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.topbar-copy { min-width: 0; }
+.topbar h1 { font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; }
+.topbar p { color: var(--text-dim); font-size: 0.78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.content { max-width: 1440px; padding: clamp(20px, 3vw, 40px); }
+
+/* ─── Sidebar navigation ─── */
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: visible;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+}
+.sidebar-head {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+.brand-mark { width: 34px; height: 34px; flex: 0 0 34px; }
+.brand-copy { min-width: 0; white-space: nowrap; }
+.brand-title { display: block; font-size: 0.92rem; font-weight: 650; letter-spacing: -0.02em; }
+.brand-subtitle { display: block; color: var(--text-muted); font-size: 0.68rem; margin-top: 1px; }
+.sidebar-toggle, .mobile-menu-toggle, .mobile-menu-close {
+  width: 44px; height: 44px; border: 0; border-radius: 8px;
+  display: grid; place-items: center; cursor: pointer;
+  color: var(--text-dim); background: transparent;
+  transition: color 150ms ease, background 150ms ease;
+}
+.sidebar-toggle { width: 44px; height: 44px; flex: 0 0 44px; }
+.sidebar-toggle:hover, .mobile-menu-toggle:hover, .mobile-menu-close:hover { color: var(--text); background: rgba(255,255,255,0.055); }
+.mobile-menu-toggle, .mobile-menu-close { display: none; }
+.sidebar-nav { display: grid; gap: 4px; padding: 14px 10px; }
 .tab {
-  flex: 1 0 auto; padding: 10px 14px; border: none; background: none;
-  color: var(--text-dim); font-size: 0.85rem; font-weight: 600; cursor: pointer;
-  border-radius: 8px; transition: all 0.2s; white-space: nowrap; min-width: max-content;
+  width: 100%; min-height: 46px; padding: 0 12px;
+  display: flex; align-items: center; gap: 12px;
+  border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--text-dim);
+  font-size: 0.84rem; font-weight: 530; text-align: left;
+  cursor: pointer; white-space: nowrap;
+  transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
 }
-.tab:hover { color: var(--text); }
-.tab.active { background: var(--accent); color: white; }
+.tab:hover { color: var(--text); background: rgba(255,255,255,0.035); }
+.tab.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: rgba(240,82,107,0.18);
+}
+.tab-icon { width: 22px; flex: 0 0 22px; display: grid; place-items: center; font-size: 1rem; }
+.tab-label { overflow: hidden; text-overflow: ellipsis; }
+.sidebar-foot { margin-top: auto; padding: 12px 10px 16px; border-top: 1px solid var(--border); }
+.sidebar-refresh { justify-content: flex-start; }
+.sidebar-backdrop { display: none; }
+body.sidebar-collapsed .brand-copy,
+body.sidebar-collapsed .tab-label,
+body.sidebar-collapsed .sidebar-refresh .tab-label { opacity: 0; width: 0; pointer-events: none; }
+body.sidebar-collapsed .sidebar-head { padding-inline: 12px; justify-content: center; }
+body.sidebar-collapsed .brand { flex: 0 0 34px; }
+body.sidebar-collapsed .sidebar-toggle { position: absolute; left: 54px; background: var(--bg-card); border: 1px solid var(--border); }
+body.sidebar-collapsed .tab { justify-content: center; padding-inline: 0; }
+body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
 
 /* ─── Cards ─── */
 .card {
-  background: var(--bg-card); border-radius: var(--radius); padding: 20px;
-  box-shadow: var(--shadow); margin-bottom: 16px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: clamp(16px, 2vw, 22px);
+  box-shadow: none; margin-bottom: 16px;
 }
 
 /* ─── Stats Grid ─── */
@@ -71,12 +162,13 @@ header h1 span { color: var(--accent); }
   display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px; margin-bottom: 20px;
 }
+.stats-grid > .empty:only-child { grid-column: 1 / -1; width: 100%; }
 .stat-box {
-  background: var(--bg-card); border-radius: var(--radius); padding: 16px;
-  text-align: center; border: 1px solid var(--border);
+  background: var(--bg-card); border-radius: var(--radius); padding: 18px;
+  text-align: left; border: 1px solid var(--border);
 }
-.stat-box .num { font-size: 2rem; font-weight: 700; }
-.stat-box .label { font-size: 0.8rem; color: var(--text-dim); margin-top: 4px; }
+.stat-box .num { font-size: 1.75rem; line-height: 1.1; font-weight: 650; letter-spacing: -0.04em; }
+.stat-box .label { font-size: 0.76rem; color: var(--text-dim); margin-top: 7px; }
 .stat-box.green .num { color: var(--green); }
 .stat-box.orange .num { color: var(--orange); }
 .stat-box.accent .num { color: var(--accent); }
@@ -92,7 +184,7 @@ header h1 span { color: var(--accent); }
 }
 .dish-card:hover { background: var(--bg-card-hover); border-color: var(--accent); }
 .dish-card.cookable { border-left: 3px solid var(--green); }
-.dish-card.recent { opacity: 0.55; }
+.dish-card.recent { border-style: dashed; }
 .dish-card h3 { font-size: 1.1rem; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
 .dish-card .score {
   font-size: 0.75rem; padding: 2px 8px; border-radius: 20px; background: var(--bg-input);
@@ -113,7 +205,7 @@ header h1 span { color: var(--accent); }
 }
 .ingredient-tag.have { background: rgba(78,204,163,0.12); color: var(--green); }
 .ingredient-tag.missing { background: rgba(255,169,49,0.1); color: var(--orange); }
-.ingredient-tag.optional { opacity: 0.6; text-decoration: line-through; }
+.ingredient-tag.optional { color: var(--text-muted); text-decoration: line-through; }
 
 /* ─── Fridge ─── */
 .fridge-grid {
@@ -128,7 +220,7 @@ header h1 span { color: var(--accent); }
   font-size: 0.7rem; color: var(--text-dim); background: var(--bg-card);
   padding: 1px 6px; border-radius: 10px;
 }
-.fridge-item.unused { opacity: 0.5; border-style: dashed; }
+.fridge-item.unused { color: var(--text-muted); border-style: dashed; }
 .fridge-item .remove {
   cursor: pointer; color: var(--accent); font-weight: bold; font-size: 1.1rem;
   border: none; background: none; padding: 0; line-height: 1;
@@ -137,7 +229,7 @@ header h1 span { color: var(--accent); }
 /* ─── Forms ─── */
 .form-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 input[type="text"], textarea, select {
-  background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px;
+  min-height: 44px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 14px; color: var(--text); font-size: 0.9rem; outline: none;
   transition: border-color 0.2s; flex: 1; min-width: 120px;
 }
@@ -145,17 +237,18 @@ input[type="text"]:focus, textarea:focus { border-color: var(--accent); }
 textarea { resize: vertical; min-height: 60px; }
 
 .btn {
-  padding: 10px 20px; border: none; border-radius: 8px; font-weight: 600;
-  cursor: pointer; transition: all 0.2s; font-size: 0.9rem; white-space: nowrap;
+  min-height: 44px; padding: 9px 18px; border: 1px solid transparent; border-radius: 8px; font-weight: 600;
+  cursor: pointer; transition: color 0.15s, background 0.15s, border-color 0.15s; font-size: 0.86rem; white-space: nowrap;
 }
-.btn-primary { background: var(--accent); color: white; }
-.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary { background: var(--primary); color: white; }
+.btn-primary:hover { background: var(--primary-hover); }
 .btn-success { background: var(--green); color: #0f0f1a; }
 .btn-success:hover { background: var(--green-dim); }
 .btn-ghost { background: var(--bg-input); color: var(--text-dim); border: 1px solid var(--border); }
 .btn-ghost:hover { color: var(--text); }
 .btn-sm { padding: 5px 10px; font-size: 0.8rem; }
 .btn-danger { background: rgba(233,69,96,0.15); color: var(--accent); border: 1px solid rgba(233,69,96,0.3); }
+.icon-action { min-width: 44px; min-height: 44px; padding: 0; display: inline-grid; place-items: center; flex: 0 0 44px; }
 
 /* ─── Ingredient editor for dish ─── */
 .ing-editor { margin-top: 12px; }
@@ -168,6 +261,13 @@ textarea { resize: vertical; min-height: 60px; }
 .ing-editor-row .toggle-ess.opt { background: var(--bg-input); color: var(--text-dim); }
 .ing-editor-row .del-ing {
   background: none; border: none; color: var(--accent); cursor: pointer; font-size: 1.1rem;
+}
+.fridge-item .remove,
+.ing-editor-row .toggle-ess,
+.ing-editor-row .del-ing { min-width: 44px; min-height: 44px; display: inline-grid; place-items: center; flex: 0 0 auto; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
 /* ─── Shopping list ─── */
@@ -192,7 +292,9 @@ textarea { resize: vertical; min-height: 60px; }
 .plan-history { display: grid; gap: 8px; margin-bottom: 16px; }
 .plan-row {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  width: 100%; min-height: 44px; text-align: left; color: inherit; font: inherit;
   padding: 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: transparent;
   cursor: pointer; transition: border-color 0.2s, background 0.2s;
 }
 .plan-row:hover, .plan-row.active { border-color: var(--accent); background: rgba(108,92,231,0.08); }
@@ -225,7 +327,7 @@ textarea { resize: vertical; min-height: 60px; }
 /* ─── Misc ─── */
 .page { display: none; }
 .page.active { display: block; }
-.empty { text-align: center; padding: 40px; color: var(--text-dim); }
+.empty { text-align: center; padding: 40px; color: var(--text-dim); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .loading { text-align: center; padding: 20px; color: var(--text-dim); }
 .toast {
   position: fixed; bottom: 20px; right: 20px; z-index: 200;
@@ -233,7 +335,7 @@ textarea { resize: vertical; min-height: 60px; }
   border-radius: 8px; font-weight: 600; box-shadow: var(--shadow);
   animation: slideIn 0.3s ease; max-width: 300px;
 }
-.toast.error { background: var(--accent); color: white; }
+.toast.error { background: var(--primary); color: white; }
 @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .section-title { font-size: 1.2rem; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
 .add-btn { font-size: 1.2rem; }
@@ -246,38 +348,102 @@ textarea { resize: vertical; min-height: 60px; }
 }
 .chart-bar .day { position: absolute; bottom: -20px; left: 0; right: 0; text-align: center; font-size: 0.65rem; color: var(--text-dim); }
 
-/* ─── Mobile responsive ─── */
+/* ─── Responsive shell ─── */
 @media (max-width: 768px) {
-  .app { padding: 10px; }
-  header h1 { font-size: 1.3rem; }
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .app, body.sidebar-collapsed .app { display: block; }
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; width: min(84vw, 286px); height: 100dvh;
+    transform: translateX(-102%);
+    visibility: hidden;
+    transition: transform 180ms ease, visibility 0s linear 180ms;
+    box-shadow: 24px 0 60px rgba(0,0,0,0.45);
+  }
+  body.sidebar-open { overflow: hidden; }
+  body.sidebar-open .sidebar { transform: translateX(0); visibility: visible; transition-delay: 0s; }
+  body.sidebar-collapsed .brand-copy,
+  body.sidebar-collapsed .tab-label,
+  body.sidebar-collapsed .sidebar-refresh .tab-label { opacity: 1; width: auto; pointer-events: auto; }
+  body.sidebar-collapsed .sidebar-head { padding-inline: 16px; justify-content: initial; }
+  body.sidebar-collapsed .brand { flex: 1; }
+  body.sidebar-collapsed .sidebar-toggle { position: static; background: transparent; border: 0; }
+  body.sidebar-collapsed .tab,
+  body.sidebar-collapsed .sidebar-refresh { justify-content: flex-start; padding-inline: 12px; }
+  .sidebar-toggle { display: none; }
+  .sidebar-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 30;
+    background: rgba(0,0,0,0.58); opacity: 0; visibility: hidden; pointer-events: none;
+    transition: opacity 180ms ease, visibility 0s linear 180ms;
+  }
+  body.sidebar-open .sidebar-backdrop { opacity: 1; visibility: visible; pointer-events: auto; transition-delay: 0s; }
+  .mobile-menu-toggle, .mobile-menu-close { display: grid; flex: 0 0 44px; }
+  .topbar { min-height: 64px; padding: 10px 14px; }
+  .topbar > .btn { display: none; }
+  .content { max-width: none; padding: 16px 12px 28px; }
+  .empty { padding: 32px 16px; }
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dishes-grid { grid-template-columns: 1fr; }
-  .stat-box .num { font-size: 1.5rem; }
+  .stat-box .num { font-size: 1.45rem; }
   .form-row { flex-direction: column; }
   .form-row input, .form-row .btn { width: 100%; }
   .modal { padding: 16px; max-width: 100%; }
   .ing-editor-row { flex-wrap: wrap; }
   .shopping-item { flex-direction: column; align-items: flex-start; gap: 8px; }
 }
+
+@media (max-width: 420px) {
+  .stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-box { padding: 14px; }
+  .topbar p { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
 </style>
 </head>
 <body>
 <div class="app">
-  <header>
-    <h1>🍽 <span>Meal</span> Planning</h1>
-    <button class="btn btn-ghost btn-sm" onclick="refreshAll()">↻ Обновить</button>
-  </header>
+  <aside class="sidebar" id="app-sidebar" aria-label="Основная навигация">
+    <div class="sidebar-head">
+      <div class="brand">
+        <img class="brand-mark" src="/static/favicon.svg" alt="">
+        <div class="brand-copy">
+          <span class="brand-title">Meal Planning</span>
+          <span class="brand-subtitle">Дима · Илиана</span>
+        </div>
+      </div>
+      <button class="mobile-menu-close" id="mobile-menu-close" type="button" aria-label="Закрыть меню">×</button>
+      <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Свернуть подписи меню" aria-controls="app-sidebar" aria-expanded="true" title="Свернуть подписи меню">‹</button>
+    </div>
 
-  <div class="tabs">
-    <button class="tab active" data-tab="overview">📊 Обзор</button>
-    <button class="tab" data-tab="dishes">🍳 Рецепты</button>
-    <button class="tab" data-tab="fridge">🥶 Холодильник</button>
-    <button class="tab" data-tab="suggestions">💡 Рекомендации</button>
-    <button class="tab" data-tab="shopping">🛒 Покупки</button>
-    <button class="tab" data-tab="plans">🗓 Планы</button>
-    <button class="tab" data-tab="history">📜 История</button>
-  </div>
+    <nav class="sidebar-nav">
+      <button class="tab active" data-tab="overview" data-title="Обзор" aria-current="page" title="Обзор"><span class="tab-icon">▦</span><span class="tab-label">Обзор</span></button>
+      <button class="tab" data-tab="dishes" data-title="Рецепты" title="Рецепты"><span class="tab-icon">◉</span><span class="tab-label">Рецепты</span></button>
+      <button class="tab" data-tab="fridge" data-title="Холодильник" title="Холодильник"><span class="tab-icon">❄</span><span class="tab-label">Холодильник</span></button>
+      <button class="tab" data-tab="suggestions" data-title="Рекомендации" title="Рекомендации"><span class="tab-icon">✦</span><span class="tab-label">Рекомендации</span></button>
+      <button class="tab" data-tab="shopping" data-title="Покупки" title="Покупки"><span class="tab-icon">⌑</span><span class="tab-label">Покупки</span></button>
+      <button class="tab" data-tab="plans" data-title="Планы" title="Планы"><span class="tab-icon">▣</span><span class="tab-label">Планы</span></button>
+      <button class="tab" data-tab="history" data-title="История" title="История"><span class="tab-icon">↺</span><span class="tab-label">История</span></button>
+    </nav>
 
+    <div class="sidebar-foot">
+      <button class="tab sidebar-refresh" type="button" onclick="refreshAll()" title="Обновить данные"><span class="tab-icon">↻</span><span class="tab-label">Обновить данные</span></button>
+    </div>
+  </aside>
+  <div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>
+
+  <div class="content-shell">
+    <header class="topbar">
+      <div class="topbar-main">
+        <button class="mobile-menu-toggle" id="mobile-menu-toggle" type="button" aria-label="Открыть меню" aria-controls="app-sidebar" aria-expanded="false">☰</button>
+        <div class="topbar-copy">
+          <h1 id="page-title">Обзор</h1>
+          <p id="page-subtitle">Состояние кухни и быстрые сигналы</p>
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-sm" type="button" onclick="refreshAll()">↻ Обновить</button>
+    </header>
+    <main class="content">
   <!-- ═══ Overview ═══ -->
   <div class="page active" id="page-overview">
     <div class="stats-grid" id="stats-grid">
@@ -300,6 +466,7 @@ textarea { resize: vertical; min-height: 60px; }
   <!-- ═══ Dishes ═══ -->
   <div class="page" id="page-dishes">
     <div class="form-row">
+      <label class="sr-only" for="dish-search">Поиск рецепта</label>
       <input type="text" id="dish-search" placeholder="🔍 Поиск рецепта..." oninput="renderDishes()">
     </div>
     <div id="dishes-container">
@@ -312,6 +479,7 @@ textarea { resize: vertical; min-height: 60px; }
     <div class="card">
       <div class="section-title">🥶 Что в холодильнике</div>
       <div class="form-row">
+        <label class="sr-only" for="fridge-add-input">Добавить продукт в холодильник</label>
         <input type="text" id="fridge-add-input" placeholder="Добавить продукт..." onkeydown="if(event.key==='Enter')addFridgeItem()">
         <button class="btn btn-primary" onclick="addFridgeItem()">+ Добавить</button>
       </div>
@@ -361,6 +529,8 @@ textarea { resize: vertical; min-height: 60px; }
       <div id="history-container"></div>
     </div>
   </div>
+    </main>
+  </div>
 </div>
 
 <div id="modal-container"></div>
@@ -390,14 +560,151 @@ function toast(msg, isError=false) {
   setTimeout(() => el.remove(), 3000);
 }
 
-// ─── Tab navigation ───
-document.querySelectorAll('.tab').forEach(t => {
-  t.onclick = () => {
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.page').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    document.getElementById('page-' + t.dataset.tab).classList.add('active');
-  };
+// ─── Navigation shell ───
+const sidebar = document.getElementById('app-sidebar');
+const sidebarToggle = document.getElementById('sidebar-toggle');
+const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+const mobileMenuClose = document.getElementById('mobile-menu-close');
+const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+const contentShell = document.querySelector('.content-shell');
+const mobileNavigationQuery = window.matchMedia('(max-width: 768px)');
+let mobileMenuReturnFocus = null;
+const pageSubtitles = {
+  overview: 'Состояние кухни и быстрые сигналы',
+  dishes: 'Каталог блюд и ингредиентов',
+  fridge: 'Продукты, которые сейчас под рукой',
+  suggestions: 'Что можно приготовить из имеющегося',
+  shopping: 'Быстрые покупки, открывающие новые блюда',
+  plans: 'Недельные планы, покупки и бюджет',
+  history: 'Что и когда вы готовили'
+};
+
+function syncMobileNavigation(open, restoreFocus = false) {
+  const isMobile = mobileNavigationQuery.matches;
+  const shouldOpen = isMobile && open;
+
+  document.body.classList.toggle('sidebar-open', shouldOpen);
+  mobileMenuToggle.setAttribute('aria-expanded', String(shouldOpen));
+  mobileMenuToggle.setAttribute('aria-label', shouldOpen ? 'Закрыть меню' : 'Открыть меню');
+
+  if (!shouldOpen) {
+    sidebar.removeAttribute('role');
+    sidebar.removeAttribute('aria-modal');
+  }
+
+  if (isMobile) {
+    if (shouldOpen) {
+      sidebar.removeAttribute('inert');
+      sidebar.removeAttribute('aria-hidden');
+      sidebar.setAttribute('role', 'dialog');
+      sidebar.setAttribute('aria-modal', 'true');
+      sidebarBackdrop.removeAttribute('inert');
+      mobileMenuClose.focus();
+    } else {
+      sidebar.setAttribute('inert', '');
+      sidebar.setAttribute('aria-hidden', 'true');
+      sidebarBackdrop.setAttribute('inert', '');
+      sidebarBackdrop.setAttribute('aria-hidden', 'true');
+    }
+  } else {
+    sidebar.removeAttribute('inert');
+    sidebar.removeAttribute('aria-hidden');
+    sidebarBackdrop.setAttribute('inert', '');
+    sidebarBackdrop.setAttribute('aria-hidden', 'true');
+  }
+
+  if (shouldOpen) contentShell.setAttribute('inert', '');
+  else contentShell.removeAttribute('inert');
+
+  if (!shouldOpen && restoreFocus) {
+    const returnTarget = mobileNavigationQuery.matches ? mobileMenuReturnFocus : sidebarToggle;
+    if (returnTarget?.isConnected) returnTarget.focus();
+    mobileMenuReturnFocus = null;
+  }
+}
+
+function setMobileMenu(open) {
+  const wasOpen = document.body.classList.contains('sidebar-open');
+  if (open && mobileNavigationQuery.matches && !wasOpen) {
+    mobileMenuReturnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : mobileMenuToggle;
+  }
+  syncMobileNavigation(open, wasOpen && !open);
+}
+
+function syncNavigationMode() {
+  const wasOpen = document.body.classList.contains('sidebar-open');
+  const focusedInSidebar = sidebar.contains(document.activeElement);
+  const movingToDesktop = wasOpen && !mobileNavigationQuery.matches;
+  syncMobileNavigation(wasOpen, movingToDesktop);
+  if (mobileNavigationQuery.matches && !wasOpen && focusedInSidebar) mobileMenuToggle.focus();
+}
+
+syncNavigationMode();
+mobileNavigationQuery.addEventListener('change', syncNavigationMode);
+
+function trapMobileNavigationFocus(event) {
+  if (event.key !== 'Tab' || !document.body.classList.contains('sidebar-open')) return;
+  const focusable = [...sidebar.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter(control => control.getClientRects().length > 0 && getComputedStyle(control).visibility !== 'hidden');
+  if (!focusable.length) return;
+
+  const currentIndex = focusable.indexOf(document.activeElement);
+  if (event.shiftKey && currentIndex <= 0) {
+    event.preventDefault();
+    focusable.at(-1).focus();
+  } else if (!event.shiftKey && currentIndex === focusable.length - 1) {
+    event.preventDefault();
+    focusable[0].focus();
+  }
+}
+
+sidebar.addEventListener('keydown', trapMobileNavigationFocus);
+
+function selectTab(tab) {
+  document.querySelectorAll('.tab[data-tab]').forEach(item => {
+    const active = item === tab;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
+  document.getElementById('page-' + tab.dataset.tab).classList.add('active');
+  document.getElementById('page-title').textContent = tab.dataset.title;
+  document.getElementById('page-subtitle').textContent = pageSubtitles[tab.dataset.tab] || '';
+  if (window.matchMedia('(max-width: 768px)').matches) setMobileMenu(false);
+}
+
+document.querySelectorAll('.tab[data-tab]').forEach(tab => {
+  tab.addEventListener('click', () => selectTab(tab));
+});
+
+let sidebarCollapsed = false;
+try { sidebarCollapsed = localStorage.getItem('meal-sidebar-collapsed') === 'true'; } catch (_) {}
+document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+sidebarToggle.setAttribute('aria-expanded', String(!sidebarCollapsed));
+sidebarToggle.textContent = sidebarCollapsed ? '›' : '‹';
+sidebarToggle.setAttribute('aria-label', sidebarCollapsed ? 'Развернуть подписи меню' : 'Свернуть подписи меню');
+sidebarToggle.title = sidebarToggle.getAttribute('aria-label');
+
+sidebarToggle.addEventListener('click', () => {
+  sidebarCollapsed = !document.body.classList.contains('sidebar-collapsed');
+  document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+  sidebarToggle.setAttribute('aria-expanded', String(!sidebarCollapsed));
+  sidebarToggle.textContent = sidebarCollapsed ? '›' : '‹';
+  sidebarToggle.setAttribute('aria-label', sidebarCollapsed ? 'Развернуть подписи меню' : 'Свернуть подписи меню');
+  sidebarToggle.title = sidebarToggle.getAttribute('aria-label');
+  try { localStorage.setItem('meal-sidebar-collapsed', String(sidebarCollapsed)); } catch (_) {}
+});
+mobileMenuToggle.addEventListener('click', () => setMobileMenu(!document.body.classList.contains('sidebar-open')));
+mobileMenuClose.addEventListener('click', () => setMobileMenu(false));
+sidebarBackdrop.addEventListener('click', () => setMobileMenu(false));
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    setMobileMenu(false);
+    closeModal();
+  }
 });
 
 // ─── Load all data ───
@@ -422,6 +729,21 @@ async function refreshAll() {
 
 function renderAll() {
   renderStats(); renderDishes(); renderFridge(); renderSuggestions(); renderShopping(); renderPlans(); renderHistory();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+}
+
+function bindDataActions(container, handlers) {
+  container.querySelectorAll('[data-action]').forEach(control => {
+    control.addEventListener('click', () => {
+      const handler = handlers[control.dataset.action];
+      if (handler) handler(control.dataset.value, control);
+    });
+  });
 }
 
 // ─── Stats ───
@@ -455,7 +777,7 @@ function renderStats() {
   if (s.unused_fridge_items && s.unused_fridge_items.length > 0) {
     document.getElementById('unused-card').style.display = 'block';
     document.getElementById('unused-list').innerHTML = s.unused_fridge_items
-      .map(i => `<span class="ingredient-tag" style="background:rgba(255,169,49,0.1);color:var(--orange)">${i}</span>`).join(' ');
+      .map(i => `<span class="ingredient-tag" style="background:rgba(255,169,49,0.1);color:var(--orange)">${escapeHtml(i)}</span>`).join(' ');
   } else {
     document.getElementById('unused-card').style.display = 'none';
   }
@@ -464,7 +786,7 @@ function renderStats() {
   if (s.top_ingredients && s.top_ingredients.length > 0) {
     document.getElementById('top-ing-card').style.display = 'block';
     document.getElementById('top-ing-list').innerHTML = s.top_ingredients
-      .map(([ing, count]) => `<span class="ingredient-tag have">${ing} (${count})</span>`).join(' ');
+      .map(([ing, count]) => `<span class="ingredient-tag have">${escapeHtml(ing)} (${Number(count) || 0})</span>`).join(' ');
   } else {
     document.getElementById('top-ing-card').style.display = 'none';
   }
@@ -479,8 +801,8 @@ function renderDishes() {
 
   const c = document.getElementById('dishes-container');
   if (dishes.length === 0) {
-    c.innerHTML = `<div class="empty">Нет рецептов. <a href="#" onclick="showAddDishModal();return false" style="color:var(--accent)">Добавить первый →</a></div>
-    <div style="text-center;margin-top:12px"><button class="btn btn-primary" onclick="showAddDishModal()">+ Новый рецепт</button></div>`;
+    c.innerHTML = `<div class="empty">Нет рецептов.</div>
+    <div style="text-align:center;margin-top:12px"><button class="btn btn-primary" onclick="showAddDishModal()">+ Новый рецепт</button></div>`;
     return;
   }
 
@@ -492,26 +814,48 @@ function renderDishes() {
     const have = Object.entries(ings).filter(([i]) => fridge.has(i)).map(([i]) => i);
     const optional = Object.entries(ings).filter(([i,e]) => !e && !fridge.has(i)).map(([i]) => i);
     const canCook = missing.length === 0;
+    const dishName = escapeHtml(d.name);
     html += `<div class="dish-card ${canCook ? 'cookable' : ''}">
-      <h3>${d.name} ${canCook ? '<span class="badge cook">✓ готово</span>' : `<span class="badge miss">—${missing.length}</span>`}</h3>
+      <h3>${dishName} ${canCook ? '<span class="badge cook">✓ готово</span>' : `<span class="badge miss">—${missing.length}</span>`}</h3>
       <div class="ingredient-list">
-        ${have.map(i => `<span class="ingredient-tag have">${i}</span>`).join('')}
-        ${missing.map(i => `<span class="ingredient-tag missing">${i}</span>`).join('')}
-        ${optional.map(i => `<span class="ingredient-tag optional">${i}?</span>`).join('')}
+        ${have.map(i => `<span class="ingredient-tag have">${escapeHtml(i)}</span>`).join('')}
+        ${missing.map(i => `<span class="ingredient-tag missing">${escapeHtml(i)}</span>`).join('')}
+        ${optional.map(i => `<span class="ingredient-tag optional">${escapeHtml(i)}?</span>`).join('')}
       </div>
       <div style="margin-top:12px;display:flex;gap:8px">
-        <button class="btn btn-ghost btn-sm" onclick="showEditDishModal('${d.name}')">✏️ Изменить</button>
-        <button class="btn btn-success btn-sm" onclick="cookDish('${d.name}')" ${!canCook?'disabled style="opacity:0.4"':''}>🍳 Приготовить</button>
-        <button class="btn btn-danger btn-sm" onclick="deleteDish('${d.name}')">🗑</button>
+        <button class="btn btn-ghost btn-sm" data-action="edit" data-value="${dishName}">✏️ Изменить</button>
+        <button class="btn btn-success btn-sm" data-action="cook" data-value="${dishName}" ${!canCook?'disabled style="opacity:0.4"':''}>🍳 Приготовить</button>
+        <button class="btn btn-danger btn-sm icon-action" data-action="delete" data-value="${dishName}" aria-label="Удалить рецепт ${dishName}" title="Удалить рецепт ${dishName}">🗑</button>
       </div>
     </div>`;
   }
   html += '</div>';
   c.innerHTML = html;
+  bindDataActions(c, {edit: showEditDishModal, cook: cookDish, delete: deleteDish});
 }
 
 // ─── Dish modal ───
 let modalIngredients = {};
+let modalReturnFocus = null;
+
+function modalFocusable(dialog) {
+  return [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
+    .filter(control => control.getClientRects().length > 0);
+}
+
+function trapModalFocus(event) {
+  if (event.key !== 'Tab') return;
+  const controls = modalFocusable(event.currentTarget);
+  if (!controls.length) return;
+  const current = controls.indexOf(document.activeElement);
+  if (event.shiftKey && current <= 0) {
+    event.preventDefault();
+    controls.at(-1).focus();
+  } else if (!event.shiftKey && current === controls.length - 1) {
+    event.preventDefault();
+    controls[0].focus();
+  }
+}
 
 function showAddDishModal() {
   modalIngredients = {};
@@ -527,24 +871,41 @@ function showEditDishModal(name) {
 
 function renderDishModal(title, name, existing) {
   const isEdit = !!existing;
-  document.getElementById('modal-container').innerHTML = `
-    <div class="modal-bg" onclick="if(event.target===this)closeModal()">
-      <div class="modal">
-        <h2>${title}</h2>
+  const container = document.getElementById('modal-container');
+  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.querySelector('.app').setAttribute('inert', '');
+  container.innerHTML = `
+    <div class="modal-bg">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dish-modal-title">
+        <h2 id="dish-modal-title">${escapeHtml(title)}</h2>
         <div class="form-row">
-          <input type="text" id="modal-dish-name" placeholder="Название блюда" value="${name}">
+          <label class="sr-only" for="modal-dish-name">Название блюда</label>
+          <input type="text" id="modal-dish-name" placeholder="Название блюда" value="${escapeHtml(name)}">
         </div>
         <div class="ing-editor" id="modal-ing-editor"></div>
         <div class="form-row" style="margin-top:8px">
-          <input type="text" id="modal-new-ing" placeholder="Добавить ингредиент..." onkeydown="if(event.key==='Enter')modalAddIng()">
-          <button class="btn btn-ghost btn-sm" onclick="modalAddIng()">+ Ингредиент</button>
+          <label class="sr-only" for="modal-new-ing">Новый ингредиент</label>
+          <input type="text" id="modal-new-ing" placeholder="Добавить ингредиент...">
+          <button class="btn btn-ghost btn-sm" type="button" data-modal-action="add-ingredient">+ Ингредиент</button>
         </div>
         <div style="display:flex;gap:8px;margin-top:16px">
-          <button class="btn btn-primary" onclick="saveDish(${isEdit?'true':'false'}, '${name}')">Сохранить</button>
-          <button class="btn btn-ghost" onclick="closeModal()">Отмена</button>
+          <button class="btn btn-primary" type="button" data-modal-action="save">Сохранить</button>
+          <button class="btn btn-ghost" type="button" data-modal-action="cancel">Отмена</button>
         </div>
       </div>
     </div>`;
+  const backdrop = container.querySelector('.modal-bg');
+  const dialog = container.querySelector('[role="dialog"]');
+  backdrop.addEventListener('click', event => {
+    if (event.target === backdrop) closeModal();
+  });
+  dialog.addEventListener('keydown', trapModalFocus);
+  dialog.querySelector('[data-modal-action="add-ingredient"]').addEventListener('click', modalAddIng);
+  dialog.querySelector('[data-modal-action="save"]').addEventListener('click', () => saveDish(isEdit, name));
+  dialog.querySelector('[data-modal-action="cancel"]').addEventListener('click', closeModal);
+  document.getElementById('modal-new-ing').addEventListener('keydown', event => {
+    if (event.key === 'Enter') modalAddIng();
+  });
   renderModalIngredients();
   document.getElementById('modal-dish-name').focus();
 }
@@ -555,12 +916,17 @@ function renderModalIngredients() {
     document.getElementById('modal-ing-editor').innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem">Нет ингредиентов</p>';
     return;
   }
-  document.getElementById('modal-ing-editor').innerHTML = entries.map(([name, ess]) => `
+  const editor = document.getElementById('modal-ing-editor');
+  editor.innerHTML = entries.map(([name, ess]) => {
+    const safeName = escapeHtml(name);
+    return `
     <div class="ing-editor-row">
-      <span class="ing-name">${name}</span>
-      <button class="toggle-ess ${ess?'ess':'opt'}" onclick="toggleEss('${name}')">${ess?'обязательный':'опциональный'}</button>
-      <button class="del-ing" onclick="modalDelIng('${name}')">✕</button>
-    </div>`).join('');
+      <span class="ing-name">${safeName}</span>
+      <button class="toggle-ess ${ess?'ess':'opt'}" data-action="toggle" data-value="${safeName}" aria-label="Сделать ингредиент ${safeName} ${ess?'опциональным':'обязательным'}">${ess?'обязательный':'опциональный'}</button>
+      <button class="del-ing" data-action="delete" data-value="${safeName}" aria-label="Удалить ингредиент ${safeName}" title="Удалить ингредиент ${safeName}">✕</button>
+    </div>`;
+  }).join('');
+  bindDataActions(editor, {toggle: toggleEss, delete: modalDelIng});
 }
 
 function modalAddIng() {
@@ -594,6 +960,7 @@ async function saveDish(isEdit, oldName) {
     closeModal();
     toast('Рецепт сохранён');
     await refreshAll();
+    document.getElementById('dish-search')?.focus();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -615,7 +982,14 @@ async function cookDish(name) {
 }
 
 function closeModal() {
-  document.getElementById('modal-container').innerHTML = '';
+  const container = document.getElementById('modal-container');
+  if (!container.firstElementChild) return;
+  const returnFocus = modalReturnFocus;
+  container.replaceChildren();
+  document.querySelector('.app').removeAttribute('inert');
+  modalReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
+  else document.getElementById('dish-search')?.focus();
 }
 
 // ─── Fridge ───
@@ -628,12 +1002,14 @@ function renderFridge() {
   const utility = CACHE.stats.fridge_utility || {};
   c.innerHTML = CACHE.fridge.map(item => {
     const uses = utility[item] || 0;
+    const safeItem = escapeHtml(item);
     return `<div class="fridge-item ${uses===0?'unused':''}">
-      <span>${item}</span>
-      ${uses > 0 ? `<span class="uses">${uses} рец.</span>` : '<span class="uses">—</span>'}
-      <button class="remove" onclick="removeFridgeItem('${item}')">✕</button>
+      <span>${safeItem}</span>
+      ${uses > 0 ? `<span class="uses">${Number(uses) || 0} рец.</span>` : '<span class="uses">—</span>'}
+      <button class="remove" data-action="remove" data-value="${safeItem}" aria-label="Удалить продукт ${safeItem}" title="Удалить продукт ${safeItem}">✕</button>
     </div>`;
   }).join('');
+  bindDataActions(c, {remove: removeFridgeItem});
 }
 
 async function addFridgeItem() {
@@ -672,24 +1048,26 @@ function renderSuggestions() {
   }
   let html = '<div class="dishes-grid">';
   for (const s of CACHE.suggestions) {
-    const pct = Math.round(s.score * 100);
-    const canCook = s.can_cook;
+    const pct = Math.round(Number(s.score) * 100) || 0;
+    const canCook = Boolean(s.can_cook);
+    const suggestionName = escapeHtml(s.name);
     html += `<div class="dish-card ${canCook?'cookable':''} ${s.recently_cooked?'recent':''}">
-      <h3>${s.name}
+      <h3>${suggestionName}
         ${canCook ? '<span class="badge cook">✓ можно</span>' : ''}
         ${s.recently_cooked ? '<span class="badge recent">недавно</span>' : ''}
         ${!canCook && !s.recently_cooked ? `<span class="score">${pct}%</span>` : ''}
       </h3>
-      ${s.missing_essentials.length > 0 ? `<div style="margin:6px 0"><span style="font-size:0.75rem;color:var(--orange)">Не хватает: ${s.missing_essentials.join(', ')}</span></div>` : ''}
-      ${s.missing_optional.length > 0 ? `<div style="margin:4px 0"><span style="font-size:0.75rem;color:var(--text-dim)">Опционально: ${s.missing_optional.join(', ')}</span></div>` : ''}
+      ${s.missing_essentials.length > 0 ? `<div style="margin:6px 0"><span style="font-size:0.75rem;color:var(--orange)">Не хватает: ${s.missing_essentials.map(escapeHtml).join(', ')}</span></div>` : ''}
+      ${s.missing_optional.length > 0 ? `<div style="margin:4px 0"><span style="font-size:0.75rem;color:var(--text-dim)">Опционально: ${s.missing_optional.map(escapeHtml).join(', ')}</span></div>` : ''}
       <div style="margin-top:10px;display:flex;gap:8px">
-        <button class="btn btn-success btn-sm" onclick="cookDish('${s.name}')" ${!canCook?'disabled style="opacity:0.4"':''}>🍳 Приготовить</button>
-        <button class="btn btn-ghost btn-sm" onclick="showEditDishModal('${s.name}')">✏️</button>
+        <button class="btn btn-success btn-sm" data-action="cook" data-value="${suggestionName}" ${!canCook?'disabled style="opacity:0.4"':''}>🍳 Приготовить</button>
+        <button class="btn btn-ghost btn-sm icon-action" data-action="edit" data-value="${suggestionName}" aria-label="Изменить рецепт ${suggestionName}" title="Изменить рецепт ${suggestionName}">✏️</button>
       </div>
     </div>`;
   }
   html += '</div>';
   c.innerHTML = html;
+  bindDataActions(c, {cook: cookDish, edit: showEditDishModal});
 }
 
 // ─── Shopping ───
@@ -699,16 +1077,21 @@ function renderShopping() {
     c.innerHTML = '<p style="color:var(--text-dim)">Все базовые ингредиенты для ваших рецептов в наличии, либо не хватает больше одного.</p>';
     return;
   }
-  c.innerHTML = CACHE.shopping.map(item => `
+  c.innerHTML = CACHE.shopping.map(item => {
+    const ingredient = escapeHtml(item.ingredient);
+    const unlocks = (item.unlocks || []).map(escapeHtml).join(', ');
+    return `
     <div class="shopping-item">
       <div>
-        <div class="ing-name">${item.ingredient}</div>
-        <div class="unlocks">Разблокирует: ${item.unlocks.join(', ')}</div>
+        <div class="ing-name">${ingredient}</div>
+        <div class="unlocks">Разблокирует: ${unlocks}</div>
       </div>
       <div>
-        <button class="btn btn-success btn-sm" onclick="buyShoppingItem('${item.ingredient}')">Куплено ✓</button>
+        <button class="btn btn-success btn-sm" data-action="buy" data-value="${ingredient}">Куплено ✓</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+  bindDataActions(c, {buy: buyShoppingItem});
 }
 
 async function buyShoppingItem(ing) {
@@ -720,12 +1103,6 @@ async function buyShoppingItem(ing) {
 }
 
 // ─── Weekly plans (read-only) ───
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, ch => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[ch]);
-}
-
 function renderPlans() {
   const c = document.getElementById('plans-history');
   if (CACHE.plans.length === 0) {
@@ -733,11 +1110,15 @@ function renderPlans() {
     document.getElementById('plan-detail-card').style.display = 'none';
     return;
   }
-  c.innerHTML = CACHE.plans.map(p => `
-    <div class="plan-row ${CACHE.selectedPlan?.week===p.week?'active':''}" onclick="loadPlan('${p.week}')">
-      <div><strong>${escapeHtml(p.week)}</strong><div style="color:var(--text-dim);font-size:0.78rem">${p.meals_count} блюд · ${p.prep_count} заготовок</div></div>
+  c.innerHTML = CACHE.plans.map(p => {
+    const week = escapeHtml(p.week);
+    return `
+    <button class="plan-row ${CACHE.selectedPlan?.week===p.week?'active':''}" type="button" data-action="load" data-value="${week}">
+      <span><strong>${week}</strong><span style="display:block;color:var(--text-dim);font-size:0.78rem">${Number(p.meals_count) || 0} блюд · ${Number(p.prep_count) || 0} заготовок</span></span>
       <span class="status-pill">${escapeHtml(p.status)}</span>
-    </div>`).join('');
+    </button>`;
+  }).join('');
+  bindDataActions(c, {load: loadPlan});
 }
 
 async function loadPlan(week) {
@@ -811,16 +1192,18 @@ function renderHistory() {
     const realIdx = CACHE.history.length - 1 - revIdx;
     const date = new Date(h.date);
     const dateStr = date.toLocaleDateString('ru') + ' ' + date.toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+    const dishName = escapeHtml(h.dish);
     return `<div class="history-item">
       <div>
-        <div class="dish-name">${h.dish}</div>
-        <div class="date">${dateStr}</div>
+        <div class="dish-name">${dishName}</div>
+        <div class="date">${escapeHtml(dateStr)}</div>
       </div>
       <div class="actions">
-        <button class="btn btn-danger btn-sm" onclick="deleteHistory(${realIdx})">✕</button>
+        <button class="btn btn-danger btn-sm icon-action" data-action="delete" data-value="${realIdx}" aria-label="Удалить запись истории ${dishName}" title="Удалить запись истории ${dishName}">✕</button>
       </div>
     </div>`;
   }).join('');
+  bindDataActions(c, {delete: deleteHistory});
 }
 
 async function deleteHistory(idx) {
