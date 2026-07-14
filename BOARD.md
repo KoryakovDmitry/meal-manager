@@ -29,6 +29,18 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
+### PLAN-4 — Web editing and deletion of weekly plans 🔨
+
+**Проблема.** Раздел «Планы» показывает полноценную структуру недели, но оставляет её read-only и отправляет пользователя обратно в `meal_manager` даже для простого исправления порций, замены/удаления блюда или удаления ошибочного draft. Это делает личную Web-поверхность непоследовательной относительно уже доступного ручного CRUD рецептов и кухонного запаса.
+
+**Продуктовое решение.** Web получает ограниченный, явный редактор содержимого `draft`: добавить блюдо в день, заменить блюдо или число порций, удалить блюдо. Утверждённые/активные/архивные планы остаются read-only по содержимому согласно lifecycle. Удалить после отдельного необратимого подтверждения можно план любого статуса — это сознательное действие владельца, а не status transition.
+
+**Контракт данных и конкурентность.** Web использует canonical `WeekPlan`/`MealEntry` и общий `JsonPlanRepository`, а не вводит вторую mutation schema. Все plan writers получают общий cross-process `flock`; Web GET возвращает semantic SHA-256 version, а POST/PATCH/DELETE проверяют `expected_version` внутри того же write lock. При stale версии API отвечает `409 plan_conflict` с authoritative plan/version, UI обновляет данные и не выполняет silent retry. Любое изменение блюд сбрасывает derived shopping snapshot, как native handlers.
+
+**UX и безопасность.** Редактор использует каталог рецептов, целые portions ≥ 1, доступный modal/focus trap и кнопки не меньше 44×44 px. Динамический текст экранируется. Удаление блюда и всего плана требует подтверждения; конфликт или ошибка не должны менять файл. Удаление плана не редактирует inventory, history или recipes.
+
+**Acceptance gate.** RED→GREEN API regressions для add/edit/remove/delete, stale-write и non-draft rejection; реальный cross-process lock probe; Chromium-проверка modal semantics, version propagation, удаления и XSS; полный unit/integration/Web gate; независимое review; live API/browser QA после restart `meal-web`.
+
 ## 📐 READY INTERMEDIATE ISSUES
 
 Готовых промежуточных issues сейчас нет.

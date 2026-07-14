@@ -130,6 +130,10 @@ setTimeout(async () => {
   CACHE.shopping = [{ingredient: attack, unlocks: [attack]}];
   CACHE.history = [{dish: attack, date: '2026-07-13T12:00:00'}];
   CACHE.plans = [{week: attack, status: attack, meals_count: 1, prep_count: 0}];
+  const attackedPlanDays = Object.fromEntries(['mon','tue','wed','thu','fri','sat','sun'].map(day => [day, {meals: []}]));
+  attackedPlanDays.mon.meals = [{dish: attack, portions: 2}];
+  CACHE.selectedPlan = {week:'2026-W29', status:'draft', prep:[attack], days:attackedPlanDays, shopping:{}};
+  CACHE.selectedPlanVersion = 'sha256:xss';
   CACHE.products = [{id:null, name:attack, status:'recipe_only', available:false,
     quantity:null, unit:null, package_count:null, storage:null, expires_on:null,
     comment:null, expiry_status:'unknown', recipe_count:1, in_recipes:true}];
@@ -140,6 +144,9 @@ setTimeout(async () => {
   renderShopping();
   renderHistory();
   renderPlans();
+  renderPlanDetail();
+  const planDetailXssSafe = document.querySelectorAll('#plan-detail img').length === 0 &&
+    document.getElementById('plan-detail').textContent.includes(attack);
   renderProductCatalog();
 
   document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
@@ -245,18 +252,99 @@ setTimeout(async () => {
   CACHE.fridge = ['соль'];
   renderFridge();
 
+  const planDays = Object.fromEntries(['mon','tue','wed','thu','fri','sat','sun'].map(day => [day, {meals: []}]));
+  document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
+  document.getElementById('page-plans').classList.add('active');
+  planDays.wed.meals = [{dish:'суп', portions:2}];
+  CACHE.selectedPlan = {week:'2026-W29', status:'draft', prep:[], days:planDays, shopping:{}};
+  CACHE.selectedPlanVersion = 'sha256:plan-v1';
+  renderPlanDetail();
+  const planEdit = document.querySelector('#plan-detail [data-action="edit-meal"]');
+  planEdit.focus();
+  planEdit.click();
+  const planDialog = document.querySelector('#modal-container [role="dialog"]');
+  const planModalSemantics = planDialog?.getAttribute('aria-modal') === 'true' &&
+    planDialog?.getAttribute('aria-labelledby') === 'plan-meal-modal-title' &&
+    document.activeElement === document.getElementById('plan-meal-dish') &&
+    document.getElementById('plan-meal-portions').getBoundingClientRect().height >= 44;
+  document.getElementById('plan-meal-portions').value = '3';
+  let planCall = null;
+  api = async (path, method, body) => {
+    planCall = {path, method, body};
+    if (method === 'DELETE') return {status:'ok', week:'2026-W29'};
+    planDays.wed.meals = [{dish:'суп', portions:3}];
+    return {plan:{week:'2026-W29', status:'draft', prep:[], days:planDays, shopping:{}}, version:'sha256:plan-v2'};
+  };
+  refreshAll = async () => renderAll();
+  await savePlanMeal('wed', 0);
+  const planSaveVersioned = planCall.method === 'PATCH' &&
+    planCall.path.endsWith('/days/wed/meals/0') &&
+    planCall.body.expected_version === 'sha256:plan-v1' &&
+    planCall.body.portions === 3;
+  const planSaveFocus = document.activeElement?.id === 'plan-detail-title';
+
+  showPlanMealModal('wed', '0');
+  document.getElementById('plan-meal-portions').value = '4';
+  const authoritativeDays = Object.fromEntries(['mon','tue','wed','thu','fri','sat','sun'].map(day => [day, {meals: []}]));
+  authoritativeDays.wed.meals = [{dish:'паста', portions:1}];
+  api = async () => {
+    const conflict = new Error('plan conflict');
+    conflict.status = 409;
+    conflict.detail = {
+      code:'plan_conflict',
+      current_plan:{week:'2026-W29', status:'draft', prep:[], days:authoritativeDays, shopping:{}},
+      current_version:'sha256:plan-v3'
+    };
+    throw conflict;
+  };
+  await savePlanMeal('wed', 0);
+  const planConflictModalClosed = !document.querySelector('#modal-container [role="dialog"]') &&
+    CACHE.selectedPlan.days.wed.meals[0].dish === 'паста' &&
+    CACHE.selectedPlanVersion === 'sha256:plan-v3' &&
+    document.activeElement?.id === 'plan-detail-title';
+
+  CACHE.plans = [
+    {week:'2026-W29', status:'draft', meals_count:1, prep_count:0},
+    {week:'2026-W28', status:'archived', meals_count:1, prep_count:0}
+  ];
+  renderPlans();
+  api = async (path, method, body) => {
+    planCall = {path, method, body};
+    return {status:'ok', week:'2026-W29'};
+  };
+  refreshAll = async () => {
+    CACHE.plans = [{week:'2026-W28', status:'archived', meals_count:1, prep_count:0}];
+    renderAll();
+  };
+  await deleteWeekPlan();
+  const planDeleteVersioned = planCall.method === 'DELETE' &&
+    planCall.path.includes('expected_version=sha256%3Aplan-v3');
+  const planDeleted = CACHE.selectedPlan === null && CACHE.selectedPlanVersion === null;
+  const planDetailCleared = document.getElementById('plan-detail-card').style.display === 'none';
+  const planListFocus = document.activeElement === document.querySelector('#plans-history .plan-row');
+
+  CACHE.selectedPlan = {week:'2026-W30', status:'draft', prep:[], days:authoritativeDays, shopping:{}};
+  CACHE.selectedPlanVersion = 'sha256:external';
+  renderPlanDetail();
+  CACHE.plans = [{week:'2026-W28', status:'archived', meals_count:1, prep_count:0}];
+  syncSelectedPlanWithList();
+  renderPlanDetail();
+  const externallyDeletedPlanCleared = CACHE.selectedPlan === null &&
+    document.getElementById('plan-detail-card').style.display === 'none' &&
+    document.getElementById('plan-detail').childElementCount === 0;
+
   const dishesPage = document.getElementById('page-dishes');
   document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
   dishesPage.classList.add('active');
   const dynamicContainers = [
     'stats-grid', 'unused-list', 'top-ing-list', 'dishes-container',
     'fridge-container', 'product-catalog-container', 'suggestions-container', 'shopping-container',
-    'plans-history', 'history-container'
+    'plans-history', 'plan-detail', 'history-container'
   ].map(id => document.getElementById(id));
   const xssImages = dynamicContainers.flatMap(container => [...container.querySelectorAll('img')]);
   const xssImageCount = xssImages.length;
   const xssTextPresent = dynamicContainers.some(container => container.textContent.includes(attack));
-  const xssSafe = xssImageCount === 0 && xssTextPresent;
+  const xssSafe = xssImageCount === 0 && xssTextPresent && planDetailXssSafe;
   const xssParents = xssImages.map(image => image.closest('[id]')?.id || image.parentElement?.className || 'unknown').join(',');
   document.body.setAttribute('data-qa-xss', [xssImageCount, xssTextPresent, xssParents].join('|'));
   const planRow = document.querySelector('.plan-row');
@@ -348,6 +436,8 @@ setTimeout(async () => {
     fridgeEditFocus, fridgeCancelRestore,
     inFlightEditLocked, fridgeSaveRestore, expiryAccessible,
     deleteAccessible, deleteVersioned, dirtyPatchOnly, conflictRenamePreserved, deletedConflictResolved,
+    planModalSemantics, planSaveVersioned, planSaveFocus, planConflictModalClosed,
+    planDeleteVersioned, planDeleted, planDetailCleared, planListFocus, externallyDeletedPlanCleared,
     productModalSemantics, replenishFreshBatch, productFocusRestore,
     window.__qaErrors.length
   ].join(';'));
@@ -424,7 +514,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
+            + ";".join(["true"] * 32) + ";0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"

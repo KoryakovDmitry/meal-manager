@@ -1590,6 +1590,77 @@ def test_dish_load_preserves_malformed():
 # Runner
 # ---------------------------------------------------------------------------
 
+def test_plan_repository_lock_is_cross_process():
+    print("\n-- weekly plans: cross-process write lock --")
+    import subprocess
+    import threading
+    import time
+    from tempfile import TemporaryDirectory
+
+    repo_module = importlib.import_module(
+        ".src.repositories.json_plan", _PLUGIN_DIR.name
+    )
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        repo = repo_module.JsonPlanRepository(root / "plans")
+        started = root / "started"
+        acquired = root / "acquired"
+        script = f"""
+import importlib, pathlib, sys
+plugin = pathlib.Path({str(_PLUGIN_DIR)!r})
+sys.path.insert(0, str(plugin.parent))
+repo_module = importlib.import_module('.src.repositories.json_plan', plugin.name)
+repo = repo_module.JsonPlanRepository(pathlib.Path({str(root / 'plans')!r}))
+pathlib.Path({str(started)!r}).write_text('ready')
+with repo.lock:
+    pathlib.Path({str(acquired)!r}).write_text('acquired')
+"""
+        with repo.lock:
+            child = subprocess.Popen([sys.executable, "-c", script])
+            deadline = time.monotonic() + 5
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            check("competing plan writer reached lock boundary", started.exists())
+            time.sleep(0.1)
+            check("competing process cannot enter held plan lock", not acquired.exists())
+        child.wait(timeout=5)
+        check("competing process enters after plan lock release", acquired.exists())
+        check("cross-process lock probe exits cleanly", child.returncode == 0)
+
+        original_flock = repo_module.fcntl.flock
+
+        def fail_unlock(fd, operation):
+            if operation == repo_module.fcntl.LOCK_UN:
+                raise OSError("simulated plan unlock failure")
+            return original_flock(fd, operation)
+
+        repo_module.fcntl.flock = fail_unlock
+        try:
+            try:
+                with repo.lock:
+                    pass
+            except OSError:
+                check("plan unlock failure is surfaced", True)
+            else:
+                check("plan unlock failure is surfaced", False)
+        finally:
+            repo_module.fcntl.flock = original_flock
+
+        entered_after_failure = threading.Event()
+
+        def enter_after_failure():
+            with repo.lock:
+                entered_after_failure.set()
+
+        probe = threading.Thread(target=enter_after_failure, daemon=True)
+        probe.start()
+        probe.join(timeout=1)
+        check(
+            "plan thread lock is released after unlock failure",
+            entered_after_failure.is_set(),
+        )
+
+
 def test_week_plan_lifecycle_and_repeat():
     print("\n-- weekly plans: CRUD, lifecycle, history, repeat --")
     add_dish({
@@ -1836,6 +1907,7 @@ def main():
         test_online_weight_tuning()
 
         # Weekly planning (self-contained plans/ state; needs a live catalog).
+        test_plan_repository_lock_is_cross_process()
         test_week_plan_lifecycle_and_repeat()
         test_phase3_shopping_budget_flow()
 

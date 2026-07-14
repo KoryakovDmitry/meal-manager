@@ -1,4 +1,4 @@
-"""Focused smoke tests for the read-only weekly-plan web API.
+"""Focused tests for weekly-plan Web read and mutation contracts.
 
 Usage: python3 web/test_web_plans.py
 """
@@ -546,14 +546,120 @@ def main():
         assert stats["fridge_utility"] == {"лук": 2, "морковь": 1, "банан": 0}
         assert stats["unused_fridge_items"] == ["банан"]
 
-    plan_routes = {
-        route.path: route.methods
-        for route in web.app.routes
-        if route.path.startswith("/api/plans")
-    }
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        original_plan_paths = (web.PLANS_DIR, web.DISHES_PATH)
+        web.PLANS_DIR = data_dir / "plans"
+        web.PLANS_DIR.mkdir()
+        web.DISHES_PATH = data_dir / "dishes.json"
+        web.DISHES_PATH.write_text(json.dumps({"dishes": [
+            {"name": "паста", "ingredients": {}},
+            {"name": "суп", "ingredients": {}},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        try:
+            write_plan(web.PLANS_DIR, "2026-W30", valid_plan())
+            view = web.get_week_plan_view("2026-W30")
+            version = view["version"]
+            assert version.startswith("sha256:")
+
+            before_stale = (web.PLANS_DIR / "2026-W30.json").read_bytes()
+            try:
+                web.add_plan_meal(
+                    "2026-W30", "wed",
+                    web.PlanMealCreate(
+                        dish="паста", portions=3, expected_version="sha256:stale",
+                    ),
+                )
+                raise AssertionError("stale plan edit succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+            assert (web.PLANS_DIR / "2026-W30.json").read_bytes() == before_stale
+
+            added = web.add_plan_meal(
+                "2026-W30", "wed",
+                web.PlanMealCreate(
+                    dish="паста", portions=3, expected_version=version,
+                ),
+            )
+            assert added["meal_index"] == 0
+            assert added["plan"]["days"]["wed"]["meals"] == [
+                {"dish": "паста", "portions": 3},
+            ]
+            assert added["plan"]["shopping"] == {}
+
+            edited = web.edit_plan_meal(
+                "2026-W30", "wed", 0,
+                web.PlanMealEdit(
+                    dish="суп", portions=2, expected_version=added["version"],
+                ),
+            )
+            assert edited["plan"]["days"]["wed"]["meals"] == [
+                {"dish": "суп", "portions": 2},
+            ]
+
+            removed = web.delete_plan_meal(
+                "2026-W30", "wed", 0,
+                expected_version=edited["version"],
+            )
+            assert removed["removed"] == {"dish": "суп", "portions": 2}
+            assert removed["plan"]["days"]["wed"]["meals"] == []
+
+            orphan_edited = web.edit_plan_meal(
+                "2026-W30", "mon", 0,
+                web.PlanMealEdit(
+                    dish="soup <script>", portions=5,
+                    expected_version=removed["version"],
+                ),
+            )
+            assert orphan_edited["plan"]["days"]["mon"]["meals"] == [
+                {"dish": "soup <script>", "portions": 5},
+            ]
+
+            approved = orphan_edited["plan"]
+            approved["status"] = "approved"
+            write_plan(web.PLANS_DIR, "2026-W30", approved)
+            approved_view = web.get_week_plan_view("2026-W30")
+            try:
+                web.add_plan_meal(
+                    "2026-W30", "thu",
+                    web.PlanMealCreate(
+                        dish="паста", portions=2,
+                        expected_version=approved_view["version"],
+                    ),
+                )
+                raise AssertionError("non-draft plan edit succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+
+            before_delete_conflict = (web.PLANS_DIR / "2026-W30.json").read_bytes()
+            try:
+                web.delete_week_plan("2026-W30", expected_version="sha256:stale")
+                raise AssertionError("stale plan delete succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+            assert (web.PLANS_DIR / "2026-W30.json").read_bytes() == before_delete_conflict
+
+            deleted = web.delete_week_plan(
+                "2026-W30", expected_version=approved_view["version"],
+            )
+            assert deleted == {"status": "ok", "week": "2026-W30"}
+            try:
+                web.delete_week_plan("2026-W30", expected_version=approved_view["version"])
+                raise AssertionError("missing plan delete succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 404
+        finally:
+            web.PLANS_DIR, web.DISHES_PATH = original_plan_paths
+
+    plan_routes = {}
+    for route in web.app.routes:
+        if route.path.startswith("/api/plans"):
+            plan_routes.setdefault(route.path, set()).update(route.methods)
     assert plan_routes == {
         "/api/plans": {"GET"},
-        "/api/plans/{week_id}": {"GET"},
+        "/api/plans/{week_id}": {"GET", "DELETE"},
+        "/api/plans/{week_id}/days/{day}/meals": {"POST"},
+        "/api/plans/{week_id}/days/{day}/meals/{meal_index}": {"PATCH", "DELETE"},
     }
     product_routes = {
         route.path: route.methods
@@ -567,13 +673,19 @@ def main():
 
     html = (WEB_DIR / "static" / "index.html").read_text(encoding="utf-8")
     assert "function escapeHtml" in html
-    assert "escapeHtml(m.dish)" in html
+    assert "escapeHtml(meal.dish)" in html
     assert "escapeHtml(day.note)" in html
     assert "escapeHtml(x)" in html
     assert "function renderPlanShopping" in html
     assert "escapeHtml(item.ingredient)" in html
     assert "weekly_budget_status" in html
     assert "unpriced_trip_items" in html
+    assert "Редактировать блюда можно у draft-планов" in html
+    assert "function showPlanMealModal" in html
+    assert "function deleteWeekPlan" in html
+    assert "function deletePlanMeal" in html
+    assert "expected_version" in html
+    assert "Удалить недельный план" in html
 
     # UI/UX navigation contract: local favicon, vertical collapsible sidebar,
     # persisted desktop state, and dismissible mobile drawer.

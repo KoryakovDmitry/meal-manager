@@ -89,8 +89,10 @@ plans use one file per ISO week under `data/plans/`. `src/plan.py` defines
 whole-week aggregation, soft cost estimation, and deterministic trip packing;
 `JsonPlanRepository` owns plan files. Ten auto-discovered handlers provide
 plan CRUD/status/repeat plus shopping generation, cost estimation, and trip
-splitting. The web UI has read-only plan, shopping, budget, and trip views.
-Mutations remain in plugin handlers.
+splitting. The Web UI can add/edit/remove meals in draft plans and delete a
+plan after confirmation; shopping, budget, and trip projections remain views.
+Web mutations share the canonical plan model/repository, cross-process lock,
+and optimistic version fence with plugin writers.
 
 - **`ARCHITECTURE.md`** — full design spec and remaining phases
 - **`BOARD.md`** — live kanban and implementation status

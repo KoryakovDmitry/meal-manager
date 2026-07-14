@@ -259,12 +259,12 @@ body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
 
 /* ─── Forms ─── */
 .form-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-input[type="text"], textarea, select {
+input[type="text"], input[type="number"], textarea, select {
   min-height: 44px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 14px; color: var(--text); font-size: 0.9rem; outline: none;
   transition: border-color 0.2s; flex: 1; min-width: 120px;
 }
-input[type="text"]:focus, textarea:focus { border-color: var(--accent); }
+input[type="text"]:focus, input[type="number"]:focus, textarea:focus { border-color: var(--accent); }
 textarea { resize: vertical; min-height: 60px; }
 
 .btn {
@@ -333,7 +333,10 @@ textarea { resize: vertical; min-height: 60px; }
 .plan-days { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .plan-day { padding: 12px; background: var(--bg); border-radius: 10px; min-height: 90px; }
 .plan-day h4 { margin-bottom: 8px; color: var(--accent-light); }
-.plan-meal { padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+.plan-meal { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); font-size:0.85rem; }
+.plan-meal-actions, .plan-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.plan-toolbar { justify-content:space-between; margin-bottom:12px; }
+.plan-day .btn { margin-top:8px; }
 .plan-note { margin-top: 6px; color: var(--text-dim); font-size: 0.75rem; }
 .status-pill { padding: 3px 8px; border-radius: 12px; background: rgba(108,92,231,0.16); font-size: 0.75rem; }
 .plan-shopping { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
@@ -578,7 +581,7 @@ textarea { resize: vertical; min-height: 60px; }
     <div class="card">
       <div class="section-title">🗓 История недельных планов</div>
       <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:12px">
-        Read-only просмотр. План создаётся и меняется через meal_manager flow.
+        Редактировать блюда можно у draft-планов. Ненужный план можно удалить после подтверждения.
       </p>
       <div id="plans-history" class="plan-history"></div>
     </div>
@@ -603,7 +606,7 @@ textarea { resize: vertical; min-height: 60px; }
 
 <script>
 const API = '';
-let CACHE = { dishes: [], fridge: [], inventory: [], products: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, stats: {} };
+let CACHE = { dishes: [], fridge: [], inventory: [], products: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, selectedPlanVersion: null, stats: {} };
 let editingFridgeItem = null;
 let fridgeEditSaving = false;
 
@@ -809,14 +812,17 @@ async function refreshAll() {
     if (index === 3) CACHE.suggestions = value.suggestions || [];
     if (index === 4) CACHE.shopping = value.items || [];
     if (index === 5) CACHE.history = value.history || [];
-    if (index === 6) CACHE.plans = value.plans || [];
+    if (index === 6) {
+      CACHE.plans = value.plans || [];
+      syncSelectedPlanWithList();
+    }
     if (index === 7) CACHE.stats = value;
   });
   renderAll();
 }
 
 function renderAll() {
-  renderStats(); renderDishes(); renderFridge(); renderProductCatalog(); renderSuggestions(); renderShopping(); renderPlans(); renderHistory();
+  renderStats(); renderDishes(); renderFridge(); renderProductCatalog(); renderSuggestions(); renderShopping(); renderPlans(); renderPlanDetail(); renderHistory();
 }
 
 function escapeHtml(value) {
@@ -1469,7 +1475,14 @@ async function buyShoppingItem(ing) {
   } catch (e) { toast(e.message, true); }
 }
 
-// ─── Weekly plans (read-only) ───
+// ─── Weekly plans ───
+function syncSelectedPlanWithList() {
+  if (CACHE.selectedPlan && !CACHE.plans.some(plan => plan.week === CACHE.selectedPlan.week)) {
+    CACHE.selectedPlan = null;
+    CACHE.selectedPlanVersion = null;
+  }
+}
+
 function renderPlans() {
   const c = document.getElementById('plans-history');
   if (CACHE.plans.length === 0) {
@@ -1492,9 +1505,30 @@ async function loadPlan(week) {
   try {
     const response = await api('/api/plans/' + encodeURIComponent(week));
     CACHE.selectedPlan = response.plan;
+    CACHE.selectedPlanVersion = response.version;
     renderPlans();
     renderPlanDetail();
   } catch (e) { toast(e.message, true); }
+}
+
+function updateSelectedPlan(response) {
+  CACHE.selectedPlan = response.plan;
+  CACHE.selectedPlanVersion = response.version;
+  renderPlans();
+  renderPlanDetail();
+  document.getElementById('plan-detail-title')?.focus();
+}
+
+function applyPlanConflict(error) {
+  if (error.status !== 409 || error.detail?.code !== 'plan_conflict') return false;
+  if (document.getElementById('plan-meal-modal-title')) closeModal();
+  CACHE.selectedPlan = error.detail.current_plan;
+  CACHE.selectedPlanVersion = error.detail.current_version;
+  renderPlans();
+  renderPlanDetail();
+  document.getElementById('plan-detail-title')?.focus();
+  toast('План изменился в другом окне или через Hermes. Данные обновлены — повторите действие.', true);
+  return true;
 }
 
 function renderPlanShopping(shopping) {
@@ -1531,20 +1565,149 @@ function renderPlanShopping(shopping) {
 function renderPlanDetail() {
   const plan = CACHE.selectedPlan;
   const card = document.getElementById('plan-detail-card');
-  if (!plan) { card.style.display = 'none'; return; }
+  if (!plan) {
+    document.getElementById('plan-detail').replaceChildren();
+    card.style.display = 'none';
+    return;
+  }
   const labels = {mon:'Пн',tue:'Вт',wed:'Ср',thu:'Чт',fri:'Пт',sat:'Сб',sun:'Вс'};
+  const editable = plan.status === 'draft';
   const prep = (plan.prep || []).map(x => `<span class="ingredient-tag have">${escapeHtml(x)}</span>`).join(' ');
   const days = Object.entries(labels).map(([code, label]) => {
     const day = plan.days?.[code] || {meals: []};
-    const meals = (day.meals || []).map(m => `<div class="plan-meal">${escapeHtml(m.dish)} · ${Number(m.portions) || 0} порц.</div>`).join('');
-    return `<div class="plan-day"><h4>${label}</h4>${meals || '<span style="color:var(--text-dim);font-size:0.8rem">свободно</span>'}${day.note ? `<div class="plan-note">${escapeHtml(day.note)}</div>` : ''}</div>`;
+    const meals = (day.meals || []).map((meal, index) => {
+      const safeDish = escapeHtml(meal.dish);
+      const actions = editable ? `<span class="plan-meal-actions">
+        <button class="btn btn-ghost btn-sm icon-action" type="button" data-action="edit-meal" data-value="${code}:${index}" aria-label="Изменить ${safeDish}">✎</button>
+        <button class="btn btn-danger btn-sm icon-action" type="button" data-action="delete-meal" data-value="${code}:${index}" aria-label="Удалить ${safeDish} из плана">✕</button>
+      </span>` : '';
+      return `<div class="plan-meal"><span>${safeDish} · ${Number(meal.portions) || 0} порц.</span>${actions}</div>`;
+    }).join('');
+    const add = editable
+      ? `<button class="btn btn-ghost btn-sm" type="button" data-action="add-meal" data-value="${code}">+ Блюдо</button>`
+      : '';
+    return `<div class="plan-day"><h4>${label}</h4>${meals || '<span style="color:var(--text-dim);font-size:0.8rem">свободно</span>'}${day.note ? `<div class="plan-note">${escapeHtml(day.note)}</div>` : ''}${add}</div>`;
   }).join('');
-  document.getElementById('plan-detail').innerHTML = `
-    <div class="section-title">${escapeHtml(plan.week)} · <span class="status-pill">${escapeHtml(plan.status)}</span></div>
+  const detail = document.getElementById('plan-detail');
+  detail.innerHTML = `
+    <div class="plan-toolbar">
+      <div class="section-title" id="plan-detail-title" tabindex="-1">${escapeHtml(plan.week)} · <span class="status-pill">${escapeHtml(plan.status)}</span></div>
+      <button class="btn btn-danger btn-sm" type="button" data-action="delete-plan" data-value="${escapeHtml(plan.week)}" aria-label="Удалить недельный план ${escapeHtml(plan.week)}">🗑 Удалить план</button>
+    </div>
+    ${editable ? '' : '<div class="plan-note" style="margin-bottom:12px">Редактирование блюд доступно только для draft-плана.</div>'}
     ${prep ? `<div style="margin-bottom:12px"><strong>Заготовки:</strong> ${prep}</div>` : ''}
     <div class="plan-days">${days}</div>
     <div class="plan-shopping">${renderPlanShopping(plan.shopping)}</div>`;
+  bindDataActions(detail, {
+    'add-meal': day => showPlanMealModal(day),
+    'edit-meal': target => showPlanMealModal(...target.split(':')),
+    'delete-meal': deletePlanMeal,
+    'delete-plan': deleteWeekPlan,
+  });
   card.style.display = 'block';
+}
+
+function showPlanMealModal(day, mealIndex = null) {
+  const plan = CACHE.selectedPlan;
+  if (!plan || plan.status !== 'draft') return;
+  const index = mealIndex === null ? null : Number(mealIndex);
+  const meal = index === null ? null : plan.days?.[day]?.meals?.[index];
+  if (index !== null && !meal) return;
+  const dishNames = CACHE.dishes.map(dish => dish.name);
+  if (meal && !dishNames.includes(meal.dish)) dishNames.unshift(meal.dish);
+  const options = dishNames.map(name =>
+    `<option value="${escapeHtml(name)}" ${meal?.dish === name ? 'selected' : ''}>${escapeHtml(name)}</option>`
+  ).join('');
+  const container = document.getElementById('modal-container');
+  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.querySelector('.app').setAttribute('inert', '');
+  container.innerHTML = `
+    <div class="modal-bg">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="plan-meal-modal-title">
+        <h2 id="plan-meal-modal-title">${meal ? 'Изменить блюдо' : 'Добавить блюдо'}</h2>
+        <div class="form-row">
+          <label for="plan-meal-dish">Блюдо</label>
+          <select id="plan-meal-dish">${options}</select>
+        </div>
+        <div class="form-row">
+          <label for="plan-meal-portions">Порции</label>
+          <input id="plan-meal-portions" type="number" min="1" step="1" value="${meal?.portions || 2}">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn btn-primary" type="button" data-modal-action="save">Сохранить</button>
+          <button class="btn btn-ghost" type="button" data-modal-action="cancel">Отмена</button>
+        </div>
+      </div>
+    </div>`;
+  const backdrop = container.querySelector('.modal-bg');
+  const dialog = container.querySelector('[role="dialog"]');
+  backdrop.addEventListener('click', event => {
+    if (event.target === backdrop) closeModal();
+  });
+  dialog.addEventListener('keydown', trapModalFocus);
+  dialog.querySelector('[data-modal-action="save"]').addEventListener('click', () => savePlanMeal(day, index));
+  dialog.querySelector('[data-modal-action="cancel"]').addEventListener('click', closeModal);
+  document.getElementById('plan-meal-dish').focus();
+}
+
+async function savePlanMeal(day, mealIndex) {
+  const dish = document.getElementById('plan-meal-dish').value;
+  const portions = Number(document.getElementById('plan-meal-portions').value);
+  if (!dish || !Number.isInteger(portions) || portions < 1) {
+    toast('Выберите блюдо и укажите целое число порций', true);
+    return;
+  }
+  const plan = CACHE.selectedPlan;
+  const payload = {dish, portions, expected_version: CACHE.selectedPlanVersion};
+  const base = `/api/plans/${encodeURIComponent(plan.week)}/days/${day}/meals`;
+  try {
+    const response = mealIndex === null
+      ? await api(base, 'POST', payload)
+      : await api(`${base}/${mealIndex}`, 'PATCH', payload);
+    closeModal();
+    updateSelectedPlan(response);
+    toast('План сохранён');
+    await refreshAll();
+    document.getElementById('plan-detail-title')?.focus();
+  } catch (error) {
+    if (!applyPlanConflict(error)) toast(error.message, true);
+  }
+}
+
+async function deletePlanMeal(target) {
+  const [day, rawIndex] = target.split(':');
+  const mealIndex = Number(rawIndex);
+  const meal = CACHE.selectedPlan?.days?.[day]?.meals?.[mealIndex];
+  if (!meal || !confirm(`Удалить «${meal.dish}» из плана?`)) return;
+  const plan = CACHE.selectedPlan;
+  const path = `/api/plans/${encodeURIComponent(plan.week)}/days/${day}/meals/${mealIndex}?expected_version=${encodeURIComponent(CACHE.selectedPlanVersion)}`;
+  try {
+    const response = await api(path, 'DELETE');
+    updateSelectedPlan(response);
+    toast('Блюдо удалено из плана');
+    await refreshAll();
+    document.getElementById('plan-detail-title')?.focus();
+  } catch (error) {
+    if (!applyPlanConflict(error)) toast(error.message, true);
+  }
+}
+
+async function deleteWeekPlan() {
+  const plan = CACHE.selectedPlan;
+  if (!plan || !confirm(`Удалить недельный план ${plan.week} (${plan.status})? Это действие нельзя отменить.`)) return;
+  const path = `/api/plans/${encodeURIComponent(plan.week)}?expected_version=${encodeURIComponent(CACHE.selectedPlanVersion)}`;
+  try {
+    await api(path, 'DELETE');
+    CACHE.selectedPlan = null;
+    CACHE.selectedPlanVersion = null;
+    renderPlans();
+    renderPlanDetail();
+    toast(`План ${plan.week} удалён`);
+    await refreshAll();
+    document.querySelector('#plans-history .plan-row')?.focus();
+  } catch (error) {
+    if (!applyPlanConflict(error)) toast(error.message, true);
+  }
 }
 
 // ─── History ───

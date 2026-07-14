@@ -4,6 +4,7 @@ Plans are stored one-per-file under ``data/plans/`` as ``<week_id>.json``
 (e.g. ``2026-W03.json``). This makes it trivial to list, copy, and archive.
 """
 
+import fcntl
 import json
 import logging
 import threading
@@ -15,12 +16,58 @@ from ..plan import WeekPlan
 logger = logging.getLogger(__name__)
 
 
+class _PlanDirectoryLock:
+    """Re-entrant thread and process lock for one plans directory."""
+
+    def __init__(self, repository) -> None:
+        self.repository = repository
+        self._thread_lock = threading.RLock()
+        self._local = threading.local()
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        depth = getattr(self._local, "depth", 0)
+        try:
+            if depth == 0:
+                plans_dir = Path(self.repository.plans_dir)
+                plans_dir.mkdir(parents=True, exist_ok=True)
+                handle = open(plans_dir / ".plans.lock", "a+", encoding="utf-8")
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                except Exception:
+                    handle.close()
+                    raise
+                self._local.handle = handle
+            self._local.depth = depth + 1
+            return self
+        except Exception:
+            self._thread_lock.release()
+            raise
+
+    def __exit__(self, exc_type, exc, traceback):
+        depth = self._local.depth - 1
+        self._local.depth = depth
+        try:
+            if depth == 0:
+                handle = self._local.handle
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    try:
+                        handle.close()
+                    finally:
+                        del self._local.handle
+        finally:
+            self._thread_lock.release()
+        return False
+
+
 class JsonPlanRepository:
     """Stores weekly plans as individual JSON files under a directory."""
 
     def __init__(self, plans_dir: Path) -> None:
         self.plans_dir = Path(plans_dir)
-        self.lock = threading.Lock()
+        self.lock = _PlanDirectoryLock(self)
 
     def _path_for(self, week_id: str) -> Path:
         safe_week_id = WeekPlan.normalize_week_id(week_id)
@@ -54,16 +101,18 @@ class JsonPlanRepository:
 
     def save(self, plan: WeekPlan) -> None:
         """Save a week plan to its individual file."""
-        self.plans_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(self._path_for(plan.week_id), plan.to_dict())
+        with self.lock:
+            self.plans_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(self._path_for(plan.week_id), plan.to_dict())
 
     def delete(self, week_id: str) -> bool:
         """Delete a week plan file. Returns whether it existed."""
-        path = self._path_for(week_id)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+        with self.lock:
+            path = self._path_for(week_id)
+            if path.exists():
+                path.unlink()
+                return True
+            return False
 
     def list_weeks(self) -> list[dict]:
         """List all week plans with their status, sorted by week_id descending."""

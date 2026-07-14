@@ -5,6 +5,7 @@ Reads/writes the same JSON files used by the Hermes meal_manager plugin,
 ensuring full synchronization between the Telegram bot, agent, and web UI.
 """
 
+import hashlib
 import importlib
 import json
 import logging
@@ -36,10 +37,17 @@ _dish_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.dish")
 _product_catalog_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.product_catalog"
 )
+_plan_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.plan")
+_plan_repository_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.repositories.json_plan"
+)
 JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
+JsonPlanRepository = _plan_repository_module.JsonPlanRepository
 InventoryDataError = _inventory_repository_module.InventoryDataError
 InventoryConflictError = _inventory_repository_module.InventoryConflictError
 Dish = _dish_module.Dish
+MealEntry = _plan_module.MealEntry
+WeekPlan = _plan_module.WeekPlan
 build_product_catalog = _product_catalog_module.build_product_catalog
 logger = logging.getLogger(__name__)
 DATA_DIR = Path(__import__("os").environ.get("MEAL_DATA_DIR", PLUGIN_ROOT / "data"))
@@ -49,6 +57,7 @@ HISTORY_PATH = DATA_DIR / "history.json"
 TUNING_PATH = DATA_DIR / "tuning.json"
 PLANS_DIR = DATA_DIR / "plans"
 _structured_fridge_repo = JsonFridgeRepository(FRIDGE_PATH)
+_structured_plan_repo = JsonPlanRepository(PLANS_DIR)
 
 _WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
 _PLAN_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
@@ -104,6 +113,12 @@ def load_history():
 
 def save_history(entries):
     _write_json(HISTORY_PATH, {"history": entries})
+
+
+def _plan_repository():
+    _structured_plan_repo.plans_dir = Path(PLANS_DIR)
+    return _structured_plan_repo
+
 
 def load_tuning():
     return _read_json(TUNING_PATH, {})
@@ -454,7 +469,78 @@ def load_week_plan(week_id: str):
     plan = _read_valid_week_plan(week_id)
     if plan is None:
         raise HTTPException(404, f"Plan '{week_id}' not found or malformed")
+    try:
+        return WeekPlan.from_dict(plan).to_dict()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(404, f"Plan '{week_id}' not found or malformed") from exc
+
+
+def _plan_version(plan: WeekPlan | dict) -> str:
+    payload = (
+        plan.to_dict()
+        if isinstance(plan, WeekPlan)
+        else WeekPlan.from_dict(plan).to_dict()
+    )
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _require_plan_version(plan: WeekPlan, expected_version: str) -> None:
+    current_version = _plan_version(plan)
+    if current_version != expected_version:
+        raise HTTPException(409, {
+            "code": "plan_conflict",
+            "message": "Plan changed after it was loaded",
+            "current_plan": plan.to_dict(),
+            "current_version": current_version,
+        })
+
+
+def _require_draft_plan(repo, week_id: str, expected_version: str) -> WeekPlan:
+    try:
+        normalized_week = WeekPlan.normalize_week_id(week_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    plan = repo.load(normalized_week)
+    if plan is None:
+        raise HTTPException(404, f"Plan '{normalized_week}' not found or malformed")
+    _require_plan_version(plan, expected_version)
+    if plan.status != "draft":
+        raise HTTPException(409, "Only draft plans can be edited in Web")
     return plan
+
+
+def _require_plan_day(day: str) -> str:
+    normalized = day.strip().lower() if isinstance(day, str) else ""
+    if normalized not in _PLAN_DAYS:
+        raise HTTPException(400, "Invalid plan day")
+    return normalized
+
+
+def _plan_meal_entry(
+    dish: str,
+    portions: int,
+    *,
+    existing_dish: str | None = None,
+) -> MealEntry:
+    try:
+        entry = MealEntry(dish=dish, portions=portions)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    known_dishes = {
+        Dish.normalize_name(item.get("name", ""))
+        for item in load_dishes()
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if entry.dish not in known_dishes and entry.dish != existing_dish:
+        raise HTTPException(404, f"Dish '{entry.dish}' is not in the recipe catalog")
+    return entry
+
 
 def list_week_plans():
     if not PLANS_DIR.exists():
@@ -601,6 +687,25 @@ class ProductReplenish(BaseModel):
 
     class Config:
         extra = "forbid"
+
+
+class PlanMealCreate(BaseModel):
+    dish: str = Field(min_length=1, max_length=200)
+    portions: StrictInt = Field(default=2, ge=1)
+    expected_version: str = Field(min_length=1, max_length=100)
+
+    class Config:
+        extra = "forbid"
+
+
+class PlanMealEdit(BaseModel):
+    dish: str = Field(min_length=1, max_length=200)
+    portions: StrictInt = Field(ge=1)
+    expected_version: str = Field(min_length=1, max_length=100)
+
+    class Config:
+        extra = "forbid"
+
 
 class CookedMeal(BaseModel):
     dish: str
@@ -927,14 +1032,99 @@ def delete_history_entry(entry_index: int):
         save_history(history)
     return {"status": "ok"}
 
-# ─── API: Weekly plans (read-only view) ─────────────────────────────────
+# ─── API: Weekly plans ───────────────────────────────────────────────────
 @app.get("/api/plans")
 def get_week_plans():
     return {"plans": list_week_plans()}
 
+
 @app.get("/api/plans/{week_id}")
 def get_week_plan_view(week_id: str):
-    return {"plan": load_week_plan(week_id)}
+    plan = load_week_plan(week_id)
+    return {"plan": plan, "version": _plan_version(plan)}
+
+
+@app.post("/api/plans/{week_id}/days/{day}/meals")
+def add_plan_meal(week_id: str, day: str, payload: PlanMealCreate):
+    day_code = _require_plan_day(day)
+    entry = _plan_meal_entry(payload.dish, payload.portions)
+    repo = _plan_repository()
+    with repo.lock:
+        plan = _require_draft_plan(repo, week_id, payload.expected_version)
+        plan.days[day_code].meals.append(entry)
+        plan.shopping = {}
+        repo.save(plan)
+        return {
+            "plan": plan.to_dict(),
+            "version": _plan_version(plan),
+            "meal_index": len(plan.days[day_code].meals) - 1,
+        }
+
+
+@app.patch("/api/plans/{week_id}/days/{day}/meals/{meal_index}")
+def edit_plan_meal(
+    week_id: str,
+    day: str,
+    meal_index: int,
+    payload: PlanMealEdit,
+):
+    day_code = _require_plan_day(day)
+    repo = _plan_repository()
+    with repo.lock:
+        plan = _require_draft_plan(repo, week_id, payload.expected_version)
+        meals = plan.days[day_code].meals
+        if meal_index < 0 or meal_index >= len(meals):
+            raise HTTPException(404, "Plan meal not found")
+        entry = _plan_meal_entry(
+            payload.dish,
+            payload.portions,
+            existing_dish=meals[meal_index].dish,
+        )
+        meals[meal_index] = entry
+        plan.shopping = {}
+        repo.save(plan)
+        return {"plan": plan.to_dict(), "version": _plan_version(plan)}
+
+
+@app.delete("/api/plans/{week_id}/days/{day}/meals/{meal_index}")
+def delete_plan_meal(
+    week_id: str,
+    day: str,
+    meal_index: int,
+    expected_version: str,
+):
+    day_code = _require_plan_day(day)
+    repo = _plan_repository()
+    with repo.lock:
+        plan = _require_draft_plan(repo, week_id, expected_version)
+        meals = plan.days[day_code].meals
+        if meal_index < 0 or meal_index >= len(meals):
+            raise HTTPException(404, "Plan meal not found")
+        removed = meals.pop(meal_index)
+        plan.shopping = {}
+        repo.save(plan)
+        return {
+            "plan": plan.to_dict(),
+            "version": _plan_version(plan),
+            "removed": removed.to_dict(),
+        }
+
+
+@app.delete("/api/plans/{week_id}")
+def delete_week_plan(week_id: str, expected_version: str):
+    try:
+        normalized_week = WeekPlan.normalize_week_id(week_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    repo = _plan_repository()
+    with repo.lock:
+        plan = repo.load(normalized_week)
+        if plan is None:
+            raise HTTPException(404, f"Plan '{normalized_week}' not found or malformed")
+        _require_plan_version(plan, expected_version)
+        if not repo.delete(normalized_week):
+            raise HTTPException(404, f"Plan '{normalized_week}' not found")
+    return {"status": "ok", "week": normalized_week}
 
 # ─── API: Stats ─────────────────────────────────────────────────────────
 @app.get("/api/stats")
