@@ -29,21 +29,19 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
-### INV-3 — Web ↔ agent state synchronization and conflict detection 🔨
-
-**Статус:** стабильный inventory slice реализован; release verification выполняется.
-
-**Реализованный безопасный scope.** Exact-topic `pre_llm_call` инжектирует только authoritative inventory token/count metadata без свободного текста; любой inventory-dependent ответ требует `sync_meal_manager_state`. Добавлены монотонный `updated_at`, under-lock Web precondition, HTTP `409` с current record и conflict UX без silent overwrite.
-
-**Явная граница.** Токен покрывает текущий запас и persisted in-stock/out-of-stock inventory identities, но не recipe-only catalog rows из dishes. Native mutation fence, dishes/history и mid-turn push не объявляются готовыми. DATA-1 остаётся prerequisite для dishes/history.
-
-Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
-
 ## 📐 READY INTERMEDIATE ISSUES
 
 Готовых промежуточных issues сейчас нет.
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
+
+### INV-3 — Web ↔ agent state synchronization and conflict detection ✅
+
+**Результат.** Exact-topic `pre_llm_call` передаёт authoritative inventory token/count metadata без свободного текста, а `sync_meal_manager_state` выполняет обязательное актуальное чтение для inventory-dependent запросов. Web PATCH/DELETE защищены монотонным `updated_at`, under-lock precondition и понятным HTTP `409` без silent overwrite. Полный gate, два независимых ревью, post-restart Gateway/Web/native QA и exact/off-target проверки пройдены; release `76f8e33` опубликован.
+
+**Явная граница.** Покрыты текущий запас и persisted in-stock/out-of-stock identities. Recipe-only projection, dishes/history, native mutation fence и mid-turn push остаются следующими фазами; DATA-1 остаётся prerequisite.
+
+Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
 
 ### INV-4 — Product catalog and replenishment ✅
 

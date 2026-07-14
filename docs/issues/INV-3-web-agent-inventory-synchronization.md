@@ -69,7 +69,7 @@ The deployment allowlist lives in ignored local state at
 This file is read on each turn, so target corrections do not require code changes;
 malformed, oversized, missing, or non-matching configuration produces no injection.
 
-### Pre-release verification
+### Release verification
 
 - unit suite: 238 passed;
 - integration suite: 265 passed, including repeated/backward-clock OCC and
@@ -80,6 +80,12 @@ malformed, oversized, missing, or non-matching configuration produces no injecti
 - initial independent review blockers were reproduced and corrected: monotonic
   entity versions, metadata-only hook context, honest inventory-only sync scope,
   comment omission, concurrent target isolation, and deleted-record conflict UX.
+- follow-up independent review verdict: **GO**, no P0/P1 blockers;
+- release commit: `76f8e33` (`[verified] feat: add stable inventory awareness and conflict fencing`);
+- post-restart production QA: Gateway and `meal-web` active, native sync returned
+  authoritative inventory state without comments, exact target received one metadata
+  notice, off-target received none, and stale live Web PATCH/DELETE returned `409`
+  with byte-for-byte no-write behavior.
 
 ## User problem
 
