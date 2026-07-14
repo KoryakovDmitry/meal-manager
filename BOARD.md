@@ -33,17 +33,15 @@
 
 ## 📐 READY INTERMEDIATE ISSUES
 
-### INV-4 — Product catalog and replenishment 📐
-
-**Проблема.** После `Приготовить` essential-продукты исчезают из текущего запаса целиком; Web больше не показывает их и не предлагает восстановление. Пользователь вынужден помнить и заново вводить точное название.
-
-**Цель.** Добавить вкладку `Каталог продуктов` с тремя фильтруемыми состояниями: `В запасе`, `Закончился`, `Только в рецепте`. Для отсутствующего ранее stocked-продукта дать действие `Восполнить`, для recipe-only — `Добавить в запас`.
-
-**Контракт.** Текущий запас остаётся availability-проекцией; потребление переводит известный продукт в out-of-stock вместо физического удаления identity. Replenishment подтверждает новую текущую партию, не копирует старый expiry/comment и сохраняет stable ID. Recipe-only ингредиенты не выдаются за когда-либо купленные.
-
-Подробный ticket: [`docs/issues/INV-4-product-catalog-and-replenishment.md`](docs/issues/INV-4-product-catalog-and-replenishment.md).
+Готовых промежуточных issues сейчас нет.
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
+
+### INV-4 — Product catalog and replenishment ✅
+
+**Результат.** Schema v3 сохраняет product identity после приготовления, ручного удаления и очистки запаса. Web и native tools дают симметричные catalog list/search/filter и replenish flows для `in_stock`, `out_of_stock` и `recipe_only`; stable ID сохраняется, а expiry/comment новой партии не наследуются. Полный gate, migration rehearsal, cross-process tests и live Web/native/cook QA пройдены на production; восстановлена запись `готовые маринованные куриные ножки`, 11 pcs, fridge.
+
+Подробный ticket: [`docs/issues/INV-4-product-catalog-and-replenishment.md`](docs/issues/INV-4-product-catalog-and-replenishment.md).
 
 ### INV-2 — Structured kitchen inventory item model ✅
 

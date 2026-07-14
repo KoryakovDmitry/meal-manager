@@ -1,6 +1,6 @@
 # INV-4 — Product catalog and replenishment
 
-**Status:** 📐 Ready
+**Status:** ✅ Released
 **Requested by:** Dmitrii
 **Source:** Meal Planning Development, after a cooked-meal action removed essential ingredients from current inventory
 
@@ -145,44 +145,52 @@ Existing tools remain compatible:
 
 ### Domain and migration
 
-- [ ] v2 → v3 migration preserves every current item, stable ID, metadata, and compatibility name projection.
-- [ ] Every migrated v2 item is `available: true`.
-- [ ] Consumption marks essential current products unavailable without deleting their identity.
-- [ ] Manual remove and clear preserve catalog identity.
-- [ ] Replenishment reuses the same stable ID for an out-of-stock product.
-- [ ] Recipe-only products are distinguishable from products known to have been stocked.
-- [ ] Expiry and comment are not silently copied into a new replenishment batch.
-- [ ] Duplicate normalized product names remain impossible.
-- [ ] Unsupported/corrupt schema continues to fail closed with sanitized Web errors.
+- [x] v2 → v3 migration preserves every current item, stable ID, metadata, and compatibility name projection.
+- [x] Every migrated v2 item is `available: true`.
+- [x] Consumption marks essential current products unavailable without deleting their identity.
+- [x] Manual remove and clear preserve catalog identity.
+- [x] Replenishment reuses the same stable ID for an out-of-stock product.
+- [x] Recipe-only products are distinguishable from products known to have been stocked.
+- [x] Expiry and comment are not silently copied into a new replenishment batch.
+- [x] Duplicate normalized product names remain impossible.
+- [x] Unsupported/corrupt schema continues to fail closed with sanitized Web errors.
 
 ### Compatibility
 
-- [ ] Existing native and legacy inventory reads expose only current stock.
-- [ ] Suggestions, quick shopping, weekly shopping, cooking, stats, and recipe availability ignore out-of-stock catalog records.
-- [ ] Existing structured inventory API behavior remains backward compatible for current-stock consumers.
-- [ ] Cooking/history transaction rollback restores the exact prior availability state on failure.
+- [x] Existing native and legacy inventory reads expose only current stock.
+- [x] Suggestions, quick shopping, weekly shopping, cooking, stats, and recipe availability ignore out-of-stock catalog records.
+- [x] Existing structured inventory API behavior remains backward compatible for current-stock consumers.
+- [x] Cooking/history transaction rollback restores the exact prior availability state on failure.
 
 ### Web
 
-- [ ] Sidebar contains `Каталог продуктов` with desktop, collapsed, and mobile navigation support.
-- [ ] Catalog can filter all, in-stock, out-of-stock, and recipe-only states.
-- [ ] Text search is normalized and case-insensitive.
-- [ ] `Восполнить` restores an out-of-stock product to current inventory.
-- [ ] `Добавить в запас` promotes a recipe-only ingredient to current stock.
-- [ ] In-stock action opens the existing stock editor and never duplicates the item.
-- [ ] Success refreshes catalog/current-stock caches; failures preserve entered values.
-- [ ] Names/comments are rendered XSS-safe.
-- [ ] Keyboard, focus, touch target, mobile overflow, and console gates pass.
+- [x] Sidebar contains `Каталог продуктов` with desktop, collapsed, and mobile navigation support.
+- [x] Catalog can filter all, in-stock, out-of-stock, and recipe-only states.
+- [x] Text search is normalized and case-insensitive.
+- [x] `Восполнить` restores an out-of-stock product to current inventory.
+- [x] `Добавить в запас` promotes a recipe-only ingredient to current stock.
+- [x] In-stock action opens the existing stock editor and never duplicates the item.
+- [x] Success refreshes catalog/current-stock caches; failures preserve entered values.
+- [x] Names/comments are rendered XSS-safe.
+- [x] Keyboard, focus, touch target, mobile overflow, and console gates pass.
 
 ### Native tools and release
 
-- [ ] `list_product_catalog` and `replenish_product` schemas are valid and auto-discovered.
-- [ ] Unit and integration tests cover all three states and transitions.
-- [ ] Cross-process tests cover Web replenish racing agent add/remove.
-- [ ] Full unit/integration/Web/Chromium gate passes.
-- [ ] Independent fail-closed review passes.
-- [ ] Live migration and cook → out-of-stock → replenish QA complete without losing current household data.
-- [ ] Completion report is sent to Meal Planning.
+- [x] `list_product_catalog` and `replenish_product` schemas are valid and auto-discovered.
+- [x] Unit and integration tests cover all three states and transitions.
+- [x] Cross-process tests cover Web replenish racing agent add/remove.
+- [x] Full unit/integration/Web/Chromium gate passes.
+- [x] Independent fail-closed review completed; its v2/v3 discrimination blocker was fixed and regression-gated.
+- [x] Live migration and cook → out-of-stock → replenish QA complete without losing current household data.
+- [x] Completion report is sent to Meal Planning.
+
+## Release evidence
+
+- Implementation: `fbbab25` (`[verified] feat: add product catalog and replenishment`).
+- Gate: 230 unit tests, 232 integration tests, Web API/static regressions, Chromium accessibility/XSS, `py_compile`, and `git diff --check` all passed.
+- Migration rehearsal preserved 28/28 current v2 identities and stable IDs, produced schema v3, and left the source file unchanged.
+- Live Web and native create → out-of-stock → replenish transitions preserved stable IDs; a live cook → out-of-stock → replenish flow also passed and all QA artifacts were removed.
+- Gateway and `meal-web` were restarted; native/Web reads agree on 29 current items. The intended record `готовые маринованные куриные ножки` is restored as 11 pcs in the fridge.
 
 ## Explicit non-goals for v1
 
