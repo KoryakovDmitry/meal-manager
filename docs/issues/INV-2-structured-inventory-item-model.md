@@ -1,6 +1,6 @@
 # INV-2 — Structured kitchen inventory item model
 
-**Status:** 🔨 Doing
+**Status:** ✅ Done
 **Requested by:** Dmitrii Koriakov
 **Source:** Meal Planning Development, immediately after INV-1 rename/edit intake
 
@@ -228,39 +228,39 @@ Notifications/reminders are a separate feature; INV-2 only provides trustworthy 
 
 ### Model and migration
 
-- [ ] Legacy flat-list inventory loads without data loss.
-- [ ] First successful mutation atomically persists `schema_version: 2` and complete items.
-- [ ] Stable IDs survive rename, metadata edits, process restart, and web/native round trips.
-- [ ] Missing metadata remains null/unknown; no invented quantity, location, or expiry.
-- [ ] Duplicate names, malformed records, unsupported versions, invalid dates, bad decimals, and unknown fields fail closed.
-- [ ] Migration/write failure leaves the original inventory recoverable and unchanged.
+- [x] Legacy flat-list inventory loads without data loss.
+- [x] First successful mutation atomically persists `schema_version: 2` and complete items.
+- [x] Stable IDs survive rename, metadata edits, process restart, and web/native round trips.
+- [x] Missing metadata remains null/unknown; no invented quantity, location, or expiry.
+- [x] Duplicate names, malformed records, unsupported versions, invalid dates, bad decimals, and unknown fields fail closed.
+- [x] Migration/write failure leaves the original inventory recoverable and unchanged.
 
 ### Native operations
 
-- [ ] Agent can add, list, edit, and remove a structured item through native tools.
-- [ ] Reverse reads prove `2 kg` chicken, package counts, expiry, storage, and comments persist.
-- [ ] Explicit field clearing works and does not clear unrelated metadata.
-- [ ] Existing `list_fridge`, suggestions, cooking, and weekly shopping remain backward-compatible.
-- [ ] Model-visible schemas expose every argument correctly through real plugin registration.
+- [x] Agent can add, list, edit, and remove a structured item through native tools.
+- [x] Reverse reads prove `2 kg` chicken, package counts, expiry, storage, and comments persist.
+- [x] Explicit field clearing works and does not clear unrelated metadata.
+- [x] Existing `list_fridge`, suggestions, cooking, and weekly shopping remain backward-compatible.
+- [x] Model-visible schemas expose every argument correctly through real plugin registration.
 
 ### Web
 
-- [ ] Structured fields render for known data and remain unobtrusive when unknown.
-- [ ] Dima can edit all supported fields from the web UI and see native reverse-read parity.
-- [ ] Quantity/unit dependency, duplicate-name conflicts, dates, and comments are validated consistently.
-- [ ] Expired and expiring-soon states are accessible and never trigger automatic deletion.
-- [ ] User content remains XSS-safe across names and comments.
-- [ ] Desktop/mobile keyboard, focus, touch-target, contrast, overflow, and console checks pass.
+- [x] Structured fields render for known data and remain unobtrusive when unknown.
+- [x] Dima can edit all supported fields from the web UI and see native reverse-read parity.
+- [x] Quantity/unit dependency, duplicate-name conflicts, dates, and comments are validated consistently.
+- [x] Expired and expiring-soon states are accessible and never trigger automatic deletion.
+- [x] User content remains XSS-safe across names and comments.
+- [x] Desktop/mobile keyboard, focus, touch-target, contrast, overflow, and console checks pass.
 
 ### Quality and release
 
-- [ ] Strict RED → GREEN slices cover model, migration, native CRUD, compatibility projections, web API, and UI.
-- [ ] Full unit/integration/web/browser gates pass with Chromium required.
-- [ ] Persistence corruption and concurrent unrelated-update regression probes pass.
-- [ ] Independent fail-closed review passes on the frozen final snapshot.
-- [ ] Documentation, manifest, skills, tool counts, architecture, and board are synchronized.
-- [ ] Commit/push, service refresh, live native CRUD, and live web read/edit verification complete.
-- [ ] Meal Planning receives a completion report explaining what quantity does and does not affect.
+- [x] Strict RED → GREEN slices cover model, migration, native CRUD, compatibility projections, web API, and UI.
+- [x] Full unit/integration/web/browser gates pass with Chromium required.
+- [x] Persistence corruption and concurrent unrelated-update regression probes pass.
+- [x] Independent fail-closed review passes on the frozen final snapshot.
+- [x] Documentation, manifest, skills, tool counts, architecture, and board are synchronized.
+- [x] Commit/push, service refresh, live native CRUD, and live web read/edit verification complete.
+- [x] Meal Planning receives a completion report explaining what quantity does and does not affect.
 
 ## Dependencies and sequencing
 

@@ -1,6 +1,6 @@
 # INV-1 — Edit/rename an item in kitchen inventory
 
-**Status:** 🔨 Doing
+**Status:** ✅ Done
 **Requested by:** Dmitrii Koriakov
 **Source:** Meal Planning Development, after successful live inventory intake for week 2026-W29
 
@@ -96,31 +96,31 @@ Each inventory chip gets a separate edit button in addition to delete:
 
 ### Native tool
 
-- [ ] Agent can rename an existing inventory item in one call.
-- [ ] Old name disappears and new normalized name appears exactly once.
-- [ ] Not-found, blank, overlong, same-name, and duplicate-target cases are deterministic and non-destructive.
-- [ ] Handler schema exposes and requires `old_ingredient` and `new_ingredient` after real plugin registration.
-- [ ] `list_fridge` verifies the mutation by reverse read.
+- [x] Agent can rename an existing inventory item in one call.
+- [x] Old name disappears and new normalized name appears exactly once.
+- [x] Not-found, blank, overlong, same-name, and duplicate-target cases are deterministic and non-destructive.
+- [x] Handler schema exposes and requires `old_ingredient` and `new_ingredient` after real plugin registration.
+- [x] `list_fridge` verifies the mutation by reverse read.
 
 ### Web API/UI
 
-- [ ] Every inventory chip has separate edit and delete controls.
-- [ ] Inline edit supports mouse, keyboard, Enter, Escape, Save, and Cancel.
-- [ ] Focus behavior and contextual accessible names pass browser accessibility checks.
-- [ ] Rename errors do not remove or duplicate an inventory item.
-- [ ] Successful rename refreshes all availability-derived views.
-- [ ] User-provided names remain XSS-safe, including quotes, angle brackets, ampersands, and Unicode.
-- [ ] Desktop and mobile layouts remain free of horizontal overflow.
+- [x] Every inventory chip has separate edit and delete controls.
+- [x] Inline edit supports mouse, keyboard, Enter, Escape, Save, and Cancel.
+- [x] Focus behavior and contextual accessible names pass browser accessibility checks.
+- [x] Rename errors do not remove or duplicate an inventory item.
+- [x] Successful rename refreshes all availability-derived views.
+- [x] User-provided names remain XSS-safe, including quotes, angle brackets, ampersands, and Unicode.
+- [x] Desktop and mobile layouts remain free of horizontal overflow.
 
 ### Verification and release
 
-- [ ] Focused RED → GREEN tests cover native and web rename paths.
-- [ ] Full `python3 test_unit.py` and `python3 test_integration.py` pass.
-- [ ] Focused web/API tests and `web/test_web_a11y.py` pass with Chromium as a required gate.
-- [ ] Manual desktop/mobile browser QA confirms edit, cancel, conflict, and refresh behavior with no console errors.
-- [ ] Independent fail-closed review passes for the final frozen staged snapshot.
-- [ ] Commit/push, service refresh, live native-tool verification, and live web verification complete.
-- [ ] Completion report is sent to Meal Planning with availability and any remaining quantity limitation.
+- [x] Focused RED → GREEN tests cover native and web rename paths.
+- [x] Full `python3 test_unit.py` and `python3 test_integration.py` pass.
+- [x] Focused web/API tests and `web/test_web_a11y.py` pass with Chromium as a required gate.
+- [x] Manual desktop/mobile browser QA confirms edit, cancel, conflict, and refresh behavior with no console errors.
+- [x] Independent fail-closed review passes for the final frozen staged snapshot.
+- [x] Commit/push, service refresh, live native-tool verification, and live web verification complete.
+- [x] Completion report is sent to Meal Planning with availability and any remaining quantity limitation.
 
 ## Dependencies
 

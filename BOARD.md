@@ -29,27 +29,27 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
-### INV-1 — Edit/rename kitchen inventory item 🔨
-
-**Цель.** Добавить native `rename_fridge_item(old_ingredient, new_ingredient)` и accessible inline rename в web UI с одинаковыми normalization/collision/no-op semantics.
-
-**Статус.** TDD-реализация native + web vertical slice начата.
-
-Подробный ticket: [`docs/issues/INV-1-edit-fridge-item.md`](docs/issues/INV-1-edit-fridge-item.md).
-
-### INV-2 — Structured kitchen inventory item model 🔨
-
-**Цель.** Мигрировать flat fridge list в versioned `InventoryItem` с quantity/unit, package count, storage, expiry и comment, сохранив presence-based compatibility.
-
-**Статус.** Strict TDD-реализация начата с domain model и legacy migration.
-
-Подробный ticket: [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md).
+Активных промежуточных issues сейчас нет.
 
 ## 📐 READY INTERMEDIATE ISSUES
 
 Готовых промежуточных issues сейчас нет.
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
+
+### INV-2 — Structured kitchen inventory item model ✅
+
+**Результат.** Кухонный запас мигрирован на versioned `InventoryItem` (`schema_version: 2`) со stable ID, quantity/unit, package count, storage, expiry и comment. Нативный и Web CRUD, compatibility projection, межпроцессная блокировка, fail-closed migration и accessible expiry UX прошли полный gate, независимое ревью и live-проверку на 28 позициях.
+
+Подробный ticket: [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md).
+
+### INV-1 — Edit/rename kitchen inventory item ✅
+
+**Результат.** Атомарное переименование доступно через `rename_fridge_item` и отдельный accessible inline edit в Web UI; stable ID и structured metadata сохраняются, collision/not-found/no-op обрабатываются недеструктивно. Native/Web live QA завершён.
+
+Подробный ticket: [`docs/issues/INV-1-edit-fridge-item.md`](docs/issues/INV-1-edit-fridge-item.md).
+
+---
 
 ### TOOLS-1 — Plugin tool schema envelope ✅
 
