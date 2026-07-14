@@ -63,6 +63,8 @@ Gaps:
 9. Dish and history repositories currently use process-local `threading.Lock` plus atomic replace, not the inventory repository's cross-process `flock`; Web/native writes to those domains need their own cross-process lost-update protection before they can join a truthful synchronization contract.
 10. Cooking history has a deeper parity blocker: native `JsonHistoryRepository` stores `{dish_name: ISO_date}`, while Web reads/writes `{"history": [{"dish": ..., "date": ...}]}` directly. The production file is currently empty (`{}`), so no live history data is at risk now, but Web/native history must be unified behind one repository/schema before INV-3 can cover history honestly.
 
+The canonical-model/persistence refactor is tracked separately in [`DATA-1`](DATA-1-canonical-domain-models-and-shared-persistence.md). DATA-1 is a prerequisite for INV-3's dishes/history phases; inventory/catalog synchronization can remain an independent slice because inventory already has a shared canonical repository.
+
 ## Mutable Web surface that must be covered
 
 | Domain | Current Web mutations | Required awareness |

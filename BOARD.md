@@ -281,6 +281,18 @@
 
 ## 📋 BACKLOG
 
+### DATA-1 — Canonical domain models and shared Web/native persistence 📋
+
+**Зачем.** Привести накопившиеся модели и persistence paths к одной архитектуре: один canonical model/repository/application-service path на домен, используемый и Web, и native tools. Не делать один гигантский универсальный JSON.
+
+**Подтверждённый blocker.** Web/native history сейчас используют несовместимые представления (`{"history": [...]}` против `{dish: latest_date}`), dishes/history имеют только process-local locks, а Web частично читает и пишет domain JSON напрямую. Production history сейчас пустой, поэтому экстренного восстановления данных не требуется.
+
+**Результат задачи.** Stable identity/versioning для mutable entities, единая history semantics, Web без прямого domain JSON persistence, cross-process locking, общие cross-domain command services, fail-closed migrations и проверенный coordinated rollout. Существующий inventory schema v3 остаётся reference implementation и не переписывается без причины.
+
+**Связь с INV-3.** DATA-1 блокирует all-domain synchronization для dishes/history; inventory/catalog slice INV-3 может проектироваться отдельно.
+
+Подробный ticket: [`docs/issues/DATA-1-canonical-domain-models-and-shared-persistence.md`](docs/issues/DATA-1-canonical-domain-models-and-shared-persistence.md).
+
 - [ ] Luxembourg seasonality auto-hints и market availability.
 - [ ] Prep-day workflow и aggregated weekend batch plan.
 - [ ] Pantry staples и low-stock thresholds.
