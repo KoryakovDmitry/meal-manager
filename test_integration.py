@@ -231,6 +231,16 @@ def test_registered_update_fridge_schema_exposes_required_arguments():
         "registration covers exactly the auto-discovered handlers",
         set(ctx.tools) == set(discovered),
     )
+    manifest_text = (_PLUGIN_DIR / "plugin.yaml").read_text(encoding="utf-8")
+    manifest_tools = {
+        line.strip()[2:]
+        for line in manifest_text.split("provides_tools:", 1)[1].splitlines()
+        if line.strip().startswith("- ")
+    }
+    check(
+        "plugin manifest covers exactly the auto-discovered handlers",
+        manifest_tools == set(discovered),
+    )
     check(
         "every registered tool preserves its complete input schema",
         all(
@@ -464,8 +474,8 @@ def test_structured_fridge_repository_migrates_legacy_atomically():
 
         repo.save(["куриные голени", "паста", "масло"])
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("first mutation writes v3 envelope", persisted.get("schema_version") == 3)
-        check("v3 envelope contains all names", [x["name"] for x in persisted["items"]] == [
+        check("first mutation writes v4 envelope", persisted.get("schema_version") == 4)
+        check("v4 envelope contains all names", [x["name"] for x in persisted["items"]] == [
             "куриные голени", "паста", "масло",
         ])
         check("migrated ids survive first write", [x["id"] for x in persisted["items"][:2]] == [x.id for x in first])
@@ -547,16 +557,17 @@ def test_structured_repository_integrity_and_compatibility():
         ))
 
         replenish_target = repo.add_item(name="replenish-race-target")
-        repo.remove_item(replenish_target.id)
+        replenish_removed = repo.remove_item(replenish_target.id)
         remove_target = repo.add_item(name="remove-race-target")
         catalog_start = ctx.Event()
 
-        def web_replenish_worker(data_path, item_id):
+        def web_replenish_worker(data_path, item_id, expected_updated_at):
             web_mod = importlib.import_module(f"{_PLUGIN_DIR.name}.web.main")
             setattr(web_mod, "FRIDGE_PATH", Path(data_path))
             catalog_start.wait()
             web_mod.replenish_product(web_mod.ProductReplenish(
                 product_id=item_id, storage="pantry",
+                expected_updated_at=expected_updated_at,
             ))
 
         def native_catalog_worker(data_path, item_id):
@@ -566,7 +577,9 @@ def test_structured_repository_integrity_and_compatibility():
             worker_repo.remove_item(item_id)
 
         catalog_processes = [
-            ctx.Process(target=web_replenish_worker, args=(path, replenish_target.id)),
+            ctx.Process(target=web_replenish_worker, args=(
+                path, replenish_target.id, replenish_removed.updated_at,
+            )),
             ctx.Process(target=native_catalog_worker, args=(path, remove_target.id)),
         ]
         for process in catalog_processes:
@@ -583,6 +596,105 @@ def test_structured_repository_integrity_and_compatibility():
               not catalog_by_id[remove_target.id].available and
               any(item.name == "native-race-unrelated" and item.available
                   for item in catalog_by_id.values()))
+
+        materialize_start = ctx.Event()
+        materialize_results = ctx.Queue()
+
+        def materialize_worker(data_path, category):
+            worker_repo = repo_mod.JsonFridgeRepository(Path(data_path))
+            materialize_start.wait()
+            try:
+                result = worker_repo.set_product_category(
+                    "recipe-materialize-race",
+                    category,
+                    allow_create=True,
+                    expected_updated_at=None,
+                )
+                materialize_results.put(("ok", result.id))
+            except repo_mod.InventoryConflictError as exc:
+                materialize_results.put(("conflict", exc.current_item.id))
+
+        materializers = [
+            ctx.Process(target=materialize_worker, args=(path, category))
+            for category in ("prep", "ready_meal")
+        ]
+        for process in materializers:
+            process.start()
+        materialize_start.set()
+        for process in materializers:
+            process.join(20)
+        outcomes = [materialize_results.get(timeout=2) for _ in materializers]
+        materialized = [
+            item for item in repo.load_catalog_items()
+            if item.name == "recipe-materialize-race"
+        ]
+        check("concurrent recipe-only materialization processes exit cleanly", all(
+            process.exitcode == 0 for process in materializers
+        ))
+        check("concurrent recipe-only materialization has one winner", sorted(
+            status for status, _item_id in outcomes
+        ) == ["conflict", "ok"])
+        check("concurrent recipe-only materialization keeps one identity", len(materialized) == 1)
+        check("materialization conflict reports authoritative identity", (
+            {item_id for _status, item_id in outcomes} == {materialized[0].id}
+            if len(materialized) == 1 else False
+        ))
+
+        transition_start = ctx.Event()
+        transition_results = ctx.Queue()
+
+        def materialize_or_replenish_worker(data_path, operation):
+            worker_repo = repo_mod.JsonFridgeRepository(Path(data_path))
+            transition_start.wait()
+            try:
+                if operation == "materialize":
+                    result = worker_repo.set_product_category(
+                        "recipe-promotion-race",
+                        "prep",
+                        allow_create=True,
+                        expected_updated_at=None,
+                    )
+                else:
+                    result = worker_repo.replenish_item(
+                        name="recipe-promotion-race",
+                        expected_updated_at=None,
+                    )
+                transition_results.put(("ok", result.id))
+            except repo_mod.InventoryConflictError as exc:
+                transition_results.put(("conflict", exc.current_item.id))
+
+        transition_processes = [
+            ctx.Process(target=materialize_or_replenish_worker, args=(path, operation))
+            for operation in ("materialize", "replenish")
+        ]
+        for process in transition_processes:
+            process.start()
+        transition_start.set()
+        for process in transition_processes:
+            process.join(20)
+        transition_outcomes = [
+            transition_results.get(timeout=2) for _ in transition_processes
+        ]
+        promoted_identities = [
+            item for item in repo.load_catalog_items()
+            if item.name == "recipe-promotion-race"
+        ]
+        check("materialize versus replenish processes exit cleanly", all(
+            process.exitcode == 0 for process in transition_processes
+        ))
+        check("materialize versus replenish has one winner", sorted(
+            status for status, _item_id in transition_outcomes
+        ) == ["conflict", "ok"])
+        check("materialize versus replenish keeps one identity", len(promoted_identities) == 1)
+        check("promotion race reports one authoritative identity", (
+            {item_id for _status, item_id in transition_outcomes}
+            == {promoted_identities[0].id}
+            if len(promoted_identities) == 1 else False
+        ))
+        check("promotion race preserves lifecycle invariant", (
+            not promoted_identities[0].available or promoted_identities[0].ever_stocked
+            if len(promoted_identities) == 1 else False
+        ))
 
         other_path = Path(tmp) / "other-fridge.json"
         with repo.lock:
@@ -699,6 +811,32 @@ def test_inventory_optimistic_concurrency_is_atomic():
         except LookupError:
             check("already unavailable current version stays not-found", True)
 
+        categorized = repo.set_product_category(
+            "молоко",
+            "prep",
+            expected_updated_at=removed.updated_at,
+        )
+        before_stale_replenish = path.read_bytes()
+        try:
+            repo.replenish_item(
+                item_id=original.id,
+                category="ready_meal",
+                expected_updated_at=removed.updated_at,
+            )
+            check("stale replenish raises typed conflict", False)
+        except repository_module.InventoryConflictError:
+            check("stale replenish raises typed conflict", True)
+        check(
+            "stale replenish performs byte-for-byte no write",
+            path.read_bytes() == before_stale_replenish,
+        )
+        restored = repo.replenish_item(
+            item_id=original.id,
+            expected_updated_at=categorized.updated_at,
+        )
+        check("matching replenish version succeeds", restored.available is True)
+        check("replenish without category preserves latest category", restored.category == "prep")
+
 
 def test_inventory_version_advances_when_wall_clock_repeats():
     print("\n-- inventory monotonic entity version --")
@@ -776,7 +914,120 @@ def test_inventory_catalog_availability_lifecycle():
         check("replenish does not copy old expiry", replenished.expires_on is None)
         check("replenish does not copy old comment", replenished.comment is None)
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("catalog lifecycle writes schema v3", persisted.get("schema_version") == 3)
+        check("catalog lifecycle writes schema v4", persisted.get("schema_version") == 4)
+
+
+def test_inventory_category_schema_v4_and_recipe_identity():
+    print("\n-- inventory categories: schema v4 and recipe-only identity --")
+    from tempfile import TemporaryDirectory
+
+    Dish = importlib.import_module(".src.dish", _PLUGIN_DIR.name).Dish
+    build_product_catalog = importlib.import_module(
+        ".src.product_catalog", _PLUGIN_DIR.name
+    ).build_product_catalog
+    inventory_repo_module = importlib.import_module(
+        ".src.repositories.json_fridge", _PLUGIN_DIR.name
+    )
+    InventoryConflictError = inventory_repo_module.InventoryConflictError
+    JsonFridgeRepository = inventory_repo_module.JsonFridgeRepository
+
+    stamp = "2026-07-14T01:15:00+00:00"
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "fridge.json"
+        path.write_text(json.dumps({
+            "schema_version": 3,
+            "items": [{
+                "id": "inv_old",
+                "name": "старый продукт",
+                "quantity": None,
+                "unit": None,
+                "package_count": None,
+                "storage": None,
+                "expires_on": None,
+                "comment": None,
+                "created_at": stamp,
+                "updated_at": stamp,
+                "available": False,
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        repo = JsonFridgeRepository(path)
+        migrated = repo.load_catalog_items()[0]
+        check("v3 category defaults to product", migrated.category == "product")
+        check("v3 identity defaults to ever stocked", migrated.ever_stocked is True)
+
+        categorized = repo.set_product_category(
+            "старый продукт",
+            "ready_meal",
+            expected_updated_at=stamp,
+        )
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        check("category mutation writes schema v4", persisted["schema_version"] == 4)
+        check("schema v4 persists category", persisted["items"][0]["category"] == "ready_meal")
+        check("schema v4 persists stocked history", persisted["items"][0]["ever_stocked"] is True)
+
+        bytes_before_stale = path.read_bytes()
+        try:
+            repo.set_product_category(
+                "старый продукт",
+                "prep",
+                expected_updated_at=stamp,
+            )
+            check("stale category mutation is rejected", False)
+        except InventoryConflictError:
+            check("stale category mutation is rejected", True)
+        check("stale category mutation writes no bytes", path.read_bytes() == bytes_before_stale)
+
+        recipe_only = repo.set_product_category(
+            "томаты",
+            "prep",
+            allow_create=True,
+            expected_updated_at=None,
+        )
+        check("recipe-only category creates unavailable identity", recipe_only.available is False)
+        check("recipe-only identity is not marked stocked", recipe_only.ever_stocked is False)
+        recipe_bytes = path.read_bytes()
+        no_op = repo.set_product_category(
+            "томаты",
+            "prep",
+            expected_updated_at=recipe_only.updated_at,
+        )
+        check("no-op category preserves version", no_op.updated_at == recipe_only.updated_at)
+        check("no-op category writes no bytes", path.read_bytes() == recipe_bytes)
+        hidden_rows = build_product_catalog(repo.load_catalog_items(), [])
+        check("never-stocked identity hides without recipe", all(
+            row["name"] != "томаты" for row in hidden_rows
+        ))
+        rows = build_product_catalog(
+            repo.load_catalog_items(),
+            [Dish("салат", {"томаты": True})],
+        )
+        tomato = next(row for row in rows if row["name"] == "томаты")
+        check("materialized recipe identity remains recipe_only", tomato["status"] == "recipe_only")
+        check("materialized recipe identity exposes category", tomato["category"] == "prep")
+
+        replenished = repo.replenish_item(name="томаты")
+        check("replenish preserves recipe-only identity", replenished.id == recipe_only.id)
+        check("replenish preserves category", replenished.category == "prep")
+        check("replenish marks identity stocked", replenished.ever_stocked is True)
+
+        impossible = replenished.to_dict()
+        impossible["ever_stocked"] = False
+        path.write_text(json.dumps({
+            "schema_version": 4,
+            "items": [impossible],
+        }, ensure_ascii=False), encoding="utf-8")
+        impossible_bytes = path.read_bytes()
+        try:
+            repo.load_catalog_items()
+            check("v4 rejects available never-stocked identity", False)
+        except ValueError:
+            check("v4 rejects available never-stocked identity", True)
+        try:
+            repo.save([replenished.name])
+            check("malformed v4 blocks mutation", False)
+        except ValueError:
+            check("malformed v4 blocks mutation", True)
+        check("malformed v4 mutation writes no bytes", path.read_bytes() == impossible_bytes)
 
 
 def test_structured_inventory_native_crud():
@@ -810,6 +1061,7 @@ def test_structured_inventory_native_crud():
 
     created = parse(add_item({
         "name": " Leche QA ",
+        "category": "prep",
         "quantity": "2.000",
         "unit": "l",
         "package_count": 2,
@@ -818,6 +1070,7 @@ def test_structured_inventory_native_crud():
         "comment": "  prueba  ",
     }))
     check("structured add returns record", isinstance(created, dict) and created.get("name") == "leche qa")
+    check("structured add persists category", created.get("category") == "prep")
     check("structured add canonicalizes quantity", created.get("quantity") == "2")
     item_id = created.get("id") if isinstance(created, dict) else None
 
@@ -832,11 +1085,13 @@ def test_structured_inventory_native_crud():
         "name": "Leche Entera QA",
         "quantity": "1.5",
         "unit": "l",
+        "category": "ready_meal",
         "comment": None,
     }))
     check("structured edit preserves stable id", isinstance(edited, dict) and edited.get("id") == item_id)
     check("structured edit persists name and quantity", edited.get("name") == "leche entera qa" and edited.get("quantity") == "1.5")
     check("structured edit explicitly clears comment", edited.get("comment") is None)
+    check("structured edit changes category", edited.get("category") == "ready_meal")
 
     removed = parse(remove_item({"item_id": item_id}))
     check("structured remove returns removed record", isinstance(removed, dict) and removed.get("id") == item_id)
@@ -850,6 +1105,7 @@ def test_product_catalog_native_tools():
     try:
         list_catalog = _load_handler("list_product_catalog")
         replenish = _load_handler("replenish_product")
+        set_category = _load_handler("set_product_category")
         add_item = _load_handler("add_inventory_item")
         remove_item = _load_handler("remove_inventory_item")
     except ModuleNotFoundError:
@@ -876,6 +1132,20 @@ def test_product_catalog_native_tools():
     }))
     check("native catalog exposes recipe-only products", [row["name"] for row in recipe_rows] == ["catalog recipe only"])
 
+    categorized_recipe = parse(set_category({
+        "name": "catalog recipe only", "category": "prep",
+    }))
+    check("native category tool materializes recipe-only identity", categorized_recipe.get("id") is not None)
+    check("native category tool preserves recipe-only status", categorized_recipe.get("status") == "recipe_only")
+    category_rows = parse(list_catalog({
+        "status": "recipe_only", "category": "prep",
+    }))
+    check("native catalog category filter finds recipe-only identity", [row["name"] for row in category_rows] == ["catalog recipe only"])
+    invalid_category = parse(set_category({
+        "name": "catalog recipe only", "category": "leftovers",
+    }))
+    check("native category tool rejects unknown category", "error" in invalid_category)
+
     restored = parse(replenish({
         "product_id": created["id"], "quantity": "1", "unit": "pcs",
     }))
@@ -883,8 +1153,11 @@ def test_product_catalog_native_tools():
     check("native replenish clears old expiry and comment", restored["expires_on"] is None and restored["comment"] is None)
     active_replenish = parse(replenish({"product_id": restored["id"]}))
     check("native replenish rejects an already stocked product", "error" in active_replenish)
-    promoted = parse(replenish({"name": "catalog recipe only", "storage": "pantry"}))
+    promoted = parse(replenish({
+        "product_id": categorized_recipe["id"], "storage": "pantry",
+    }))
     check("native replenish promotes recipe-only product", promoted["name"] == "catalog recipe only")
+    check("native replenish preserves recipe-only category", promoted["category"] == "prep")
     check("native replenish updates current fridge", {
         "catalog stocked qa", "catalog recipe only",
     }.issubset(set(parse(list_fridge({})))))
@@ -1856,6 +2129,7 @@ def main():
         test_inventory_optimistic_concurrency_is_atomic()
         test_inventory_version_advances_when_wall_clock_repeats()
         test_inventory_catalog_availability_lifecycle()
+        test_inventory_category_schema_v4_and_recipe_identity()
         test_structured_inventory_native_crud()
         test_product_catalog_native_tools()
         test_update_fridge_add()

@@ -16,6 +16,7 @@ provides_tools:
   - edit_inventory_item
   - remove_inventory_item
   - list_product_catalog
+  - set_product_category
   - replenish_product
   - register_cooked_meal
   - delete_history_entry

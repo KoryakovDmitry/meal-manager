@@ -8,7 +8,7 @@ NAME = "list_product_catalog"
 SCHEMA = {
     "description": (
         "List the product catalog across current stock, previously stocked products, "
-        "and ingredients known only from recipes. Supports status and name filters."
+        "and ingredients known only from recipes. Supports status, category, and name filters."
     ),
     "type": "object",
     "properties": {
@@ -18,6 +18,11 @@ SCHEMA = {
             "default": "all",
         },
         "query": {"type": "string", "maxLength": 200},
+        "category": {
+            "type": "string",
+            "enum": ["all", "product", "prep", "ready_meal"],
+            "default": "all",
+        },
     },
     "additionalProperties": False,
 }
@@ -30,5 +35,6 @@ def HANDLER(args: dict, **kwargs):
         fridge_repo.load_catalog_items(),
         dish_repo.load(),
         status=args.get("status", "all"),
+        category=args.get("category", "all"),
         query=args.get("query"),
     )

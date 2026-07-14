@@ -80,9 +80,13 @@ The result is a system that offers the user the freedom of conversation while gu
 
 No build step, dependency installation, or configuration is needed. Data files under `data/` are created lazily by the tools when first needed.
 
-### Upgrading a live inventory to schema v3
+### Upgrading a live inventory to schema v4
 
-The first inventory mutation after this release converts a legacy string array or `schema_version: 2` inventory to the `schema_version: 3` envelope. Version 3 keeps product identities after stock is consumed or removed by setting `available: false`; existing fridge and structured-inventory projections still expose only current `available: true` records. This is a **coordinated deployment**, not a rolling upgrade: back up `fridge.json`, stop every old agent/Web writer, deploy and restart both Hermes and `meal-web`, verify the current-stock projection, stable IDs, and catalog states, and only then resume mutations. An old process must never write after the first v3 mutation because it does not understand soft availability. The repository targets the Linux/POSIX deployment used by this plugin and continues to use one cross-process lock plus atomic replacement for the complete envelope.
+The first inventory mutation after this release converts a legacy string array or a `schema_version: 2`/`schema_version: 3` inventory to the `schema_version: 4` envelope. Version 4 preserves the v3 soft-availability lifecycle and adds required `category` (`product`, `prep`, or `ready_meal`) plus `ever_stocked`. Existing records migrate deterministically to `category: "product"` and `ever_stocked: true`; assigning a category to a recipe-only ingredient may create an unavailable identity with `ever_stocked: false`, so it remains `recipe_only` rather than falsely becoming `out_of_stock`. Current-stock projections still expose only `available: true` records.
+
+This is a **coordinated deployment**, not a rolling upgrade: back up `fridge.json`, stop every old agent/Web writer, deploy and restart both Hermes and `meal-web`, verify the current-stock projection, stable IDs, catalog states, and categories, and only then resume mutations. An old process must never write after the first v4 mutation because it does not understand the category lifecycle fields. The repository targets the Linux/POSIX deployment used by this plugin and continues to use one cross-process lock plus atomic replacement for all inventory mutations.
+
+Schema v4 enforces `available => ever_stocked`; `ever_stocked` is not accepted by public APIs and never transitions back to `false`. Web mutations of persisted products use `product_id + expected_updated_at`; `name + null` is accepted only as an expected-absent precondition for a non-materialized recipe-only identity. Stale or name-reuse/ABA requests cannot target another identity and return `409`/`400` without writing. Native tools use the same cross-process lock and atomic write path but intentionally express the agent's latest serialized intent without a Web version token.
 
 ---
 
@@ -146,12 +150,13 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `get_tuning_state` | Reports the current self-adjusted availability/recency blend and learning status |
 | `update_fridge_inventory` | Adds or removes ingredients from the fridge |
 | `rename_fridge_item` | Atomically renames one kitchen-inventory item |
-| `list_inventory_items` | Returns complete structured inventory records and expiry status |
-| `add_inventory_item` | Adds a structured item with quantity, storage, expiry, and comment |
-| `edit_inventory_item` | Patches a structured item by stable ID without losing omitted metadata |
+| `list_inventory_items` | Returns complete structured inventory records, category, and expiry status |
+| `add_inventory_item` | Adds a categorized structured item with quantity, storage, expiry, and comment |
+| `edit_inventory_item` | Patches a structured item/category by stable ID without losing omitted metadata |
 | `remove_inventory_item` | Removes exactly one current structured item by stable ID while retaining its catalog identity |
-| `list_product_catalog` | Lists/searches all products by stock state, including recipe-only ingredients |
-| `replenish_product` | Returns an out-of-stock or recipe-only product to current inventory as a fresh batch |
+| `list_product_catalog` | Lists/searches all products by stock state and category, including recipe-only ingredients |
+| `set_product_category` | Assigns `product`, `prep`, or `ready_meal` without changing stock availability |
+| `replenish_product` | Returns an out-of-stock or recipe-only product to current inventory as a fresh categorized batch |
 | `register_cooked_meal` | Logs a dish as cooked today and removes its essential ingredients from current stock while retaining catalog identities |
 | `delete_history_entry` | Undo for `register_cooked_meal` — removes a dish from history |
 | `list_fridge` | Returns the current fridge contents |

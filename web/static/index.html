@@ -219,6 +219,13 @@ body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
 .inventory-name { font-weight: 650; flex: 1 1 140px; overflow-wrap: anywhere; }
 .inventory-meta { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: 5px; color: var(--text-dim); font-size: 0.76rem; }
 .inventory-meta span { background: var(--bg-card); border-radius: 10px; padding: 2px 7px; }
+.category-badge { border-radius:999px; padding:3px 8px; font-size:.72rem; white-space:nowrap; font-weight:650; }
+.category-badge.product { color:#91a7ff; background:rgba(78,110,242,.14); }
+.category-badge.prep { color:var(--orange); background:rgba(255,169,49,.14); }
+.category-badge.ready_meal { color:var(--green); background:rgba(68,207,142,.14); }
+.fridge-item.category-product, .product-card.category-product { border-left:4px solid #5f7cff !important; }
+.fridge-item.category-prep, .product-card.category-prep { border-left:4px solid var(--orange) !important; }
+.fridge-item.category-ready_meal, .product-card.category-ready_meal { border-left:4px solid var(--green) !important; }
 .inventory-expired { border-color: var(--accent); }
 .inventory-expiring_soon { border-color: var(--orange); }
 .inventory-edit-grid { flex: 1 0 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -246,6 +253,7 @@ body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
 .product-catalog-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr)); gap:10px; }
 .product-card { background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:14px; display:grid; gap:10px; min-width:0; }
 .product-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+.product-card-badges { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:5px; }
 .product-card-name { font-weight:600; overflow-wrap:anywhere; }
 .product-badge { border-radius:999px; padding:3px 8px; font-size:.72rem; white-space:nowrap; }
 .product-badge.in_stock { color:var(--green); background:rgba(68,207,142,.12); }
@@ -253,6 +261,9 @@ body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
 .product-badge.recipe_only { color:var(--text-muted); background:var(--bg-card); }
 .product-card-meta { color:var(--text-dim); font-size:.8rem; min-height:1.2em; }
 .product-card .btn { min-height:44px; justify-self:start; }
+.product-card-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.inventory-filter-bar { display:flex; justify-content:flex-end; margin-bottom:10px; }
+.inventory-filter-bar select { flex:0 1 260px; }
 .catalog-filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
 .catalog-filters input { flex:1 1 220px; }
 .catalog-filters select { flex:0 1 220px; }
@@ -514,9 +525,20 @@ textarea { resize: vertical; min-height: 60px; }
   <div class="page" id="page-fridge">
     <div class="card">
       <div class="section-title">🥶 Что в холодильнике</div>
+      <div class="inventory-filter-bar">
+        <label class="sr-only" for="fridge-category-filter">Фильтр категории запаса</label>
+        <select id="fridge-category-filter" onchange="renderFridge()" aria-label="Фильтр категории запаса">
+          <option value="all">Все категории</option>
+          <option value="product">Обычные продукты</option>
+          <option value="prep">Заготовки</option>
+          <option value="ready_meal">Готовая еда</option>
+        </select>
+      </div>
       <div class="form-row inventory-add-form">
         <label class="sr-only" for="fridge-add-input">Название продукта</label>
         <input type="text" id="fridge-add-input" placeholder="Продукт..." maxlength="200" onkeydown="if(event.key==='Enter')addFridgeItem()">
+        <label class="sr-only" for="fridge-add-category">Категория</label>
+        <select id="fridge-add-category" aria-label="Категория продукта"><option value="product">Обычный продукт</option><option value="prep">Заготовка</option><option value="ready_meal">Готовая еда</option></select>
         <label class="sr-only" for="fridge-add-quantity">Количество</label>
         <input type="number" id="fridge-add-quantity" placeholder="Количество" min="0" step="any">
         <label class="sr-only" for="fridge-add-unit">Единица</label>
@@ -552,6 +574,13 @@ textarea { resize: vertical; min-height: 60px; }
           <option value="in_stock">Сейчас в запасе</option>
           <option value="out_of_stock">Нет в запасе</option>
           <option value="recipe_only">Только в рецептах</option>
+        </select>
+        <label class="sr-only" for="product-catalog-category">Категория продукта</label>
+        <select id="product-catalog-category" onchange="renderProductCatalog()">
+          <option value="all">Все категории</option>
+          <option value="product">Обычные продукты</option>
+          <option value="prep">Заготовки</option>
+          <option value="ready_meal">Готовая еда</option>
         </select>
       </div>
       <div id="product-catalog-container" class="product-catalog-grid"><div class="loading">Загрузка...</div></div>
@@ -1088,13 +1117,17 @@ function closeModal() {
 
 // ─── Product catalog ───
 const PRODUCT_STATUS_LABELS = {in_stock:'В запасе', out_of_stock:'Закончился', recipe_only:'Только в рецепте'};
+const PRODUCT_CATEGORY_LABELS = {product:'Обычный продукт', prep:'Заготовка', ready_meal:'Готовая еда'};
 function renderProductCatalog() {
   const container = document.getElementById('product-catalog-container');
   if (!container) return;
   const query = (document.getElementById('product-catalog-search')?.value || '').trim().toLowerCase();
   const status = document.getElementById('product-catalog-status')?.value || 'all';
+  const categoryFilter = document.getElementById('product-catalog-category')?.value || 'all';
   const rows = CACHE.products.filter(row =>
-    (status === 'all' || row.status === status) && (!query || row.name.includes(query))
+    (status === 'all' || row.status === status) &&
+    (categoryFilter === 'all' || (row.category || 'product') === categoryFilter) &&
+    (!query || row.name.includes(query))
   );
   if (!rows.length) {
     container.innerHTML = '<p style="color:var(--text-dim)">Продукты не найдены</p>';
@@ -1104,23 +1137,107 @@ function renderProductCatalog() {
     const productIndex = CACHE.products.indexOf(row);
     const safeName = escapeHtml(row.name);
     const label = PRODUCT_STATUS_LABELS[row.status] || row.status;
+    const category = PRODUCT_CATEGORY_LABELS[row.category] ? row.category : 'product';
+    const categoryLabel = PRODUCT_CATEGORY_LABELS[category];
     const recipeMeta = row.recipe_count ? `В рецептах: ${Number(row.recipe_count)}` : 'Не используется в рецептах';
     const storageMeta = row.storage ? ` · ${escapeHtml(INVENTORY_STORAGE[row.storage] || row.storage)}` : '';
     const action = row.status === 'in_stock' ? 'edit' : 'replenish';
     const actionLabel = row.status === 'in_stock' ? 'Изменить запас' : (row.status === 'out_of_stock' ? 'Восполнить' : 'Добавить в запас');
-    return `<article class="product-card">
+    return `<article class="product-card category-${category}">
       <div class="product-card-head">
         <span class="product-card-name">${safeName}</span>
-        <span class="product-badge ${escapeHtml(row.status)}">${escapeHtml(label)}</span>
+        <span class="product-card-badges">
+          <span class="category-badge ${category}">${escapeHtml(categoryLabel)}</span>
+          <span class="product-badge ${escapeHtml(row.status)}">${escapeHtml(label)}</span>
+        </span>
       </div>
       <div class="product-card-meta">${escapeHtml(recipeMeta)}${storageMeta}</div>
-      <button class="btn btn-ghost btn-sm" type="button" data-action="${action}" data-value="${productIndex}" aria-label="${escapeHtml(actionLabel)}: ${safeName}">${escapeHtml(actionLabel)}</button>
+      <div class="product-card-actions">
+        <button class="btn btn-ghost btn-sm" type="button" data-action="${action}" data-value="${productIndex}" aria-label="${escapeHtml(actionLabel)}: ${safeName}">${escapeHtml(actionLabel)}</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-action="category" data-value="${productIndex}" aria-label="Изменить категорию: ${safeName}">Категория</button>
+      </div>
     </article>`;
   }).join('');
   bindDataActions(container, {
     replenish: value => showReplenishProductModal(Number(value)),
     edit: value => editCatalogStock(Number(value)),
+    category: value => showProductCategoryModal(Number(value)),
   });
+}
+
+function categorySelectOptions(current) {
+  return Object.entries(PRODUCT_CATEGORY_LABELS)
+    .map(([value, label]) => `<option value="${value}" ${value === current ? 'selected' : ''}>${escapeHtml(label)}</option>`)
+    .join('');
+}
+
+function focusProductCategoryAction(target) {
+  const index = CACHE.products.findIndex(row =>
+    target.id ? row.id === target.id : row.name === target.name
+  );
+  if (index < 0) return;
+  document.querySelector(
+    `#product-catalog-container [data-action="category"][data-value="${index}"]`
+  )?.focus();
+}
+
+function showProductCategoryModal(index) {
+  const row = CACHE.products[index];
+  if (!row) return;
+  const container = document.getElementById('modal-container');
+  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.querySelector('.app').setAttribute('inert', '');
+  const safeName = escapeHtml(row.name);
+  const category = PRODUCT_CATEGORY_LABELS[row.category] ? row.category : 'product';
+  container.innerHTML = `<div class="modal-bg">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="product-category-modal-title">
+      <h2 id="product-category-modal-title">Категория: ${safeName}</h2>
+      <p style="color:var(--text-dim);font-size:.85rem;margin-bottom:12px">Категория не меняет наличие продукта в кухонном запасе.</p>
+      <label for="product-category-select">Категория</label>
+      <select id="product-category-select">${categorySelectOptions(category)}</select>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
+        <button class="btn btn-primary" type="button" data-modal-action="save">Сохранить</button>
+        <button class="btn btn-ghost" type="button" data-modal-action="cancel">Отмена</button>
+      </div>
+    </div>
+  </div>`;
+  const backdrop = container.querySelector('.modal-bg');
+  const dialog = container.querySelector('[role="dialog"]');
+  backdrop.addEventListener('click', event => { if (event.target === backdrop) closeModal(); });
+  dialog.addEventListener('keydown', trapModalFocus);
+  dialog.querySelector('[data-modal-action="save"]').addEventListener('click', () => saveProductCategory(index));
+  dialog.querySelector('[data-modal-action="cancel"]').addEventListener('click', closeModal);
+  document.getElementById('product-category-select').focus();
+}
+
+async function saveProductCategory(index) {
+  const row = CACHE.products[index];
+  const select = document.getElementById('product-category-select');
+  const saveButton = document.querySelector('[data-modal-action="save"]');
+  if (!row || !select || !saveButton) return;
+  saveButton.disabled = true;
+  try {
+    await api('/api/products/category', 'PATCH', {
+      ...(row.id ? {product_id: row.id} : {name: row.name}),
+      category: select.value,
+      expected_updated_at: row.updated_at ?? null,
+    });
+    closeModal();
+    await refreshAll();
+    focusProductCategoryAction(row);
+    inventoryAwarenessToast();
+  } catch (error) {
+    if (error.status === 409) {
+      closeModal();
+      await refreshAll();
+      focusProductCategoryAction(row);
+      toast('Категория уже изменена в другом окне. Данные обновлены; выберите значение ещё раз.', true);
+      return;
+    }
+    toast(error.message, true);
+    saveButton.disabled = false;
+    select.focus();
+  }
 }
 
 function editCatalogStock(index) {
@@ -1144,6 +1261,7 @@ function showReplenishProductModal(index) {
       <h2 id="replenish-modal-title">${row.status === 'out_of_stock' ? 'Восполнить' : 'Добавить в запас'}: ${safeName}</h2>
       <p style="color:var(--text-dim);font-size:.85rem;margin-bottom:12px">Подтвердите данные новой текущей партии. Старые срок годности и комментарий не переносятся.</p>
       <div class="inventory-edit-grid">
+        <label>Категория<select id="replenish-category">${categorySelectOptions(PRODUCT_CATEGORY_LABELS[row.category] ? row.category : 'product')}</select></label>
         <label>Количество<input type="number" id="replenish-quantity" min="0" step="any" value="${escapeHtml(row.quantity || '')}"></label>
         <label>Единица<select id="replenish-unit">${selectOptions(INVENTORY_UNITS, row.quantity ? row.unit : null)}</select></label>
         <label>Упаковок<input type="number" id="replenish-packages" min="1" step="1" value="${escapeHtml(row.package_count || '')}"></label>
@@ -1178,6 +1296,8 @@ async function saveReplenishedProduct(index) {
     return;
   }
   const body = row.id ? {product_id: row.id} : {name: row.name};
+  body.expected_updated_at = row.updated_at ?? null;
+  body.category = document.getElementById('replenish-category').value;
   if (quantity) { body.quantity = quantity; body.unit = unit; }
   const packages = document.getElementById('replenish-packages').value;
   if (packages) body.package_count = Number(packages);
@@ -1192,8 +1312,16 @@ async function saveReplenishedProduct(index) {
     await api('/api/products/replenish', 'POST', body);
     closeModal();
     await refreshAll();
+    focusProductCategoryAction(row);
     inventoryAwarenessToast();
   } catch (error) {
+    if (error.status === 409) {
+      closeModal();
+      await refreshAll();
+      focusProductCategoryAction(row);
+      toast('Запас уже изменён в другом окне. Данные обновлены; откройте форму ещё раз.', true);
+      return;
+    }
     toast(error.message, true);
     saveButton.disabled = false;
     document.getElementById('replenish-quantity').focus();
@@ -1204,16 +1332,19 @@ async function saveReplenishedProduct(index) {
 const INVENTORY_UNITS = ['g','kg','ml','l','pcs','pack','can','jar','bottle','portion'];
 const INVENTORY_STORAGE = {fridge:'Холодильник', freezer:'Морозилка', pantry:'Шкаф / кладовая', counter:'Столешница'};
 function inventoryRecords() {
-  return CACHE.inventory.length ? CACHE.inventory : CACHE.fridge.map(name => ({id:null,name,quantity:null,unit:null,package_count:null,storage:null,expires_on:null,comment:null,expiry_status:'unknown'}));
+  return CACHE.inventory.length ? CACHE.inventory : CACHE.fridge.map(name => ({id:null,name,category:'product',quantity:null,unit:null,package_count:null,storage:null,expires_on:null,comment:null,expiry_status:'unknown'}));
 }
 function selectOptions(values, current, labels={}) {
   return `<option value="">—</option>` + values.map(value => `<option value="${value}" ${value===current?'selected':''}>${escapeHtml(labels[value] || value)}</option>`).join('');
 }
 function renderFridge() {
   const c = document.getElementById('fridge-container');
-  const records = inventoryRecords();
+  const categoryFilter = document.getElementById('fridge-category-filter')?.value || 'all';
+  const records = inventoryRecords().filter(record =>
+    categoryFilter === 'all' || (record.category || 'product') === categoryFilter
+  );
   if (records.length === 0) {
-    c.innerHTML = '<p style="color:var(--text-dim)">Кухонный запас пуст</p>';
+    c.innerHTML = `<p style="color:var(--text-dim)">${categoryFilter === 'all' ? 'Кухонный запас пуст' : 'В этой категории ничего нет'}</p>`;
     return;
   }
   const utility = CACHE.stats.fridge_utility || {};
@@ -1221,11 +1352,14 @@ function renderFridge() {
     const item = record.name;
     const uses = utility[item] || 0;
     const safeItem = escapeHtml(item);
+    const category = PRODUCT_CATEGORY_LABELS[record.category] ? record.category : 'product';
+    const categoryLabel = PRODUCT_CATEGORY_LABELS[category];
     if (editingFridgeItem === item) {
-      return `<div class="fridge-item editing ${uses===0?'unused':''}" data-editing-item="${safeItem}">
+      return `<div class="fridge-item editing category-${category} ${uses===0?'unused':''}" data-editing-item="${safeItem}">
         <div class="inventory-edit-grid">
           <label class="sr-only" for="fridge-edit-input">Название продукта ${safeItem}</label>
           <input class="fridge-edit-input wide" id="fridge-edit-input" type="text" value="${safeItem}" maxlength="200">
+          <label>Категория<select id="fridge-edit-category">${categorySelectOptions(category)}</select></label>
           <input id="fridge-edit-quantity" type="number" min="0" step="any" placeholder="Количество" aria-label="Количество продукта ${safeItem}" value="${escapeHtml(record.quantity ?? '')}">
           <select id="fridge-edit-unit" aria-label="Единица измерения продукта ${safeItem}">${selectOptions(INVENTORY_UNITS, record.unit)}</select>
           <input id="fridge-edit-packages" type="number" min="1" step="1" placeholder="Упаковок" aria-label="Количество упаковок продукта ${safeItem}" value="${escapeHtml(record.package_count ?? '')}">
@@ -1247,8 +1381,9 @@ function renderFridge() {
     if (record.expiry_status === 'expired') metadata.push('⚠ Просрочено');
     if (record.expiry_status === 'expiring_soon') metadata.push('⚠ Скоро истекает срок');
     if (record.comment) metadata.push(escapeHtml(record.comment));
-    return `<div class="fridge-item ${uses===0?'unused':''} inventory-${escapeHtml(record.expiry_status || 'unknown')}">
+    return `<div class="fridge-item category-${category} ${uses===0?'unused':''} inventory-${escapeHtml(record.expiry_status || 'unknown')}">
       <span class="inventory-name">${safeItem}</span>
+      <span class="category-badge ${category}">${escapeHtml(categoryLabel)}</span>
       ${uses > 0 ? `<span class="uses">${Number(uses) || 0} рец.</span>` : '<span class="uses">—</span>'}
       <button class="edit" data-action="edit" data-value="${safeItem}" aria-label="Редактировать продукт ${safeItem}" title="Редактировать продукт ${safeItem}">✎</button>
       <button class="remove" data-action="remove" data-value="${safeItem}" aria-label="Удалить продукт ${safeItem}" title="Удалить продукт ${safeItem}">✕</button>
@@ -1289,6 +1424,7 @@ async function saveFridgeItemEdit() {
   if (!newName) { toast('Название продукта не может быть пустым', true); input?.focus(); return; }
   const sourceItem = editingFridgeItem;
   const record = inventoryRecords().find(item => item.name === sourceItem);
+  const category = document.getElementById('fridge-edit-category')?.value || 'product';
   const quantity = document.getElementById('fridge-edit-quantity')?.value.trim() || null;
   const unit = quantity ? (document.getElementById('fridge-edit-unit')?.value || null) : null;
   const packageCount = document.getElementById('fridge-edit-packages')?.value ? Number(document.getElementById('fridge-edit-packages').value) : null;
@@ -1297,6 +1433,7 @@ async function saveFridgeItemEdit() {
   const comment = document.getElementById('fridge-edit-comment')?.value.trim() || null;
   const payload = {};
   if (newName.toLowerCase() !== record?.name) payload.name = newName;
+  if (category !== (record?.category || 'product')) payload.category = category;
   if (quantity !== (record?.quantity ?? null) || unit !== (record?.unit ?? null)) {
     payload.quantity = quantity;
     payload.unit = unit;
@@ -1356,7 +1493,10 @@ async function addFridgeItem() {
   const name = input.value.trim();
   if (!name) return;
   const quantity = document.getElementById('fridge-add-quantity').value.trim();
-  const body = {name};
+  const body = {
+    name,
+    category: document.getElementById('fridge-add-category').value || 'product',
+  };
   if (quantity) { body.quantity = quantity; body.unit = document.getElementById('fridge-add-unit').value || null; }
   const packages = document.getElementById('fridge-add-packages').value;
   if (packages) body.package_count = Number(packages);
@@ -1366,6 +1506,7 @@ async function addFridgeItem() {
   try {
     await api('/api/inventory/items', 'POST', body);
     ['fridge-add-input','fridge-add-quantity','fridge-add-unit','fridge-add-packages','fridge-add-storage','fridge-add-expiry','fridge-add-comment'].forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('fridge-add-category').value = 'product';
     await refreshAll();
     inventoryAwarenessToast();
   } catch (e) { toast(e.message, true); }

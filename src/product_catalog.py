@@ -6,6 +6,7 @@ from .dish import Dish
 from .inventory import InventoryItem
 
 CATALOG_STATUSES = frozenset({"all", "in_stock", "out_of_stock", "recipe_only"})
+CATALOG_CATEGORIES = frozenset({"all", "product", "prep", "ready_meal"})
 
 
 def build_product_catalog(
@@ -13,10 +14,13 @@ def build_product_catalog(
     dishes: list[Dish],
     *,
     status: str = "all",
+    category: str = "all",
     query: str | None = None,
 ) -> list[dict]:
     if status not in CATALOG_STATUSES:
         raise ValueError(f"Unsupported product catalog status: {status}")
+    if category not in CATALOG_CATEGORIES:
+        raise ValueError(f"Unsupported product catalog category: {category}")
     if query is not None and not isinstance(query, str):
         raise ValueError("query must be a string")
     if query is not None and len(query) > 200:
@@ -33,7 +37,15 @@ def build_product_catalog(
 
     for item in items:
         stocked_names.add(item.name)
-        item_status = "in_stock" if item.available else "out_of_stock"
+        if not item.available and not item.ever_stocked and item.name not in recipe_counts:
+            continue
+        item_status = (
+            "in_stock"
+            if item.available
+            else "out_of_stock"
+            if item.ever_stocked
+            else "recipe_only"
+        )
         rows.append(item.to_public_dict() | {
             "available": item.available,
             "status": item_status,
@@ -56,6 +68,7 @@ def build_product_catalog(
             "comment": None,
             "created_at": None,
             "updated_at": None,
+            "category": "product",
             "expiry_status": "unknown",
             "status": "recipe_only",
             "recipe_count": recipe_count,
@@ -66,6 +79,7 @@ def build_product_catalog(
         (
             row for row in rows
             if (status == "all" or row["status"] == status)
+            and (category == "all" or row["category"] == category)
             and (not normalized_query or normalized_query in row["name"])
         ),
         key=lambda row: row["name"],

@@ -29,6 +29,20 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
+### INV-5 — Product categories across kitchen inventory and catalog 🔨
+
+**Проблема.** Текущий кухонный запас и «Каталог продуктов» смешивают обычные ингредиенты, заранее подготовленные полуфабрикаты и уже готовую еду. По названию или комментарию это не всегда очевидно, а отфильтровать запас по степени готовности невозможно.
+
+**Продуктовый контракт.** Каждая catalog identity получает обязательную категорию: `product` («Обычный продукт»), `prep` («Заготовка») или `ready_meal` («Готовая еда»). Заготовка — домашний или покупной полуфабрикат/компонент, подготовленный заранее для последующей готовки. Категория описывает продукт, но сама по себе не создаёт domain `PrepItem`, не меняет наличие и не выполняет cooking flow. Все старые записи мигрируют в `product` без изменения stable ID, количества, хранения, сроков, комментариев и availability.
+
+**Каталог и identity.** Категорию можно назначить позиции `in_stock`, `out_of_stock` или `recipe_only`. Для recipe-only продукт получает persisted catalog identity, но не считается ранее закупленным и не переходит ложно в `out_of_stock`; replenishment переводит его в обычный stocked lifecycle с сохранением identity и категории. Recipe-only metadata, которая больше не встречается в рецептах и никогда не была в запасе, может оставаться скрытой persisted identity для восстановления категории при повторном появлении.
+
+**Native/API contract.** `add_inventory_item`, `edit_inventory_item` и `replenish_product` принимают category; отдельный `set_product_category` назначает категорию любой видимой catalog position, включая recipe-only. `list_inventory_items` и `list_product_catalog` возвращают category, а catalog list поддерживает category filter. Все mutations проходят canonical `InventoryItem` и общий cross-process lock. Web category/replenish/edit/delete используют OCC: persisted identity обязана передавать `product_id + expected_updated_at`, а `name + expected_updated_at:null` разрешено только для ещё отсутствующей ephemeral recipe-only identity; stale/ABA mutation отвечает `409` или contract `400` без записи. Native tools сериализованы тем же lock и выражают последнее явное намерение агента без Web-style version token.
+
+**Web UX.** В форме добавления, editor и replenish modal появляется selector категории. Карточки запаса и каталога получают текстовый цветной badge, доступное нецветовое обозначение и визуальный accent; оба раздела фильтруются по категории. В каталоге категорию можно менять без replenishment. Фильтры и controls имеют labels, keyboard/focus semantics и touch targets не меньше 44 px; пользовательский текст остаётся XSS-safe.
+
+**Acceptance gate.** RED→GREEN domain/migration tests для schema v4 и legacy/v2/v3; fail-closed lifecycle invariant `available ⇒ ever_stocked`; recipe-only identity/status/replenish regressions; native schema parity; stale category/replenish byte-for-byte no-write; двухпроцессные materialize/materialize и materialize/replenish races с одним winner; Web API и Chromium filtering/badge/modal/focus/XSS tests; production migration rehearsal на backup; полный unit/integration/Web gate; независимое GO; coordinated Web/Gateway rollout и disposable live QA.
+
 ### PLAN-4 — Web editing and deletion of weekly plans 🔨
 
 **Проблема.** Раздел «Планы» показывает полноценную структуру недели, но оставляет её read-only и отправляет пользователя обратно в `meal_manager` даже для простого исправления порций, замены/удаления блюда или удаления ошибочного draft. Это делает личную Web-поверхность непоследовательной относительно уже доступного ручного CRUD рецептов и кухонного запаса.
@@ -293,7 +307,7 @@
 
 **Подтверждённый blocker.** Web/native history сейчас используют несовместимые представления (`{"history": [...]}` против `{dish: latest_date}`), dishes/history имеют только process-local locks, а Web частично читает и пишет domain JSON напрямую. Production history сейчас пустой, поэтому экстренного восстановления данных не требуется.
 
-**Результат задачи.** Stable identity/versioning для mutable entities, единая history semantics, Web без прямого domain JSON persistence, cross-process locking, общие cross-domain command services, fail-closed migrations и проверенный coordinated rollout. Существующий inventory schema v3 остаётся reference implementation и не переписывается без причины.
+**Результат задачи.** Stable identity/versioning для mutable entities, единая history semantics, Web без прямого domain JSON persistence, cross-process locking, общие cross-domain command services, fail-closed migrations и проверенный coordinated rollout. Существующий inventory schema v4 остаётся reference implementation и не переписывается без причины.
 
 **Связь с INV-3.** DATA-1 блокирует all-domain synchronization для dishes/history; inventory/catalog slice INV-3 может проектироваться отдельно.
 

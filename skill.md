@@ -48,7 +48,7 @@ Atomically renames one existing kitchen-inventory item. Accepts `old_ingredient`
 
 ### Structured kitchen inventory
 
-Use `list_inventory_items` whenever quantities, units, package count, storage, expiry, comments, or stable IDs matter. Use `add_inventory_item` for a newly described product with metadata, `edit_inventory_item` to patch only named fields by `item_id`, and `remove_inventory_item` to remove exactly that record. Passing `null` to `edit_inventory_item` explicitly clears nullable metadata; omitted fields are preserved. Continue using `update_fridge_inventory` only for simple presence-only bulk updates and `list_fridge` when only ingredient names are needed by compatibility workflows.
+Use `list_inventory_items` whenever category, quantity, unit, package count, storage, expiry, comments, or stable IDs matter. Every item has one category: `product` (ordinary ingredient/product), `prep` (a semi-finished component prepared in advance), or `ready_meal` (food already ready to eat or reheat). Existing and unspecified items default to `product`. Use `add_inventory_item` for a newly described product with metadata, `edit_inventory_item` to patch only named fields by `item_id`, and `remove_inventory_item` to remove exactly that record. Passing `null` to `edit_inventory_item` explicitly clears nullable metadata; omitted fields are preserved. Continue using `update_fridge_inventory` only for simple presence-only bulk updates; it creates ordinary `product` records. Use `list_fridge` when only ingredient names are needed by compatibility workflows.
 
 Phase 1 stores one record per normalized product name. Do not infer unknown quantities or claim quantitative recipe sufficiency from stored inventory amounts.
 
@@ -58,9 +58,11 @@ Returns one authoritative inventory state token plus the full current structured
 
 ### Product catalog and replenishment
 
-Use `list_product_catalog` when the user asks about all known products, products that ran out, or ingredients known only from recipes. It supports `status` (`all`, `in_stock`, `out_of_stock`, `recipe_only`) and an optional case-insensitive `query`. Current inventory tools continue to return only products physically present now.
+Use `list_product_catalog` when the user asks about all known products, products that ran out, or ingredients known only from recipes. It supports `status` (`all`, `in_stock`, `out_of_stock`, `recipe_only`), `category` (`all`, `product`, `prep`, `ready_meal`), and an optional case-insensitive `query`. Current inventory tools continue to return only products physically present now.
 
-Use `replenish_product` only after the user confirms that a product is physically back in the kitchen. Select a previously stocked product by `product_id`, or a recipe-only product by `name`. This preserves the stable product identity but creates a fresh current batch: do not carry an old expiry or comment forward unless the user explicitly supplies new values. Replenishment is not the same as adding an item to a shopping list.
+Use `set_product_category` whenever the user classifies or reclassifies any visible catalog product. It works for current stock, out-of-stock identities, and recipe-only ingredients. Categorizing a recipe-only product creates catalog metadata but **does not** add it to kitchen stock. Category `prep` is descriptive inventory/catalog metadata and does not create or consume the separate production-tracked `PrepItem` entity.
+
+Use `replenish_product` only after the user confirms that a product is physically back in the kitchen. Select any persisted catalog identity by `product_id`, or a non-materialized recipe-only product by `name`. This preserves the stable product identity and category but creates a fresh current batch: do not carry an old expiry or comment forward unless the user explicitly supplies new values. Replenishment is not the same as adding an item to a shopping list.
 
 Removing, consuming, or clearing current stock marks catalog identities as unavailable instead of forgetting them. The catalog states are `in_stock`, `out_of_stock`, and `recipe_only`.
 

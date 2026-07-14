@@ -1081,6 +1081,8 @@ def test_inventory_item_roundtrip():
         id="inv_test",
         name="  Куриные Голени  ",
         available=False,
+        category="prep",
+        ever_stocked=False,
         quantity="2.000",
         unit="kg",
         package_count=1,
@@ -1097,16 +1099,20 @@ def test_inventory_item_roundtrip():
     check("quantity canonicalized", item.quantity == "2")
     check("comment trimmed", item.comment == "сырые")
     check("availability roundtrips", restored.available is False)
+    check("category roundtrips", restored.category == "prep")
+    check("catalog origin roundtrips", restored.ever_stocked is False)
     positional = inventory_mod.InventoryItem(
         "inv_positional", "рис", "2", "kg", None, None, None, None,
         "2026-07-14T01:15:00+00:00", "2026-07-14T01:15:00+00:00",
     )
     check("positional inventory constructor remains compatible", positional.quantity == "2" and positional.available is True)
-    check("legacy public inventory shape hides availability", "available" not in item.to_public_dict())
+    public = item.to_public_dict()
+    check("public inventory exposes category", public["category"] == "prep")
+    check("public inventory hides lifecycle internals", "available" not in public and "ever_stocked" not in public)
     check("inventory roundtrip exact", restored == item)
     check("serialized fields are complete", set(payload) == {
         "id", "name", "available", "quantity", "unit", "package_count", "storage",
-        "expires_on", "comment", "created_at", "updated_at",
+        "expires_on", "comment", "created_at", "updated_at", "category", "ever_stocked",
     })
 
 
@@ -1125,6 +1131,9 @@ def test_inventory_item_validation():
         ({"name": None}, "null name"),
         ({"name": "x" * 201}, "overlong name"),
         ({"available": "yes"}, "non-boolean availability"),
+        ({"category": "leftovers"}, "unknown category"),
+        ({"ever_stocked": "yes"}, "non-boolean stocked history"),
+        ({"available": True, "ever_stocked": False}, "available never-stocked state"),
         ({"quantity": "2"}, "quantity without unit"),
         ({"unit": "kg"}, "unit without quantity"),
         ({"quantity": True, "unit": "kg"}, "boolean quantity"),
@@ -1197,7 +1206,17 @@ def test_product_catalog_statuses_and_filters():
         ),
         inventory_mod.InventoryItem(
             id="inv_milk", name="молоко", available=False,
-            storage="fridge", created_at=stamp, updated_at=stamp,
+            category="ready_meal", storage="fridge", created_at=stamp, updated_at=stamp,
+        ),
+        inventory_mod.InventoryItem(
+            id="inv_tomato", name="томаты", available=False,
+            category="prep", ever_stocked=False,
+            created_at=stamp, updated_at=stamp,
+        ),
+        inventory_mod.InventoryItem(
+            id="inv_hidden", name="старый metadata", available=False,
+            category="prep", ever_stocked=False,
+            created_at=stamp, updated_at=stamp,
         ),
     ]
     dishes = [
@@ -1210,12 +1229,14 @@ def test_product_catalog_statuses_and_filters():
     check("current product is in_stock", by_name["рис"]["status"] == "in_stock")
     check("removed product is out_of_stock", by_name["молоко"]["status"] == "out_of_stock")
     check("recipe-only product is distinguished", by_name["томаты"]["status"] == "recipe_only")
+    check("persisted recipe-only category is projected", by_name["томаты"]["category"] == "prep")
+    check("unstocked non-recipe metadata stays hidden", "старый metadata" not in by_name)
     check("recipe usage count is aggregated", by_name["томаты"]["recipe_count"] == 2)
     filtered = catalog_mod.build_product_catalog(
-        items, dishes, status="recipe_only", query="ТОМ",
+        items, dishes, status="recipe_only", query="ТОМ", category="prep",
     )
     check("catalog status and query filters compose", [row["name"] for row in filtered] == ["томаты"])
-    for kwargs in ({"status": "missing"}, {"query": "x" * 201}):
+    for kwargs in ({"status": "missing"}, {"category": "missing"}, {"query": "x" * 201}):
         try:
             catalog_mod.build_product_catalog(items, dishes, **kwargs)
             check("catalog rejects invalid filter", False)

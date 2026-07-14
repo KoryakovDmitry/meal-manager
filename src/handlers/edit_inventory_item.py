@@ -11,6 +11,7 @@ SCHEMA = {
     "properties": {
         "item_id": {"type": "string", "maxLength": 100},
         "name": {"type": "string", "maxLength": 200},
+        "category": {"type": "string", "enum": ["product", "prep", "ready_meal"]},
         "quantity": {"oneOf": [{"type": "number"}, {"type": "string"}, {"type": "null"}]},
         "unit": {"oneOf": [{"type": "string", "enum": ["g", "kg", "ml", "l", "pcs", "pack", "can", "jar", "bottle", "portion"]}, {"type": "null"}]},
         "package_count": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 10000}, {"type": "null"}]},
@@ -28,6 +29,6 @@ def HANDLER(args: dict, **kwargs):
     reject_unknown_args(args, set(SCHEMA["properties"]))
     item_id = require_arg(args, "item_id")
     patch = {key: args[key] for key in (
-        "name", "quantity", "unit", "package_count", "storage", "expires_on", "comment"
+        "name", "quantity", "unit", "package_count", "storage", "expires_on", "comment", "category"
     ) if key in args}
     return fridge_repo.edit_item(item_id, patch).to_public_dict()

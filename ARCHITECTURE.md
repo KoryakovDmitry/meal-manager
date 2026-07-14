@@ -89,37 +89,42 @@ with portion counts.
 
 **File:** `data/plans/2026-WXX.json` (one file per week)
 
-### 3. Structured Kitchen Inventory Item (planned — INV-2)
+### 3. Structured Kitchen Inventory and Product Catalog
 
-The flat fridge list migrates to a versioned envelope of structured stock slots. One slot exists per normalized product name in phase 1.
+The flat fridge list has evolved into one versioned inventory/catalog envelope. One persisted identity exists per normalized product name; current stock is a projection of identities with `available: true`.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "items": [
     {
       "id": "inv_01J...",
-      "name": "куриные голени",
-      "quantity": "2",
-      "unit": "kg",
+      "name": "готовые маринованные куриные ножки",
+      "quantity": "11",
+      "unit": "pcs",
       "package_count": 1,
       "storage": "fridge",
       "expires_on": "2026-07-17",
-      "comment": "сырые; приготовить или заморозить",
+      "comment": "разогреть перед подачей",
       "created_at": "2026-07-14T01:15:00+02:00",
-      "updated_at": "2026-07-14T01:15:00+02:00"
+      "updated_at": "2026-07-14T01:15:00+02:00",
+      "available": true,
+      "category": "ready_meal",
+      "ever_stocked": true
     }
   ]
 }
 ```
 
-Only `id` and normalized `name` are required; migrated metadata remains null/unknown until supplied. Storage values are `fridge`, `freezer`, `pantry`, and `counter`. Quantity is persisted as a canonical decimal string with an explicit unit; package count, expiry, and comment are optional.
+Categories are `product` (ordinary product/ingredient), `prep` (semi-finished component prepared in advance), and `ready_meal` (ready to eat or reheat). Legacy/v2/v3 records migrate to `product`; recipe-only category metadata can persist with `available: false` and `ever_stocked: false`, which preserves `recipe_only` status until replenishment. The category is descriptive and does not replace the production-tracked `PrepItem` domain.
 
-**Compatibility:** Legacy `fridge.json` flat arrays remain readable. Existing recipes, suggestions, cooking, and weekly shopping consume a derived set/list of available names. Structured quantity is persisted and displayed but does not drive recipe sufficiency or shopping arithmetic until recipes gain quantity requirements.
+Storage values are `fridge`, `freezer`, `pantry`, and `counter`. Quantity is persisted as a canonical decimal string with an explicit unit; package count, expiry, and comment are optional. The lifecycle invariant is `available => ever_stocked`, and `ever_stocked` is monotonic. Removal and consumption preserve identities by setting `available: false`; replenishment retains identity/category and starts a fresh current batch. Web category/replenish/edit/delete mutations carry OCC preconditions checked inside the inventory lock; an absent recipe-only identity uses an explicit null precondition, while native tools are serialized latest-intent operations.
 
-**Detailed contract:** [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md).
+**Compatibility:** Legacy flat arrays and schema v2/v3 envelopes remain readable and migrate atomically on first mutation. Existing recipes, suggestions, cooking, and weekly shopping consume a derived set/list of available names. Structured quantity is persisted and displayed but does not drive recipe sufficiency or shopping arithmetic until recipes gain quantity requirements.
 
-**File:** `data/fridge.json` (versioned envelope after migration)
+**Detailed contracts:** [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md), [`docs/issues/INV-4-product-catalog-and-replenishment.md`](docs/issues/INV-4-product-catalog-and-replenishment.md), and INV-5 in [`BOARD.md`](BOARD.md).
+
+**File:** `data/fridge.json` (schema v4 envelope after migration)
 
 ### 4. Extended Dish — Prep Dependencies
 

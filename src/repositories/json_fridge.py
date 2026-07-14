@@ -11,9 +11,10 @@ from .. import atomic_write_json
 from ..dish import Dish
 from ..inventory import InventoryItem
 
-SCHEMA_VERSION = 3
-SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3})
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
 _MIGRATION_NAMESPACE = uuid.UUID("72c45a1a-73c7-4e07-84dd-e20b6e342f95")
+_EXPECTED_VERSION_UNSET = object()
 
 
 class InventoryDataError(ValueError):
@@ -186,18 +187,30 @@ class JsonFridgeRepository:
         if not isinstance(raw["items"], list):
             raise InventoryDataError("Inventory items must be an array")
         if version == 2 and any(
-            isinstance(value, dict) and "available" in value
+            isinstance(value, dict)
+            and ({"available", "category", "ever_stocked"} & set(value))
             for value in raw["items"]
         ):
             raise InventoryDataError(
                 "Schema v2 inventory item contains v3 availability"
             )
         if version == 3 and any(
-            not isinstance(value, dict) or "available" not in value
+            not isinstance(value, dict)
+            or "available" not in value
+            or "category" in value
+            or "ever_stocked" in value
             for value in raw["items"]
         ):
             raise InventoryDataError(
                 "Schema v3 inventory item is missing availability"
+            )
+        if version == 4 and any(
+            not isinstance(value, dict)
+            or not {"available", "category", "ever_stocked"}.issubset(value)
+            for value in raw["items"]
+        ):
+            raise InventoryDataError(
+                "Schema v4 inventory item is missing category lifecycle fields"
             )
 
         try:
@@ -259,7 +272,7 @@ class JsonFridgeRepository:
     def _replenished(self, item: InventoryItem, fields: dict) -> InventoryItem:
         allowed = {
             "quantity", "unit", "package_count", "storage",
-            "expires_on", "comment",
+            "expires_on", "comment", "category",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -275,6 +288,8 @@ class JsonFridgeRepository:
             "storage": fields.get("storage", item.storage),
             "expires_on": fields.get("expires_on"),
             "comment": fields.get("comment"),
+            "category": fields.get("category", item.category),
+            "ever_stocked": True,
             "updated_at": self._next_updated_at(item),
         })
         return InventoryItem.from_dict(values)
@@ -358,6 +373,7 @@ class JsonFridgeRepository:
         *,
         item_id: str | None = None,
         name: str | None = None,
+        expected_updated_at=_EXPECTED_VERSION_UNSET,
         **fields,
     ) -> InventoryItem:
         if bool(item_id) == bool(name):
@@ -376,7 +392,27 @@ class JsonFridgeRepository:
                     None,
                 )
                 if current is None:
-                    return self.add_item(name=normalized, **fields)
+                    if expected_updated_at not in (_EXPECTED_VERSION_UNSET, None):
+                        raise LookupError(f"Ingredient '{normalized}' not found")
+                    now = self._now()
+                    created = InventoryItem(
+                        id=self._new_id(),
+                        name=normalized,
+                        available=True,
+                        ever_stocked=True,
+                        created_at=now,
+                        updated_at=now,
+                        **fields,
+                    )
+                    items.append(created)
+                    self._save_items_unlocked(items)
+                    return created
+            if expected_updated_at is None:
+                raise InventoryConflictError(current)
+            if expected_updated_at is not _EXPECTED_VERSION_UNSET:
+                if not isinstance(expected_updated_at, str):
+                    raise ValueError("expected_updated_at must be a non-empty string")
+                self._check_expected_updated_at(current, expected_updated_at)
             if current.available:
                 raise ValueError(
                     f"Ingredient '{current.name}' already exists in kitchen inventory"
@@ -399,7 +435,7 @@ class JsonFridgeRepository:
             raise ValueError("At least one inventory field must be provided")
         allowed = {
             "name", "quantity", "unit", "package_count", "storage",
-            "expires_on", "comment",
+            "expires_on", "comment", "category",
         }
         unknown = set(patch) - allowed
         if unknown:
@@ -445,6 +481,63 @@ class JsonFridgeRepository:
             candidate.updated_at = self._next_updated_at(current)
             candidate = InventoryItem.from_dict(candidate.to_dict())
             items[index] = candidate
+            self._save_items_unlocked(items)
+            return candidate
+
+    def set_product_category(
+        self,
+        name: str | None,
+        category: str,
+        *,
+        item_id: str | None = None,
+        allow_create: bool = False,
+        expected_updated_at=_EXPECTED_VERSION_UNSET,
+    ) -> InventoryItem:
+        if bool(item_id) == bool(name):
+            raise ValueError("Provide exactly one of item_id or name")
+        normalized = Dish.normalize_ingredient(name) if name else None
+        with self.lock:
+            items = self.load_catalog_items()
+            if item_id:
+                key = item_id.strip()
+                current = next((item for item in items if item.id == key), None)
+                if current is None:
+                    raise LookupError(f"Inventory item '{key}' not found")
+            else:
+                current = next((item for item in items if item.name == normalized), None)
+            if current is None:
+                if not allow_create or normalized is None:
+                    raise LookupError(f"Product '{normalized}' not found")
+                if expected_updated_at not in (_EXPECTED_VERSION_UNSET, None):
+                    raise LookupError(f"Product '{normalized}' not found")
+                now = self._now()
+                created = InventoryItem(
+                    id=self._new_id(),
+                    name=normalized,
+                    available=False,
+                    category=category,
+                    ever_stocked=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+                items.append(created)
+                self._save_items_unlocked(items)
+                return created
+
+            if expected_updated_at is None:
+                raise InventoryConflictError(current)
+            if expected_updated_at is not _EXPECTED_VERSION_UNSET:
+                if not isinstance(expected_updated_at, str):
+                    raise ValueError("expected_updated_at must be a non-empty string")
+                self._check_expected_updated_at(current, expected_updated_at)
+            values = current.to_dict()
+            values["category"] = category
+            candidate = InventoryItem.from_dict(values)
+            if candidate.category == current.category:
+                return current
+            candidate.updated_at = self._next_updated_at(current)
+            candidate = InventoryItem.from_dict(candidate.to_dict())
+            items[items.index(current)] = candidate
             self._save_items_unlocked(items)
             return candidate
 

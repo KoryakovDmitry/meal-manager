@@ -11,6 +11,7 @@ ALLOWED_UNITS = frozenset({
     "g", "kg", "ml", "l", "pcs", "pack", "can", "jar", "bottle", "portion",
 })
 ALLOWED_STORAGE = frozenset({"fridge", "freezer", "pantry", "counter"})
+ALLOWED_CATEGORIES = frozenset({"product", "prep", "ready_meal"})
 MAX_QUANTITY = Decimal("1000000000")
 MAX_QUANTITY_DECIMALS = 6
 MAX_PACKAGE_COUNT = 10_000
@@ -68,6 +69,8 @@ class InventoryItem:
     created_at: str = ""
     updated_at: str = ""
     available: bool = True
+    category: str = "product"
+    ever_stocked: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -86,6 +89,15 @@ class InventoryItem:
 
         if not isinstance(self.available, bool):
             raise ValueError("available must be a boolean")
+        if not isinstance(self.category, str):
+            raise ValueError("category must be a string")
+        self.category = self.category.strip().lower()
+        if self.category not in ALLOWED_CATEGORIES:
+            raise ValueError(f"unsupported category: {self.category}")
+        if not isinstance(self.ever_stocked, bool):
+            raise ValueError("ever_stocked must be a boolean")
+        if self.available and not self.ever_stocked:
+            raise ValueError("available inventory must have been stocked")
 
         if self.quantity is None:
             if self.unit is not None:
@@ -155,6 +167,7 @@ class InventoryItem:
     def to_public_dict(self, *, today: date | None = None) -> dict:
         payload = self.to_dict()
         payload.pop("available")
+        payload.pop("ever_stocked")
         return payload | {"expiry_status": self.expiry_status(today=today)}
 
     @classmethod

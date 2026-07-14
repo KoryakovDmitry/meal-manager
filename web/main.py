@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 from math import isfinite
 from pathlib import Path
 from collections import Counter
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -652,6 +652,7 @@ class FridgeRename(BaseModel):
 
 class InventoryItemCreate(BaseModel):
     name: str = Field(max_length=200)
+    category: Literal["product", "prep", "ready_meal"] = "product"
     quantity: Any = None
     unit: str | None = None
     package_count: StrictInt | None = None
@@ -665,6 +666,7 @@ class InventoryItemCreate(BaseModel):
 class InventoryItemPatch(BaseModel):
     expected_updated_at: str = Field(min_length=1, max_length=100)
     name: str | None = Field(default=None, max_length=200)
+    category: Literal["product", "prep", "ready_meal"] | None = None
     quantity: Any = None
     unit: str | None = None
     package_count: StrictInt | None = None
@@ -678,12 +680,24 @@ class InventoryItemPatch(BaseModel):
 class ProductReplenish(BaseModel):
     product_id: str | None = Field(default=None, max_length=100)
     name: str | None = Field(default=None, max_length=200)
+    expected_updated_at: str | None = Field(..., min_length=1, max_length=100)
+    category: Literal["product", "prep", "ready_meal"] | None = None
     quantity: Any = None
     unit: str | None = None
     package_count: StrictInt | None = None
     storage: str | None = None
     expires_on: str | None = None
     comment: str | None = None
+
+    class Config:
+        extra = "forbid"
+
+
+class ProductCategoryPatch(BaseModel):
+    product_id: str | None = Field(default=None, min_length=1, max_length=100)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    category: Literal["product", "prep", "ready_meal"]
+    expected_updated_at: str | None = Field(..., min_length=1, max_length=100)
 
     class Config:
         extra = "forbid"
@@ -851,21 +865,74 @@ def remove_inventory_item(item_id: str, expected_updated_at: str):
         _inventory_error(exc)
 
 
-@app.get("/api/products")
-@_inventory_api_errors
-def list_product_catalog(status: str = "all", query: str | None = None):
+def _catalog_dishes() -> list[Dish]:
     dishes = []
     for entry in load_dishes():
         try:
             dishes.append(Dish.from_dict(entry))
         except (AttributeError, KeyError, TypeError, ValueError):
             continue
+    return dishes
+
+
+@app.get("/api/products")
+@_inventory_api_errors
+def list_product_catalog(
+    status: str = "all",
+    category: str = "all",
+    query: str | None = None,
+):
     return {"items": build_product_catalog(
         _fridge_repository().load_catalog_items(),
-        dishes,
+        _catalog_dishes(),
         status=status,
+        category=category,
         query=query,
     )}
+
+
+@app.patch("/api/products/category")
+@_inventory_api_errors
+def set_product_category(payload: ProductCategoryPatch):
+    if payload.product_id:
+        if payload.name is not None or payload.expected_updated_at is None:
+            raise HTTPException(400, "Persisted products require product_id and a version")
+    elif not payload.name or payload.expected_updated_at is not None:
+        raise HTTPException(400, "Name targeting is only valid for an absent recipe-only identity")
+    rows = build_product_catalog(
+        _fridge_repository().load_catalog_items(),
+        _catalog_dishes(),
+    )
+    name = _normalize(payload.name) if payload.name else None
+    current = (
+        next((row for row in rows if row["id"] == payload.product_id), None)
+        if payload.product_id
+        else next((row for row in rows if row["name"] == name), None)
+    )
+    if current is None:
+        raise HTTPException(404, "Product not found in product catalog")
+    try:
+        item = _fridge_repository().set_product_category(
+            name,
+            payload.category,
+            item_id=payload.product_id,
+            allow_create=current["id"] is None,
+            expected_updated_at=payload.expected_updated_at,
+        )
+        refreshed = build_product_catalog(
+            _fridge_repository().load_catalog_items(),
+            _catalog_dishes(),
+        )
+        updated = next((row for row in refreshed if row["id"] == item.id), None)
+        if updated is None:
+            updated = item.to_public_dict() | {
+                "status": current["status"],
+                "recipe_count": 0,
+                "in_recipes": False,
+            }
+        return {"item": updated}
+    except (TypeError, ValueError, LookupError, OSError) as exc:
+        _inventory_error(exc)
 
 
 @app.post("/api/products/replenish")
@@ -873,10 +940,17 @@ def replenish_product(payload: ProductReplenish):
     fields = _model_patch(payload)
     product_id = fields.pop("product_id", None)
     name = fields.pop("name", None)
+    expected_updated_at = fields.pop("expected_updated_at")
+    if product_id:
+        if name is not None or expected_updated_at is None:
+            raise HTTPException(400, "Persisted products require product_id and a version")
+    elif not name or expected_updated_at is not None:
+        raise HTTPException(400, "Name targeting is only valid for an absent recipe-only identity")
     try:
         item = _fridge_repository().replenish_item(
             item_id=product_id,
             name=name,
+            expected_updated_at=expected_updated_at,
             **fields,
         )
         return {"item": item.to_public_dict()}

@@ -135,6 +135,7 @@ setTimeout(async () => {
   CACHE.selectedPlan = {week:'2026-W29', status:'draft', prep:[attack], days:attackedPlanDays, shopping:{}};
   CACHE.selectedPlanVersion = 'sha256:xss';
   CACHE.products = [{id:null, name:attack, status:'recipe_only', available:false,
+    category:'ready_meal', updated_at:null,
     quantity:null, unit:null, package_count:null, storage:null, expires_on:null,
     comment:null, expiry_status:'unknown', recipe_count:1, in_recipes:true}];
   renderStats();
@@ -180,16 +181,25 @@ setTimeout(async () => {
     document.querySelector('#fridge-container [data-action="edit"][data-value="лук новый"]');
   const expiredRecord = {
     id: 'inv_expired', name: 'молоко', quantity: '1', unit: 'l',
+    category: 'ready_meal',
     package_count: null, storage: 'fridge', expires_on: '2026-07-13',
     comment: null, expiry_status: 'expired', updated_at: 'v-expired'
   };
   const expiringSoon = {id:'inv_soon', name:'йогурт', quantity:null, unit:null, package_count:null,
-    storage:'fridge', expires_on:'2026-07-16', comment:null, expiry_status:'expiring_soon', updated_at:'v-soon'};
+    category:'prep', storage:'fridge', expires_on:'2026-07-16', comment:null,
+    expiry_status:'expiring_soon', updated_at:'v-soon'};
   CACHE.inventory = [expiredRecord, expiringSoon];
   CACHE.fridge = CACHE.inventory.map(item => item.name);
   renderFridge();
   const expiryText = document.getElementById('fridge-container').textContent;
   const expiryAccessible = expiryText.includes('Просрочено') && expiryText.includes('Скоро истекает срок');
+  const inventoryCategoryBadges = [...document.querySelectorAll('#fridge-container .category-badge')]
+    .map(node => node.textContent.trim()).sort().join('|') === 'Готовая еда|Заготовка';
+  document.getElementById('fridge-category-filter').value = 'prep';
+  renderFridge();
+  const inventoryCategoryFilter = document.querySelectorAll('#fridge-container .fridge-item').length === 1 &&
+    document.getElementById('fridge-container').textContent.includes('йогурт');
+  document.getElementById('fridge-category-filter').value = 'all';
   CACHE.inventory = [expiredRecord];
   const salt = {id:'inv_salt', name:'соль', quantity:null, unit:null, package_count:null,
     storage:'pantry', expires_on:null, comment:'старый', expiry_status:'unknown', updated_at:'v-salt'};
@@ -365,8 +375,37 @@ setTimeout(async () => {
     document.querySelector('.app').hasAttribute('inert');
   const replenishFreshBatch = document.getElementById('replenish-expiry').value === '' &&
     document.getElementById('replenish-comment').value === '';
+  const replenishCategoryPrefill = document.getElementById('replenish-category').value === 'ready_meal';
   productDialog.querySelector('[data-modal-action="cancel"]').click();
   const productFocusRestore = document.activeElement === productOpener;
+  const categoryOpener = document.querySelector('#product-catalog-container [data-action="category"]');
+  categoryOpener.focus();
+  categoryOpener.click();
+  const categoryDialog = document.querySelector('#modal-container [role="dialog"]');
+  const categoryModalSemantics = categoryDialog?.getAttribute('aria-modal') === 'true' &&
+    categoryDialog?.getAttribute('aria-labelledby') === 'product-category-modal-title' &&
+    document.activeElement === document.getElementById('product-category-select') &&
+    document.getElementById('product-category-select').getBoundingClientRect().height >= 44;
+  let categoryCall = null;
+  api = async (path, method, body) => {
+    categoryCall = {path, method, body};
+    CACHE.products[0] = {...CACHE.products[0], id:'inv-category', category:body.category, updated_at:'v-category'};
+    return {item:CACHE.products[0]};
+  };
+  refreshAll = async () => renderProductCatalog();
+  document.getElementById('product-category-select').value = 'prep';
+  await saveProductCategory(0);
+  const categoryVersioned = categoryCall.path === '/api/products/category' &&
+    categoryCall.method === 'PATCH' && categoryCall.body.expected_updated_at === null &&
+    categoryCall.body.category === 'prep';
+  const categoryFocusRestore = document.activeElement ===
+    document.querySelector('#product-catalog-container [data-action="category"]');
+  const categoryBadge = document.querySelector('#product-catalog-container .category-badge')?.textContent.trim() === 'Заготовка' &&
+    document.querySelector('#product-catalog-container .product-card')?.classList.contains('category-prep');
+  document.getElementById('product-catalog-category').value = 'prep';
+  renderProductCatalog();
+  const categoryFilter = document.querySelectorAll('#product-catalog-container .product-card').length === 1;
+  document.getElementById('product-catalog-category').value = 'all';
   document.getElementById('page-products').classList.remove('active');
   dishesPage.classList.add('active');
   const opener = document.querySelector('#dishes-container [data-action="edit"]');
@@ -410,7 +449,7 @@ setTimeout(async () => {
   opener.focus();
   opener.click();
   dialog = document.querySelector('#modal-container [role="dialog"]');
-  const controls = [...document.querySelectorAll('.icon-action, .fridge-item .edit, .fridge-item .remove, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
+  const controls = [...document.querySelectorAll('.icon-action, .fridge-item .edit, .fridge-item .remove, .product-card-actions .btn, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
   const controlDetails = controls.map(control => {
     const page = control.closest('.page');
     const previousDisplay = page?.style.display || '';
@@ -435,10 +474,12 @@ setTimeout(async () => {
     cancelRestore, backdropRestore, escapeRestore, saveRestore, stateOpacityOk,
     fridgeEditFocus, fridgeCancelRestore,
     inFlightEditLocked, fridgeSaveRestore, expiryAccessible,
+    inventoryCategoryBadges, inventoryCategoryFilter,
     deleteAccessible, deleteVersioned, dirtyPatchOnly, conflictRenamePreserved, deletedConflictResolved,
     planModalSemantics, planSaveVersioned, planSaveFocus, planConflictModalClosed,
     planDeleteVersioned, planDeleted, planDetailCleared, planListFocus, externallyDeletedPlanCleared,
-    productModalSemantics, replenishFreshBatch, productFocusRestore,
+    productModalSemantics, replenishFreshBatch, replenishCategoryPrefill, productFocusRestore,
+    categoryModalSemantics, categoryVersioned, categoryFocusRestore, categoryBadge, categoryFilter,
     window.__qaErrors.length
   ].join(';'));
 }, 500);
@@ -457,7 +498,7 @@ setTimeout(() => {
   showEditDishModal('суп');
   const toggle = document.getElementById('sidebar-toggle');
   const rect = toggle.getBoundingClientRect();
-  const compact = [...document.querySelectorAll('.icon-action, .fridge-item .edit, .fridge-item .remove, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
+  const compact = [...document.querySelectorAll('.icon-action, .fridge-item .edit, .fridge-item .remove, .product-card-actions .btn, .ing-editor-row .toggle-ess, .ing-editor-row .del-ing')];
   const compactOk = compact.every(control => {
     const page = control.closest('.page');
     const previousDisplay = page?.style.display || '';
@@ -514,7 +555,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            + ";".join(["true"] * 32) + ";0"
+            + ";".join(["true"] * 40) + ";0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"

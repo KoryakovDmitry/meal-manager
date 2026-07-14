@@ -341,6 +341,7 @@ def main():
             try:
                 created_item = web.add_inventory_item(web.InventoryItemCreate(
                     name="Молоко QA",
+                    category="prep",
                     quantity="2.0",
                     unit="l",
                     package_count=2,
@@ -353,6 +354,7 @@ def main():
             structured_id = created_item["item"]["id"]
             structured_version = created_item["item"]["updated_at"]
             assert created_item["item"]["quantity"] == "2"
+            assert created_item["item"]["category"] == "prep"
             assert any(
                 item["id"] == structured_id
                 for item in web.list_inventory_items()["items"]
@@ -363,11 +365,13 @@ def main():
                     comment=None,
                     quantity="1.5",
                     unit="l",
+                    category="ready_meal",
                     expected_updated_at=structured_version,
                 ),
             )
             assert updated_item["item"]["comment"] is None
             assert updated_item["item"]["quantity"] == "1.5"
+            assert updated_item["item"]["category"] == "ready_meal"
             updated_version = updated_item["item"]["updated_at"]
             bytes_before_stale = web.FRIDGE_PATH.read_bytes()
             try:
@@ -439,9 +443,45 @@ def main():
                 detail: Any = exc.detail
                 assert detail["current_item"]["available"] is False
 
-            catalog_rows = web.list_product_catalog(status="out_of_stock", query="МОЛОКО")["items"]
+            catalog_rows = web.list_product_catalog(
+                status="out_of_stock", category="ready_meal", query="МОЛОКО",
+            )["items"]
             assert [row["name"] for row in catalog_rows] == ["молоко qa"]
             assert catalog_rows[0]["id"] == structured_id
+            recategorized_stock = web.set_product_category(web.ProductCategoryPatch(
+                product_id=structured_id,
+                category="prep",
+                expected_updated_at=catalog_rows[0]["updated_at"],
+            ))
+            bytes_before_name_aba = web.FRIDGE_PATH.read_bytes()
+            for stale_call in (
+                lambda: web.set_product_category(web.ProductCategoryPatch(
+                    name="молоко qa",
+                    category="ready_meal",
+                    expected_updated_at=recategorized_stock["item"]["updated_at"],
+                )),
+                lambda: web.replenish_product(web.ProductReplenish(
+                    name="молоко qa",
+                    expected_updated_at=recategorized_stock["item"]["updated_at"],
+                )),
+            ):
+                try:
+                    stale_call()
+                    raise AssertionError("persisted Web identity accepted a name-keyed OCC mutation")
+                except HTTPException as exc:
+                    assert exc.status_code == 400
+            assert web.FRIDGE_PATH.read_bytes() == bytes_before_name_aba
+            bytes_before_stale_replenish = web.FRIDGE_PATH.read_bytes()
+            try:
+                web.replenish_product(web.ProductReplenish(
+                    product_id=structured_id,
+                    category="ready_meal",
+                    expected_updated_at=catalog_rows[0]["updated_at"],
+                ))
+                raise AssertionError("stale Web replenish overwrote a newer category")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+            assert web.FRIDGE_PATH.read_bytes() == bytes_before_stale_replenish
             try:
                 web.list_product_catalog(status="all", query="x" * 201)
                 raise AssertionError("catalog accepted an overlong query")
@@ -449,19 +489,43 @@ def main():
                 assert exc.status_code == 400
             recipe_only = web.list_product_catalog(status="recipe_only", query="томаты")["items"]
             assert [row["name"] for row in recipe_only] == ["томаты"]
+            categorized_recipe = web.set_product_category(web.ProductCategoryPatch(
+                name="томаты",
+                category="prep",
+                expected_updated_at=None,
+            ))
+            assert categorized_recipe["item"]["status"] == "recipe_only"
+            assert categorized_recipe["item"]["category"] == "prep"
+            assert categorized_recipe["item"]["id"] is not None
+            bytes_before_recipe_conflict = web.FRIDGE_PATH.read_bytes()
+            try:
+                web.set_product_category(web.ProductCategoryPatch(
+                    name="томаты",
+                    category="ready_meal",
+                    expected_updated_at=None,
+                ))
+                raise AssertionError("stale recipe-only category edit succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+            assert web.FRIDGE_PATH.read_bytes() == bytes_before_recipe_conflict
 
             restored_item = web.replenish_product(web.ProductReplenish(
                 product_id=structured_id,
                 quantity="1",
                 unit="l",
                 storage="fridge",
+                expected_updated_at=recategorized_stock["item"]["updated_at"],
             ))
             assert restored_item["item"]["id"] == structured_id
             assert restored_item["item"]["expires_on"] is None
             assert restored_item["item"]["comment"] is None
+            assert restored_item["item"]["category"] == "prep"
             assert "молоко qa" in web.load_fridge()
             try:
-                web.replenish_product(web.ProductReplenish(product_id=structured_id))
+                web.replenish_product(web.ProductReplenish(
+                    product_id=structured_id,
+                    expected_updated_at=restored_item["item"]["updated_at"],
+                ))
                 raise AssertionError("replenishment accepted an already stocked product")
             except HTTPException as exc:
                 assert exc.status_code == 409
@@ -471,9 +535,11 @@ def main():
             )
 
             promoted_item = web.replenish_product(web.ProductReplenish(
-                name="томаты", storage="pantry",
+                product_id=categorized_recipe["item"]["id"], storage="pantry",
+                expected_updated_at=categorized_recipe["item"]["updated_at"],
             ))
             assert promoted_item["item"]["name"] == "томаты"
+            assert promoted_item["item"]["category"] == "prep"
             web.remove_inventory_item(
                 promoted_item["item"]["id"],
                 expected_updated_at=promoted_item["item"]["updated_at"],
@@ -510,6 +576,95 @@ def main():
                 except HTTPException as exc:
                     assert exc.status_code == 400
             assert web.load_fridge() == valid_inventory_before_bad_request
+
+            # Regression: stale name/version pairs cannot cross an ABA rename
+            # boundary and mutate another stable identity reusing the old name.
+            repo = web._fridge_repository()
+            original_now = repo._now
+            fixed = "2026-07-14T23:59:00+00:00"
+            repo._now = lambda: fixed
+            try:
+                aba_a = web.add_inventory_item(web.InventoryItemCreate(name="aba old"))["item"]
+                stale_category_version = aba_a["updated_at"]
+                renamed_a = web.edit_inventory_item(
+                    aba_a["id"],
+                    web.InventoryItemPatch(
+                        name="aba current",
+                        expected_updated_at=stale_category_version,
+                    ),
+                )["item"]
+                aba_b = web.add_inventory_item(web.InventoryItemCreate(name="aba old"))["item"]
+                assert aba_b["updated_at"] == stale_category_version
+
+                before_category_aba = web.FRIDGE_PATH.read_bytes()
+                try:
+                    web.set_product_category(web.ProductCategoryPatch(
+                        product_id=aba_a["id"], category="prep",
+                        expected_updated_at=stale_category_version,
+                    ))
+                    raise AssertionError("stale category crossed an ABA boundary")
+                except HTTPException as exc:
+                    assert exc.status_code == 409
+                for payload in (
+                    web.ProductCategoryPatch(
+                        name="aba old", category="prep",
+                        expected_updated_at=stale_category_version,
+                    ),
+                    web.ProductCategoryPatch(
+                        name="aba old", category="prep", expected_updated_at=None,
+                    ),
+                ):
+                    try:
+                        web.set_product_category(payload)
+                        raise AssertionError("name-keyed category crossed an ABA boundary")
+                    except HTTPException as exc:
+                        assert exc.status_code in (400, 409)
+                assert web.FRIDGE_PATH.read_bytes() == before_category_aba
+
+                removed_a = web.remove_inventory_item(
+                    aba_a["id"], expected_updated_at=renamed_a["updated_at"],
+                )["item"]
+                stale_replenish_version = removed_a["updated_at"]
+                restored_a = web.replenish_product(web.ProductReplenish(
+                    product_id=aba_a["id"],
+                    expected_updated_at=stale_replenish_version,
+                ))["item"]
+                renamed_again = web.edit_inventory_item(
+                    aba_a["id"],
+                    web.InventoryItemPatch(
+                        name="aba current 2",
+                        expected_updated_at=restored_a["updated_at"],
+                    ),
+                )["item"]
+                web.remove_inventory_item(
+                    aba_a["id"], expected_updated_at=renamed_again["updated_at"],
+                )
+                repo._now = lambda: stale_replenish_version
+                removed_b = web.remove_inventory_item(
+                    aba_b["id"], expected_updated_at=aba_b["updated_at"],
+                )["item"]
+                assert removed_b["updated_at"] == stale_replenish_version
+
+                before_replenish_aba = web.FRIDGE_PATH.read_bytes()
+                try:
+                    web.replenish_product(web.ProductReplenish(
+                        product_id=aba_a["id"],
+                        expected_updated_at=stale_replenish_version,
+                    ))
+                    raise AssertionError("stale replenish crossed an ABA boundary")
+                except HTTPException as exc:
+                    assert exc.status_code == 409
+                for expected, status in ((stale_replenish_version, 400), (None, 409)):
+                    try:
+                        web.replenish_product(web.ProductReplenish(
+                            name="aba old", expected_updated_at=expected,
+                        ))
+                        raise AssertionError("name-keyed replenish crossed an ABA boundary")
+                    except HTTPException as exc:
+                        assert exc.status_code == status
+                assert web.FRIDGE_PATH.read_bytes() == before_replenish_aba
+            finally:
+                repo._now = original_now
 
             web.FRIDGE_PATH.write_text("{broken", encoding="utf-8")
             corrupt_calls = [
@@ -668,6 +823,7 @@ def main():
     }
     assert product_routes == {
         "/api/products": {"GET"},
+        "/api/products/category": {"PATCH"},
         "/api/products/replenish": {"POST"},
     }
 
@@ -713,8 +869,18 @@ def main():
     assert 'aria-label="Редактировать продукт ${safeItem}"' in html
     assert 'data-action="edit" data-value="${safeItem}"' in html
     assert 'id="fridge-add-quantity"' in html
+    assert 'id="fridge-add-category"' in html
+    assert 'id="fridge-category-filter"' in html
     assert 'id="fridge-add-storage"' in html
+    assert 'id="fridge-edit-category"' in html
     assert 'id="fridge-edit-expiry"' in html
+    assert 'id="product-catalog-category"' in html
+    assert 'id="replenish-category"' in html
+    assert "const PRODUCT_CATEGORY_LABELS" in html
+    assert "function showProductCategoryModal" in html
+    assert "function saveProductCategory" in html
+    assert "'/api/products/category', 'PATCH'" in html
+    assert 'category-badge' in html
     assert "metadata.push('⚠ Просрочено')" in html
     assert "metadata.push('⚠ Скоро истекает срок')" in html
     assert "'/api/inventory/items', 'POST'" in html

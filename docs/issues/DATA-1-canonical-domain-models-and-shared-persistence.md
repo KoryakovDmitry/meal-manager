@@ -268,7 +268,7 @@ Internal paths, parser internals, raw malformed payloads, and comments must not 
 
 ## Migration and rollout constraints
 
-- inventory schema v3 and stable IDs must be preserved exactly;
+- inventory schema v4 and stable IDs must be preserved exactly;
 - create verified pre-migration backups for every touched production file;
 - rehearse each migration against a temporary production copy;
 - verify names, IDs, metadata, references, counts, and compatibility projections;
@@ -333,7 +333,7 @@ Only after authoritative models and coherent snapshots exist for every mutable W
 
 ### Identity and versioning
 
-- [ ] Inventory stable IDs/schema v3 remain unchanged unless an explicitly rehearsed migration supersedes them.
+- [ ] Inventory stable IDs/schema v4 remain unchanged unless an explicitly rehearsed migration supersedes them.
 - [ ] Dish rename/delete does not depend on mutable name identity without an explicit collection precondition.
 - [ ] History entries are deleted by stable identity, not array index.
 - [ ] Entity/collection versions make stale edits/deletes deterministic and non-destructive.
