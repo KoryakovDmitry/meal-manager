@@ -134,6 +134,21 @@ On HTTP `409`:
 - restore keyboard focus predictably;
 - remain usable on mobile without horizontal overflow.
 
+## Confirmed Hermes integration boundary
+
+Source inspection on 2026-07-14 established the exact implementation split:
+
+- Hermes already exposes the public plugin hook `pre_llm_call`. It runs once at the beginning of each turn and accepts plugin return values such as `{"context": "..."}`; Hermes appends that context to the current user message rather than mutating the system prompt. Therefore **next-turn Web-change awareness can be implemented entirely inside `meal_manager`**: persist change receipts in the plugin, register `pre_llm_call`, and inject a compact synchronization note before the next LLM call.
+- Repository versions, conflict checks, receipts, Web `409` handling, and native synchronization tools are also entirely `meal_manager` concerns.
+- Hermes webhooks intentionally create independent agent sessions per delivery; they are explicitly not queued into or used to interrupt the existing Telegram session. They cannot provide active-session awareness by themselves.
+- The current public `PluginContext` has no supported API for steering/interruption of an already-running agent turn. Hermes also preserves strict role alternation and forbids arbitrary synthetic user messages inside the tool loop.
+- Therefore a **true mid-turn interrupt** requires a generic Hermes core/gateway extension: a sanctioned session-event/steer API that preserves role alternation, prompt caching, routing, and cancellation semantics. `meal_manager` must not reach into private GatewayRunner state as a workaround.
+
+Recommended sequencing:
+
+1. INV-3 v1 stays plugin-only: optimistic concurrency + atomic receipts + `pre_llm_call` synchronization on the next turn and explicit synchronization immediately before inventory mutation.
+2. A separate Hermes-core proposal is needed only if the household requires an external Web change to interrupt an answer that is already being generated.
+
 ## Acceptance criteria
 
 ### Conflict safety
