@@ -1,14 +1,25 @@
 """JSON-file-backed implementation of DishRepository."""
 
+import hashlib
 import json
 import logging
-import threading
 from pathlib import Path
 
 from .. import atomic_write_json
 from ..dish import Dish
+from .file_lock import JsonFileLock
 
 logger = logging.getLogger(__name__)
+
+
+def dish_catalog_version(dishes: list[Dish]) -> str:
+    payload = json.dumps(
+        [dish.to_dict() for dish in dishes],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 class JsonDishRepository:
@@ -16,13 +27,17 @@ class JsonDishRepository:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self.lock = threading.Lock()
+        self.lock = JsonFileLock(lambda: self.path)
+
+    def _io_path(self) -> Path:
+        return self.lock.active_path or self.path
 
     def load(self) -> list[Dish]:
-        if not self.path.exists():
+        path = self._io_path()
+        if not path.exists():
             return []
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to load %s: %s", self.path.name, exc)
@@ -65,10 +80,11 @@ class JsonDishRepository:
         file is unchanged under the lock) lets ``save`` round-trip those rows
         verbatim instead of dropping them.
         """
-        if not self.path.exists():
+        path = self._io_path()
+        if not path.exists():
             return []
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, ValueError, OSError):
             return []
@@ -104,7 +120,7 @@ class JsonDishRepository:
             if self._entry_name(entry) not in saved_names
         ]
         data = {"dishes": [dish.to_dict() for dish in dishes] + preserved}
-        atomic_write_json(self.path, data)
+        atomic_write_json(self._io_path(), data)
 
     def restore(self, dish: Dish) -> bool:
         """Re-add *dish* if a same-named entry is no longer in the catalog.

@@ -1,8 +1,6 @@
 """JSON-file-backed structured kitchen inventory repository."""
 
-import fcntl
 import json
-import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +8,7 @@ from pathlib import Path
 from .. import atomic_write_json
 from ..dish import Dish
 from ..inventory import InventoryItem
+from .file_lock import JsonFileLock
 
 SCHEMA_VERSION = 4
 SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
@@ -31,60 +30,12 @@ class InventoryConflictError(ValueError):
         )
 
 
-class _InventoryFileLock:
-    """Re-entrant thread + advisory process lock for one inventory path."""
-
-    def __init__(self, path_getter) -> None:
-        self._path_getter = path_getter
-        self._thread_lock = threading.RLock()
-        self._local = threading.local()
-
-    def __enter__(self):
-        self._thread_lock.acquire()
-        depth = getattr(self._local, "depth", 0)
-        try:
-            if depth == 0:
-                data_path = Path(self._path_getter())
-                data_path.parent.mkdir(parents=True, exist_ok=True)
-                lock_path = data_path.with_name(data_path.name + ".lock")
-                handle = open(lock_path, "a+", encoding="utf-8")
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                except Exception:
-                    handle.close()
-                    raise
-                self._local.handle = handle
-                self._local.path = data_path
-            self._local.depth = depth + 1
-            return self
-        except Exception:
-            self._thread_lock.release()
-            raise
-
-    def __exit__(self, exc_type, exc, tb):
-        depth = self._local.depth - 1
-        self._local.depth = depth
-        try:
-            if depth == 0:
-                handle = self._local.handle
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                handle.close()
-                del self._local.handle
-                del self._local.path
-        finally:
-            self._thread_lock.release()
-
-    @property
-    def active_path(self) -> Path | None:
-        return getattr(self._local, "path", None)
-
-
 class JsonFridgeRepository:
     """Store known products while exposing current-stock compatibility views."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self.lock = _InventoryFileLock(lambda: self.path)
+        self.lock = JsonFileLock(lambda: self.path)
 
     @staticmethod
     def _now() -> str:

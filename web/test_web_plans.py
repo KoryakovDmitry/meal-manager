@@ -305,6 +305,120 @@ def main():
             encoding="utf-8",
         )
         try:
+            initial_recipe_version = web.get_dishes()["version"]
+            created_recipe = web.add_dish(web.DishCreate(
+                name="Web recipe QA",
+                ingredients={"web qa ingredient": True},
+                instructions="  Chop onion.\nCook for five minutes.  ",
+                expected_version=initial_recipe_version,
+            ))
+            assert created_recipe["dish"]["instructions"] == "Chop onion.\nCook for five minutes."
+            listed_recipe = next(
+                dish for dish in web.get_dishes()["dishes"]
+                if dish["name"] == "web recipe qa"
+            )
+            assert listed_recipe["instructions"] == "Chop onion.\nCook for five minutes."
+            created_version = created_recipe["version"]
+            preserved_recipe = web.update_dish(
+                "web recipe qa",
+                web.DishUpdate(expected_version=created_version),
+            )
+            assert preserved_recipe["dish"]["instructions"] == "Chop onion.\nCook for five minutes."
+            boundary_recipe = web.update_dish(
+                "web recipe qa",
+                web.DishUpdate(
+                    instructions="\u2003" + "😀" * 20_000 + "\u2003",
+                    expected_version=preserved_recipe["version"],
+                ),
+            )
+            assert boundary_recipe["dish"]["instructions"] == "😀" * 20_000
+            oversized_baseline = web.DISHES_PATH.read_bytes()
+            try:
+                web.update_dish(
+                    "web recipe qa",
+                    web.DishUpdate(
+                        instructions="😀" * 20_001,
+                        expected_version=boundary_recipe["version"],
+                    ),
+                )
+                raise AssertionError("oversized Unicode instructions accepted")
+            except HTTPException as exc:
+                assert exc.status_code == 400
+            assert web.DISHES_PATH.read_bytes() == oversized_baseline
+            null_recipe = web.update_dish(
+                "web recipe qa",
+                web.DishUpdate(
+                    instructions=None,
+                    expected_version=boundary_recipe["version"],
+                ),
+            )
+            assert "instructions" not in null_recipe["dish"]
+            whitespace_recipe = web.update_dish(
+                "web recipe qa",
+                web.DishUpdate(
+                    instructions=" " * 20_001,
+                    expected_version=null_recipe["version"],
+                ),
+            )
+            assert "instructions" not in whitespace_recipe["dish"]
+            edited_recipe = web.update_dish(
+                "web recipe qa",
+                web.DishUpdate(
+                    instructions="Bake instead.",
+                    expected_version=whitespace_recipe["version"],
+                ),
+            )
+            assert edited_recipe["dish"]["instructions"] == "Bake instead."
+            cleared_recipe = web.update_dish(
+                "web recipe qa",
+                web.DishUpdate(
+                    instructions="   ",
+                    expected_version=edited_recipe["version"],
+                ),
+            )
+            assert "instructions" not in cleared_recipe["dish"]
+            assert "instructions" not in next(
+                dish for dish in web.get_dishes()["dishes"]
+                if dish["name"] == "web recipe qa"
+            )
+            try:
+                web.update_dish(
+                    "web recipe qa",
+                    web.DishUpdate(
+                        instructions="stale overwrite",
+                        expected_version=created_version,
+                    ),
+                )
+                raise AssertionError("stale recipe update accepted")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                assert exc.detail["code"] == "dish_catalog_conflict"
+                assert exc.detail["current_version"] == cleared_recipe["version"]
+            stale_baseline = web.DISHES_PATH.read_bytes()
+            try:
+                web.add_dish(web.DishCreate(
+                    name="stale create",
+                    ingredients={"water": True},
+                    instructions="must not persist",
+                    expected_version=created_version,
+                ))
+                raise AssertionError("stale recipe create accepted")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                assert exc.detail["code"] == "dish_catalog_conflict"
+            assert web.DISHES_PATH.read_bytes() == stale_baseline
+            try:
+                web.delete_dish("web recipe qa", created_version)
+                raise AssertionError("stale recipe delete accepted")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                assert exc.detail["code"] == "dish_catalog_conflict"
+            assert web.DISHES_PATH.read_bytes() == stale_baseline
+            assert "instructions" not in next(
+                dish for dish in web.get_dishes()["dishes"]
+                if dish["name"] == "web recipe qa"
+            )
+
             stats = web.get_stats()
             try:
                 rename_payload = web.FridgeRename(

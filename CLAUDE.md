@@ -59,7 +59,7 @@ All file-backed state lives behind repository singletons defined in `src/reposit
 The data directory is injectable via `src.repositories.configure(data_dir)` — this mutates the existing singletons' `path` attributes in place so modules that already imported `dish_repo` / `fridge_repo` / `history_repo` / `tuning_repo` keep a valid reference. The default (when `configure` is never called) is `<plugin_root>/data/`.
 
 - **`base.py`** — `DishRepository`, `FridgeRepository`, `HistoryRepository`, `TuningRepository` Protocols.
-- **`json_dish.py`** — `JsonDishRepository` (`<data_dir>/dishes.json`, wraps the `{"dishes": [...]}` envelope). Owns its own `lock` for load-modify-save sequences. `restore(dish)` is the delta-rollback for delete.
+- **`json_dish.py`** — `JsonDishRepository` (`<data_dir>/dishes.json`, wraps the `{"dishes": [...]}` envelope). Its re-entrant advisory file lock serializes native/Web load-modify-save sequences across processes; Web mutations additionally use a semantic whole-catalog OCC version. `restore(dish)` is the delta-rollback for delete.
 - **`json_fridge.py`** — `JsonFridgeRepository` (`<data_dir>/fridge.json`, versioned `schema_version: 4` structured inventory with category metadata, soft availability, recipe-only catalog identities, a backward-compatible name projection, and atomic v2/v3/legacy migration). Its re-entrant advisory file lock protects agent/Web read-modify-write sequences across processes; `remove_items(items)` is the delta-rollback for finalize.
 - **`json_history.py`** — `JsonHistoryRepository` (`<data_dir>/history.json`, dish name → ISO date). Encapsulates its own lock; `set_entry` returns the previous value for compare-and-swap rollback via `revert_entry`.
 - **`json_tuning.py`** — `JsonTuningRepository` (`<data_dir>/tuning.json`, the online-learner state). Owns its own `lock` for the cook handler's load-modify-save sequence. `load()` never raises: a missing/corrupt/schema-invalid file yields a fresh `tuning.initialize_state()`.
@@ -75,7 +75,7 @@ The data directory is injectable via `src.repositories.configure(data_dir)` — 
 
 ### Data files (`data/`)
 
-- `dishes.json` — Recipe catalog. Wraps dishes in `{"dishes": [...]}`; each dish has `name` and `ingredients` (name → bool).
+- `dishes.json` — Recipe catalog. Wraps dishes in `{"dishes": [...]}`; each dish has `name`, `ingredients` (name → bool), optional `prep_depends`, and optional multiline `instructions` (“how to cook”, maximum 20,000 normalized characters).
 - `fridge.json` — Versioned structured kitchen inventory (`{"schema_version": 4, "items": [...]}`); each item carries `category`, `available`, and `ever_stocked`, while legacy/v2/v3 inputs read compatibly and migrate on first mutation. Schema v4 fails closed unless `available => ever_stocked`; `ever_stocked` is monotonic and not publicly editable. Web category/replenish/edit/delete uses `expected_updated_at` OCC under the inventory lock, while native tools are serialized latest-intent operations.
 - `history.json` — Cooking history (dish name → ISO date string).
 - `tuning.json` — (created lazily on the first learning event) Online-learner state for the suggestion blend: candidate grid, discounted reward/count sums (`S`/`C`), `observations`, and the `deployed_match_weight` / `deployed_time_weight`. Missing/corrupt files fall back to a fresh initialized state.

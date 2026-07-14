@@ -1340,8 +1340,11 @@ def test_add_dish_dict():
     result = parse(add_dish({
         "name": "Ensalada",
         "ingredients": {"lechuga": True, "tomate": True, "aceitunas": False},
+        "instructions": "  Mix everything.\nServe cold.  ",
     }))
     check("success message", isinstance(result, str) and "added" in result.lower(), f"got: {result}")
+    stored = next(d for d in _repos_mod.dish_repo.load() if d.name == "ensalada")
+    check("add_dish persists instructions", stored.instructions == "Mix everything.\nServe cold.")
 
 
 def test_add_dish_list():
@@ -1386,6 +1389,111 @@ def test_edit_dish():
     check("success message", isinstance(result, str) and "updated" in result.lower(), f"got: {result}")
 
 
+def test_native_dish_instruction_tools():
+    print("\n-- native dish instructions --")
+    try:
+        get_recipe = _load_handler("get_dish_recipe")
+        set_instructions = _load_handler("set_dish_instructions")
+    except ModuleNotFoundError:
+        check("dish instruction tools exist", False)
+        return
+
+    recipe = parse(get_recipe({"dish_name": "Ensalada"}))
+    check(
+        "agent reads recipe instructions",
+        recipe.get("instructions") == "Mix everything.\nServe cold.",
+    )
+    boundary = parse(set_instructions({
+        "dish_name": "Ensalada",
+        "instructions": "  " + "x" * 20_000 + "  ",
+    }))
+    check("native instruction limit applies after trim", len(boundary["instructions"]) == 20_000)
+    whitespace = parse(set_instructions({
+        "dish_name": "Ensalada",
+        "instructions": " " * 20_001,
+    }))
+    check("native oversized whitespace clears instructions", whitespace["instructions"] is None)
+    updated = parse(set_instructions({
+        "dish_name": "Ensalada",
+        "instructions": "Toast briefly, then serve.",
+    }))
+    check(
+        "agent updates recipe instructions",
+        updated.get("instructions") == "Toast briefly, then serve.",
+    )
+    cleared = parse(set_instructions({
+        "dish_name": "Ensalada",
+        "instructions": None,
+    }))
+    check("agent clears recipe instructions", cleared.get("instructions") is None)
+    stored = next(d for d in _repos_mod.dish_repo.load() if d.name == "ensalada")
+    check(
+        "cleared instructions are omitted from storage",
+        "instructions" not in stored.to_dict(),
+    )
+
+
+def test_dish_repository_lock_is_cross_process():
+    print("\n-- public Web/native dish writers share one cross-process lock --")
+    import multiprocessing
+
+    path = _repos_mod.dish_repo.path
+    ctx = multiprocessing.get_context("fork")
+    start = ctx.Event()
+
+    def web_writer():
+        web_module = importlib.import_module(f"{_PLUGIN_DIR.name}.web.main")
+        web_module.DISHES_PATH = path
+        start.wait()
+        for number in range(12):
+            while True:
+                version = web_module.get_dishes()["version"]
+                try:
+                    web_module.add_dish(web_module.DishCreate(
+                        name=f"public-web-{number}",
+                        ingredients={"water": True},
+                        instructions=f"Web step {number}",
+                        expected_version=version,
+                    ))
+                    break
+                except web_module.HTTPException as exc:
+                    if exc.status_code != 409 or exc.detail.get("code") != "dish_catalog_conflict":
+                        raise
+
+    def native_writer():
+        repositories_module = importlib.import_module(
+            f"{_PLUGIN_DIR.name}.src.repositories"
+        )
+        repositories_module.configure(path.parent)
+        handler = _load_handler("add_dish")
+        start.wait()
+        for number in range(12):
+            result = parse(handler({
+                "name": f"public-agent-{number}",
+                "ingredients": {"water": True},
+                "instructions": f"Agent step {number}",
+            }))
+            if isinstance(result, dict) and "error" in result:
+                raise RuntimeError(result["error"])
+
+    processes = [ctx.Process(target=web_writer), ctx.Process(target=native_writer)]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(20)
+    names = {dish.name for dish in _repos_mod.dish_repo.load()}
+    check("public dish writer processes exit cleanly", all(p.exitcode == 0 for p in processes))
+    check(
+        "public Web/native writes preserve all recipes",
+        all(
+            f"public-{prefix}-{number}" in names
+            for prefix in ("web", "agent")
+            for number in range(12)
+        ),
+    )
+
+
 def test_edit_dish_bogus():
     print("\n-- edit_dish (nonexistent) --")
     result = parse(edit_dish({
@@ -1411,7 +1519,7 @@ def test_add_dishes_batch():
     print("\n-- add_dishes_batch --")
     result = parse(add_dishes_batch({
         "dishes": [
-            {"name": "Gazpacho", "ingredients": {"tomate": True, "pepino": True, "pimiento": False}},
+            {"name": "Gazpacho", "ingredients": {"tomate": True, "pepino": True, "pimiento": False}, "instructions": "Blend and chill."},
             {"name": "Sopa de ajo", "ingredients": ["ajo", "pan", "huevos"]},
             {"name": "Ensalada", "ingredients": {"lechuga": True}},  # already exists
         ],
@@ -1419,6 +1527,8 @@ def test_add_dishes_batch():
     check("returns dict with added/skipped", isinstance(result, dict) and "added" in result)
     check("added 2 dishes", len(result["added"]) == 2, f"got {result['added']}")
     check("skipped 1 duplicate", len(result["skipped"]) == 1, f"got {result['skipped']}")
+    gazpacho = next(dish for dish in _repos_mod.dish_repo.load() if dish.name == "gazpacho")
+    check("batch persists cooking instructions", gazpacho.instructions == "Blend and chill.")
 
 
 def test_dii_finalize_rollback():
@@ -2149,6 +2259,8 @@ def main():
         test_add_dish_duplicate()
         test_add_dish_invalid_inputs()
         test_edit_dish()
+        test_native_dish_instruction_tools()
+        test_dish_repository_lock_is_cross_process()
         test_edit_dish_bogus()
         test_delete_dish()
         test_delete_dish_bogus()

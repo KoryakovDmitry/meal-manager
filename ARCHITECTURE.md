@@ -126,9 +126,9 @@ Storage values are `fridge`, `freezer`, `pantry`, and `counter`. Quantity is per
 
 **File:** `data/fridge.json` (schema v4 envelope after migration)
 
-### 4. Extended Dish — Prep Dependencies
+### 4. Extended Dish — Prep Dependencies and Cooking Instructions
 
-Dishes can declare which prep-items they require:
+Dishes can declare which prep-items they require and optionally explain how to cook them:
 
 ```json
 {
@@ -139,11 +139,14 @@ Dishes can declare which prep-items they require:
     "картофель": true,
     "морковь": true
   },
-  "prep_depends": ["hybrid-meatballs"]
+  "prep_depends": ["hybrid-meatballs"],
+  "instructions": "Подготовить овощи.\nДобавить фрикадельки и варить до готовности."
 }
 ```
 
-`prep_depends` is optional. Dishes without it work exactly as before.
+Both `prep_depends` and `instructions` are optional. Instructions preserve internal line breaks, are capped at 20,000 characters, and are omitted when empty. They do not affect availability, shopping, or scoring. Agent and Web recipe mutations share the canonical `Dish` model and a cross-process repository lock; Web additionally uses a semantic whole-catalog version as an OCC precondition.
+
+Detailed contract: [`docs/issues/REC-1-cooking-instructions.md`](docs/issues/REC-1-cooking-instructions.md).
 
 ---
 

@@ -125,7 +125,7 @@ python3 -c "import sys, importlib, pathlib; sys.path.insert(0, str(pathlib.Path(
 
 ## Concurrency
 
-- Each file-backed store singleton owns its own `threading.Lock` instance attribute (`self.lock` on the dish, fridge, and tuning repos; `self._lock` on the history repo).
+- Dish and fridge repositories use the shared re-entrant `JsonFileLock`, which combines a thread `RLock` with an advisory `flock` on `<data-file>.lock` so native and Web writers serialize across processes. Other repositories keep their documented store-specific locks.
 - Hold the appropriate lock around load-modify-save sequences.
 - DII sessions also use per-session locks plus a global lock for session maps.
 - Do not bypass the locking helpers when changing persistence behavior.

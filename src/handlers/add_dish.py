@@ -42,6 +42,13 @@ SCHEMA = {
                 "plain list of ingredient names (all treated as essential)."
             ),
         },
+        "instructions": {
+            "type": ["string", "null"],
+            "description": (
+                "Optional cooking instructions (maximum 20,000 characters after "
+                "trimming). Blank or null means not provided."
+            ),
+        },
     },
     "required": ["name", "ingredients"],
 }
@@ -57,7 +64,7 @@ def HANDLER(args: dict, **kwargs):
         if any(d.name == name for d in dishes):
             raise ValueError(f"a dish called '{name}' already exists in the catalog.")
 
-        new_dish = Dish(name=name)
+        new_dish = Dish(name=name, instructions=args.get("instructions"))
         for ing, essential in ingredients.items():
             new_dish.add_ingredient(ing, essential)
         dishes.append(new_dish)

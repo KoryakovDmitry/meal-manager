@@ -34,6 +34,9 @@ _inventory_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_fridge"
 )
 _dish_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.dish")
+_dish_repository_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.repositories.json_dish"
+)
 _product_catalog_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.product_catalog"
 )
@@ -42,6 +45,8 @@ _plan_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_plan"
 )
 JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
+JsonDishRepository = _dish_repository_module.JsonDishRepository
+dish_catalog_version = _dish_repository_module.dish_catalog_version
 JsonPlanRepository = _plan_repository_module.JsonPlanRepository
 InventoryDataError = _inventory_repository_module.InventoryDataError
 InventoryConflictError = _inventory_repository_module.InventoryConflictError
@@ -56,6 +61,7 @@ FRIDGE_PATH = DATA_DIR / "fridge.json"
 HISTORY_PATH = DATA_DIR / "history.json"
 TUNING_PATH = DATA_DIR / "tuning.json"
 PLANS_DIR = DATA_DIR / "plans"
+_structured_dish_repo = JsonDishRepository(DISHES_PATH)
 _structured_fridge_repo = JsonFridgeRepository(FRIDGE_PATH)
 _structured_plan_repo = JsonPlanRepository(PLANS_DIR)
 
@@ -89,12 +95,17 @@ def _write_json(path: Path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
     tmp.replace(path)
 
+def _dish_repository():
+    _structured_dish_repo.path = Path(DISHES_PATH)
+    return _structured_dish_repo
+
+
 def load_dishes():
-    data = _read_json(DISHES_PATH, {"dishes": []})
-    return data.get("dishes", [])
+    return [dish.to_dict() for dish in _dish_repository().load()]
+
 
 def save_dishes(dishes):
-    _write_json(DISHES_PATH, {"dishes": dishes})
+    _dish_repository().save([Dish.from_dict(dish) for dish in dishes])
 
 def _fridge_repository():
     _structured_fridge_repo.path = Path(FRIDGE_PATH)
@@ -635,10 +646,14 @@ def _shopping_list(dishes, fridge):
 class DishCreate(BaseModel):
     name: str
     ingredients: dict[str, bool] = {}
+    instructions: str | None = None
+    expected_version: str
 
 class DishUpdate(BaseModel):
     name: str | None = None
     ingredients: dict[str, bool] | None = None
+    instructions: str | None = None
+    expected_version: str
 
 class FridgeUpdate(BaseModel):
     ingredients: list[str]
@@ -726,48 +741,96 @@ class CookedMeal(BaseModel):
     date: str | None = None  # ISO date, defaults to today
 
 # ─── API: Dishes ────────────────────────────────────────────────────────
+def _assert_dish_catalog_version(expected_version: str, dishes: list[Dish]) -> str:
+    current_version = dish_catalog_version(dishes)
+    if expected_version != current_version:
+        raise HTTPException(409, {
+            "code": "dish_catalog_conflict",
+            "message": "Recipes changed after this screen was loaded.",
+            "current_version": current_version,
+        })
+    return current_version
+
+
 @app.get("/api/dishes")
 def get_dishes():
-    return {"dishes": load_dishes()}
+    repo = _dish_repository()
+    with repo.lock:
+        dishes = repo.load()
+        return {
+            "dishes": [dish.to_dict() for dish in dishes],
+            "version": dish_catalog_version(dishes),
+        }
+
 
 @app.post("/api/dishes")
 def add_dish(payload: DishCreate):
-    with _lock:
-        dishes = load_dishes()
+    repo = _dish_repository()
+    with repo.lock:
+        dishes = repo.load()
+        _assert_dish_catalog_version(payload.expected_version, dishes)
         name = _normalize(payload.name)
-        if any(_normalize(d["name"]) == name for d in dishes):
+        if any(dish.name == name for dish in dishes):
             raise HTTPException(409, f"Dish '{name}' already exists")
-        ingredients = {_normalize(k): v for k, v in payload.ingredients.items()}
-        dishes.append({"name": name, "ingredients": ingredients})
-        save_dishes(dishes)
-    return {"status": "ok", "dish": {"name": name, "ingredients": ingredients}}
+        try:
+            dish = Dish.from_dict({
+                "name": name,
+                "ingredients": payload.ingredients,
+                "instructions": payload.instructions,
+            })
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        dishes.append(dish)
+        repo.save(dishes)
+        version = dish_catalog_version(dishes)
+    return {"status": "ok", "dish": dish.to_dict(), "version": version}
+
 
 @app.put("/api/dishes/{dish_name}")
 def update_dish(dish_name: str, payload: DishUpdate):
-    with _lock:
-        dishes = load_dishes()
+    repo = _dish_repository()
+    with repo.lock:
+        dishes = repo.load()
+        _assert_dish_catalog_version(payload.expected_version, dishes)
         target = _normalize(dish_name)
-        for i, d in enumerate(dishes):
-            if _normalize(d["name"]) == target:
-                if payload.name is not None:
-                    d["name"] = _normalize(payload.name)
-                if payload.ingredients is not None:
-                    d["ingredients"] = {_normalize(k): v for k, v in payload.ingredients.items()}
-                dishes[i] = d
-                save_dishes(dishes)
-                return {"status": "ok", "dish": d}
-    raise HTTPException(404, f"Dish '{dish_name}' not found")
+        patch = _model_patch(payload)
+        dish = next((item for item in dishes if item.name == target), None)
+        if dish is None:
+            raise HTTPException(404, f"Dish '{dish_name}' not found")
+        candidate_name = patch.get("name", dish.name)
+        if candidate_name != dish.name and any(
+            item is not dish and item.name == _normalize(candidate_name)
+            for item in dishes
+        ):
+            raise HTTPException(409, f"Dish '{candidate_name}' already exists")
+        try:
+            candidate = Dish.from_dict({
+                "name": candidate_name,
+                "ingredients": patch.get("ingredients", dish.ingredients),
+                "prep_depends": dish.prep_depends,
+                "instructions": patch.get("instructions", dish.instructions),
+            })
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        dishes[dishes.index(dish)] = candidate
+        repo.save(dishes)
+        version = dish_catalog_version(dishes)
+    return {"status": "ok", "dish": candidate.to_dict(), "version": version}
+
 
 @app.delete("/api/dishes/{dish_name}")
-def delete_dish(dish_name: str):
-    with _lock:
-        dishes = load_dishes()
+def delete_dish(dish_name: str, expected_version: str):
+    repo = _dish_repository()
+    with repo.lock:
+        dishes = repo.load()
+        _assert_dish_catalog_version(expected_version, dishes)
         target = _normalize(dish_name)
-        new_dishes = [d for d in dishes if _normalize(d["name"]) != target]
-        if len(new_dishes) == len(dishes):
+        remaining = [dish for dish in dishes if dish.name != target]
+        if len(remaining) == len(dishes):
             raise HTTPException(404, f"Dish '{dish_name}' not found")
-        save_dishes(new_dishes)
-    return {"status": "ok"}
+        repo.save(remaining)
+        version = dish_catalog_version(remaining)
+    return {"status": "ok", "version": version}
 
 # ─── API: Fridge ────────────────────────────────────────────────────────
 def _model_patch(payload: BaseModel) -> dict:

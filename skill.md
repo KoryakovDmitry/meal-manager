@@ -94,7 +94,7 @@ Returns the current fridge contents as a list of ingredients.
 
 ### `add_dish`
 
-Adds a new recipe to the dish catalog. Ingredients can be passed as a dict (name -> true/false) or as a simple list of names (all marked as essential).
+Adds a new recipe to the dish catalog. Ingredients can be passed as a dict (name -> true/false) or as a simple list of names (all marked as essential). Optional `instructions` stores the multiline “how to cook” text.
 
 - **When to use:**
   - The user wants to teach the system a new recipe.
@@ -103,7 +103,7 @@ Adds a new recipe to the dish catalog. Ingredients can be passed as a dict (name
 
 ### `add_dishes_batch`
 
-Adds multiple recipes to the catalog in a single call. Accepts a list of dishes, each with a name and ingredients (same formats as `add_dish`). Automatically skips dishes that already exist.
+Adds multiple recipes to the catalog in a single call. Accepts a list of dishes, each with a name, ingredients (same formats as `add_dish`), and optional cooking `instructions`. Automatically skips dishes that already exist.
 
 - **When to use:**
   - The user wants to add several dishes at once.
@@ -119,11 +119,27 @@ Removes a recipe from the dish catalog.
 
 ### `edit_dish`
 
-Completely replaces the ingredients of an existing dish. Does not merge with previous ingredients — it replaces them.
+Completely replaces the ingredients of an existing dish. Does not merge with previous ingredients. Optional `instructions` replaces the “how to cook” text; omit it to preserve the existing text, or pass `null`/blank to clear it.
 
 - **When to use:**
   - The user wants to change the ingredient list of a dish.
-  - The user says a recipe has changed or wants to correct the ingredients.
+  - The user wants to change ingredients and cooking instructions together.
+
+### `get_dish_recipe`
+
+Returns one complete recipe with ingredients, prep dependencies, and nullable cooking instructions.
+
+- **When to use:**
+  - The user asks how to cook a catalog dish.
+  - Before changing a recipe, when you need its authoritative current contents.
+
+### `set_dish_instructions`
+
+Sets, replaces, or clears only the cooking instructions. Pass `null` or blank text to clear them. The normalized limit is 20,000 characters after trimming.
+
+- **When to use:**
+  - The user adds or corrects the “how to cook” steps without changing ingredients.
+  - The user asks to remove cooking instructions from a recipe.
 
 ### `clear_fridge`
 

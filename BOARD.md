@@ -61,6 +61,14 @@
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
 
+### REC-1 — Cooking instructions in recipe cards ✅
+
+**Результат.** `Dish` получил optional multiline `instructions` («Как готовить») с canonical trim/clear и лимитом 20 000 Unicode code points. Агент умеет добавлять инструкции вместе с рецептом, читать их через `get_dish_recipe`, менять/очищать через `set_dish_instructions` и удалять рецепт целиком существующим `delete_dish`. Web показывает отдельный блок в карточке, ищет по инструкциям и редактирует их в accessible textarea.
+
+**Надёжность.** Native и Web writers используют общий re-entrant cross-process file lock; Web create/update/delete защищены semantic catalog-version OCC. Stale create/update/delete не меняют файл. Legacy и unrelated malformed rows сохраняются; пользовательский текст XSS-safe. Gate: 260 unit, 322 integration, Web API и реальный Chromium; три fail-closed review cycles завершились `GO`.
+
+Подробный ticket: [`docs/issues/REC-1-cooking-instructions.md`](docs/issues/REC-1-cooking-instructions.md).
+
 ### INV-3 — Web ↔ agent state synchronization and conflict detection ✅
 
 **Результат.** Exact-topic `pre_llm_call` передаёт authoritative inventory token/count metadata без свободного текста, а `sync_meal_manager_state` выполняет обязательное актуальное чтение для inventory-dependent запросов. Web PATCH/DELETE защищены монотонным `updated_at`, under-lock precondition и понятным HTTP `409` без silent overwrite. Полный gate, два независимых ревью, post-restart Gateway/Web/native QA и exact/off-target проверки пройдены; release `76f8e33` опубликован.

@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 
 
+MAX_INSTRUCTIONS_LENGTH = 20_000
+
+
 @dataclass
 class Dish:
     """Recipe model.
@@ -14,9 +17,19 @@ class Dish:
     name: str
     ingredients: dict = field(default_factory=dict)
     prep_depends: list = field(default_factory=list)  # prep item names this dish needs
+    instructions: str | None = None
 
     def __post_init__(self):
         self.name = self.normalize_name(self.name)
+        if self.instructions is not None:
+            if not isinstance(self.instructions, str):
+                raise ValueError("instructions must be a string or null")
+            instructions = self.instructions.strip()
+            if len(instructions) > MAX_INSTRUCTIONS_LENGTH:
+                raise ValueError(
+                    f"instructions cannot exceed {MAX_INSTRUCTIONS_LENGTH} characters"
+                )
+            self.instructions = instructions or None
         # Enforce the same normalization invariant on ingredient keys for every
         # construction path (direct, dataclasses.replace, …), so consumers can
         # compare against the always-lowercased fridge without re-normalizing.
@@ -61,6 +74,8 @@ class Dish:
         }
         if self.prep_depends:
             result["prep_depends"] = list(self.prep_depends)
+        if self.instructions is not None:
+            result["instructions"] = self.instructions
         return result
 
     @classmethod
@@ -80,9 +95,15 @@ class Dish:
         if not isinstance(raw_prep_depends, list):
             raw_prep_depends = []
 
-        dish = cls(name=name, prep_depends=[
-            cls.normalize_name(pd) for pd in raw_prep_depends if isinstance(pd, str)
-        ])
+        dish = cls(
+            name=name,
+            prep_depends=[
+                cls.normalize_name(pd)
+                for pd in raw_prep_depends
+                if isinstance(pd, str)
+            ],
+            instructions=data.get("instructions"),
+        )
         for ingredient_name, is_essential in raw_ingredients.items():
             dish.add_ingredient(ingredient_name, is_essential)
         return dish

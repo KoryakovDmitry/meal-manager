@@ -1,5 +1,6 @@
 """Tool: edit_dish — replace a dish's ingredient list."""
 
+from ..dish import Dish
 from ..repositories import dish_repo
 from ._common import (
     normalize_dish_name,
@@ -42,6 +43,14 @@ SCHEMA = {
                 "treated as essential)."
             ),
         },
+        "instructions": {
+            "type": ["string", "null"],
+            "description": (
+                "Optional replacement cooking instructions (maximum 20,000 characters "
+                "after trimming). Null or blank clears them; omit to preserve the "
+                "current text."
+            ),
+        },
     },
     "required": ["dish_name", "ingredients"],
 }
@@ -59,7 +68,18 @@ def HANDLER(args: dict, **kwargs):
         if dish is None:
             raise LookupError(f"'{raw_name}' not found in the catalog.")
 
-        dish.ingredients = ingredients
+        candidate = Dish(
+            name=dish.name,
+            ingredients=ingredients,
+            prep_depends=dish.prep_depends,
+            instructions=(
+                args["instructions"]
+                if "instructions" in args
+                else dish.instructions
+            ),
+        )
+        dish.ingredients = candidate.ingredients
+        dish.instructions = candidate.instructions
         dish_repo.save(dishes)
 
     essential_count = sum(1 for v in dish.ingredients.values() if v)

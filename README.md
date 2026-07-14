@@ -163,7 +163,9 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `add_dish` | Adds a new recipe to the catalog |
 | `add_dishes_batch` | Adds multiple recipes in a single call |
 | `delete_dish` | Removes a recipe from the catalog |
-| `edit_dish` | Replaces the ingredients of an existing dish |
+| `edit_dish` | Replaces ingredients and optionally updates cooking instructions |
+| `get_dish_recipe` | Reads one complete recipe, including “how to cook” instructions |
+| `set_dish_instructions` | Sets, replaces, or clears cooking instructions |
 | `clear_fridge` | Empties the fridge completely |
 | `init_ingredient_session` | Start a DII session with ranked ingredient suggestions |
 | `dii_add_suggested` | Accept the current ingredient suggestion and reveal the next |
@@ -250,7 +252,9 @@ meal-manager/
 │   │   ├── add_dish.py                     # Add a new recipe to the catalog
 │   │   ├── add_dishes_batch.py             # Add multiple recipes in a single call
 │   │   ├── delete_dish.py                  # Remove a recipe from the catalog
-│   │   ├── edit_dish.py                    # Replace the ingredient list of an existing recipe
+│   │   ├── edit_dish.py                    # Replace ingredients/instructions
+│   │   ├── get_dish_recipe.py              # Read one complete recipe
+│   │   ├── set_dish_instructions.py        # Set or clear cooking instructions
 │   │   ├── clear_fridge.py                 # Empty the fridge inventory
 │   │   ├── init_ingredient_session.py      # Start a DII session with ranked suggestions
 │   │   ├── dii_add_suggested.py            # Accept the current DII suggestion and reveal the next

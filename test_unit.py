@@ -657,6 +657,74 @@ def test_dish_prep_depends_backward_compat():
     check("legacy dish to_dict has no prep_depends key", "prep_depends" not in d.to_dict())
 
 
+def test_dish_cooking_instructions():
+    dish = Dish.from_dict({
+        "name": "Soup",
+        "ingredients": {"water": True},
+        "instructions": "  Bring to a boil.\nSimmer for 10 minutes.  ",
+    })
+    check(
+        "instructions preserve case and line breaks",
+        dish.instructions == "Bring to a boil.\nSimmer for 10 minutes.",
+    )
+    check("instructions serialize", dish.to_dict()["instructions"] == dish.instructions)
+
+    legacy = Dish.from_dict({"name": "legacy", "ingredients": {}})
+    check("legacy dish instructions default to none", legacy.instructions is None)
+    check("empty instructions stay absent", "instructions" not in legacy.to_dict())
+
+    cleared = Dish(name="clear", instructions="   ")
+    check("blank instructions clear the field", cleared.instructions is None)
+    boundary = Dish(name="boundary", instructions="  " + "x" * 20_000 + "  ")
+    check("instruction limit applies after trim", len(boundary.instructions) == 20_000)
+    whitespace = Dish(name="whitespace", instructions=" " * 20_001)
+    check("oversized whitespace-only instructions clear", whitespace.instructions is None)
+
+    for invalid in (123, "x" * 20001):
+        try:
+            Dish(name="invalid", instructions=invalid)
+            check("rejects invalid instructions", False)
+        except ValueError:
+            check("rejects invalid instructions", True)
+
+
+def test_json_file_lock_cleans_up_after_unlock_failure():
+    import fcntl
+    import tempfile
+
+    lock_module = importlib.import_module(
+        ".src.repositories.file_lock", _PLUGIN_DIR.name
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        lock = lock_module.JsonFileLock(lambda: Path(tmp) / "state.json")
+        real_flock = lock_module.fcntl.flock
+        captured_handle = None
+
+        def fail_unlock(fd, operation):
+            if operation == fcntl.LOCK_UN:
+                raise OSError("simulated unlock failure")
+            return real_flock(fd, operation)
+
+        lock_module.fcntl.flock = fail_unlock
+        try:
+            try:
+                with lock:
+                    captured_handle = lock._local.handle
+                check("unlock failure is surfaced", False)
+            except OSError as exc:
+                check("unlock failure is surfaced", "simulated" in str(exc))
+        finally:
+            lock_module.fcntl.flock = real_flock
+
+        check(
+            "unlock failure closes descriptor",
+            captured_handle is not None and captured_handle.closed,
+        )
+        check("unlock failure clears active path", lock.active_path is None)
+        with lock:
+            check("lock can be acquired again after unlock failure", True)
+
+
 # ── Weekly plan model tests ──
 
 _plan_mod = importlib.import_module(".src.plan", _PLUGIN_DIR.name)
@@ -1370,6 +1438,8 @@ def main():
     test_dish_prep_depends_serialized()
     test_dish_prep_depends_from_dict()
     test_dish_prep_depends_backward_compat()
+    test_dish_cooking_instructions()
+    test_json_file_lock_cleans_up_after_unlock_failure()
 
     # ── Weekly plan model ──
     print("\n-- Weekly plan model --")

@@ -25,6 +25,8 @@ provides_tools:
   - add_dishes_batch
   - delete_dish
   - edit_dish
+  - get_dish_recipe
+  - set_dish_instructions
   - clear_fridge
   - init_ingredient_session
   - dii_add_suggested

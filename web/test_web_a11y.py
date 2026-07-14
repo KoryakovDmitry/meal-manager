@@ -113,10 +113,11 @@ setTimeout(async () => {
 
   const attack = `<img src=x onerror="console.error('QA_XSS_EXECUTED')">`;
   CACHE.dishes = [
-    {name: 'суп', ingredients: {'лук': true, 'укроп': false}},
+    {name: 'суп', ingredients: {'лук': true, 'укроп': false}, instructions: attack + '\nВарить 10 минут.'},
     {name: 'лук', ingredients: {'лук': true}},
     {name: attack, ingredients: {[attack]: true}}
   ];
+  CACHE.dishesVersion = 'sha256:dish-v1';
   CACHE.fridge = ['лук', attack];
   CACHE.stats = {
     total_dishes: 2, total_fridge_items: 2, cookable_now: 1, recently_cooked: 0,
@@ -140,6 +141,10 @@ setTimeout(async () => {
     comment:null, expiry_status:'unknown', recipe_count:1, in_recipes:true}];
   renderStats();
   renderDishes();
+  const dishInstructionsCard = document.querySelector('.dish-instructions');
+  const dishInstructionsVisible = dishInstructionsCard?.textContent.includes('Как готовить') &&
+    dishInstructionsCard.textContent.includes('Варить 10 минут.') &&
+    dishInstructionsCard.querySelectorAll('img').length === 0;
   renderFridge();
   renderSuggestions();
   renderShopping();
@@ -417,6 +422,9 @@ setTimeout(async () => {
   const modalSemantics = dialog?.getAttribute('aria-modal') === 'true' &&
     dialog?.getAttribute('aria-labelledby') === 'dish-modal-title' && app.hasAttribute('inert');
   const first = document.getElementById('modal-dish-name');
+  const instructionsInput = document.getElementById('modal-dish-instructions');
+  const dishInstructionsPrefilled = instructionsInput?.value === attack + '\nВарить 10 минут.' &&
+    !instructionsInput.hasAttribute('maxlength');
   const lastModal = dialog.querySelector('[data-modal-action="cancel"]');
   first.focus();
   const modalReverse = new KeyboardEvent('keydown', {key: 'Tab', shiftKey: true, bubbles: true, cancelable: true});
@@ -438,12 +446,23 @@ setTimeout(async () => {
   document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
   const escapeRestore = document.activeElement === opener;
 
-  api = async () => ({});
+  let dishCall = null;
+  api = async (path, method, body) => {
+    dishCall = {path, method, body};
+    return {};
+  };
   refreshAll = async () => {};
   opener.focus();
   opener.click();
+  const saveInstructionsInput = document.getElementById('modal-dish-instructions');
+  const emojiInstructions = '😀'.repeat(10001);
+  if (saveInstructionsInput) saveInstructionsInput.value = emojiInstructions;
   document.querySelector('[data-modal-action="save"]').click();
   await new Promise(resolve => setTimeout(resolve, 50));
+  const dishInstructionsSaved = dishCall?.method === 'PUT' &&
+    dishCall.body.instructions === emojiInstructions &&
+    [...dishCall.body.instructions].length === 10001 &&
+    dishCall.body.expected_version === 'sha256:dish-v1';
   const saveRestore = document.activeElement === document.getElementById('dish-search');
 
   opener.focus();
@@ -480,6 +499,7 @@ setTimeout(async () => {
     planDeleteVersioned, planDeleted, planDetailCleared, planListFocus, externallyDeletedPlanCleared,
     productModalSemantics, replenishFreshBatch, replenishCategoryPrefill, productFocusRestore,
     categoryModalSemantics, categoryVersioned, categoryFocusRestore, categoryBadge, categoryFilter,
+    dishInstructionsVisible, dishInstructionsPrefilled, dishInstructionsSaved,
     window.__qaErrors.length
   ].join(';'));
 }, 500);
@@ -555,7 +575,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            + ";".join(["true"] * 40) + ";0"
+            + ";".join(["true"] * 43) + ";0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"
