@@ -5,30 +5,43 @@ Reads/writes the same JSON files used by the Hermes meal_manager plugin,
 ensuring full synchronization between the Telegram bot, agent, and web UI.
 """
 
+import importlib
 import json
+import logging
 import re
+import sys
 import threading
+from functools import wraps
 from datetime import date, datetime, timedelta
 from math import isfinite
 from pathlib import Path
 from collections import Counter
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 # ─── Configuration ──────────────────────────────────────────────────────
 # Resolve data dir: allow override via MEAL_DATA_DIR env var,
 # otherwise default to the plugin's data/ directory.
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN_ROOT.parent))
+_inventory_repository_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.repositories.json_fridge"
+)
+JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
+InventoryDataError = _inventory_repository_module.InventoryDataError
+logger = logging.getLogger(__name__)
 DATA_DIR = Path(__import__("os").environ.get("MEAL_DATA_DIR", PLUGIN_ROOT / "data"))
 DISHES_PATH = DATA_DIR / "dishes.json"
 FRIDGE_PATH = DATA_DIR / "fridge.json"
 HISTORY_PATH = DATA_DIR / "history.json"
 TUNING_PATH = DATA_DIR / "tuning.json"
 PLANS_DIR = DATA_DIR / "plans"
+_structured_fridge_repo = JsonFridgeRepository(FRIDGE_PATH)
 
 _WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
 _PLAN_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
@@ -67,11 +80,16 @@ def load_dishes():
 def save_dishes(dishes):
     _write_json(DISHES_PATH, {"dishes": dishes})
 
+def _fridge_repository():
+    _structured_fridge_repo.path = Path(FRIDGE_PATH)
+    return _structured_fridge_repo
+
+
 def load_fridge():
-    return _read_json(FRIDGE_PATH, [])
+    return _fridge_repository().load()
 
 def save_fridge(items):
-    _write_json(FRIDGE_PATH, items)
+    _fridge_repository().save(items)
 
 def load_history():
     data = _read_json(HISTORY_PATH, {"history": []})
@@ -539,6 +557,30 @@ class FridgeRename(BaseModel):
     old_ingredient: str
     new_ingredient: str
 
+class InventoryItemCreate(BaseModel):
+    name: str = Field(max_length=200)
+    quantity: Any = None
+    unit: str | None = None
+    package_count: StrictInt | None = None
+    storage: str | None = None
+    expires_on: str | None = None
+    comment: str | None = None
+
+    class Config:
+        extra = "forbid"
+
+class InventoryItemPatch(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    quantity: Any = None
+    unit: str | None = None
+    package_count: StrictInt | None = None
+    storage: str | None = None
+    expires_on: str | None = None
+    comment: str | None = None
+
+    class Config:
+        extra = "forbid"
+
 class CookedMeal(BaseModel):
     dish: str
     date: str | None = None  # ISO date, defaults to today
@@ -588,38 +630,122 @@ def delete_dish(dish_name: str):
     return {"status": "ok"}
 
 # ─── API: Fridge ────────────────────────────────────────────────────────
+def _model_patch(payload: BaseModel) -> dict:
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(exclude_unset=True)
+    return payload.dict(exclude_unset=True)
+
+
+def _inventory_error(exc: Exception):
+    if isinstance(exc, (InventoryDataError, OSError)):
+        logger.error("Inventory storage failure", exc_info=exc)
+        raise HTTPException(503, "Inventory storage is temporarily unavailable") from exc
+    message = str(exc)
+    if isinstance(exc, LookupError):
+        raise HTTPException(404, message) from exc
+    if "already exists" in message:
+        raise HTTPException(409, message) from exc
+    raise HTTPException(400, message) from exc
+
+
+def _inventory_api_errors(fn):
+    """Map persistence failures uniformly for legacy and derived routes."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (InventoryDataError, OSError) as exc:
+            _inventory_error(exc)
+        except (TypeError, ValueError) as exc:
+            _inventory_error(exc)
+    return wrapped
+
+
+def _legacy_inventory_name(value: str) -> str:
+    name = _normalize(value)
+    if not name:
+        raise ValueError("Ingredient name must not be blank")
+    if len(name) > 200:
+        raise ValueError("Ingredient name must be at most 200 characters")
+    return name
+
+
+@app.get("/api/inventory/items")
+def list_inventory_items():
+    try:
+        return {"items": [item.to_public_dict() for item in _fridge_repository().load_items()]}
+    except (TypeError, ValueError, OSError) as exc:
+        _inventory_error(exc)
+
+
+@app.post("/api/inventory/items")
+def add_inventory_item(payload: InventoryItemCreate):
+    fields = _model_patch(payload)
+    name = fields.pop("name")
+    try:
+        item = _fridge_repository().add_item(name=name, **fields)
+        return {"item": item.to_public_dict()}
+    except (TypeError, ValueError, OSError) as exc:
+        _inventory_error(exc)
+
+
+@app.patch("/api/inventory/items/{item_id}")
+def edit_inventory_item(item_id: str, payload: InventoryItemPatch):
+    try:
+        item = _fridge_repository().edit_item(item_id, _model_patch(payload))
+        return {"item": item.to_public_dict()}
+    except (TypeError, ValueError, LookupError, OSError) as exc:
+        _inventory_error(exc)
+
+
+@app.delete("/api/inventory/items/{item_id}")
+def remove_inventory_item(item_id: str):
+    try:
+        item = _fridge_repository().remove_item(item_id)
+        return {"item": item.to_public_dict()}
+    except (TypeError, ValueError, LookupError, OSError) as exc:
+        _inventory_error(exc)
+
+
 @app.get("/api/fridge")
+@_inventory_api_errors
 def get_fridge():
     return {"ingredients": load_fridge()}
 
 @app.put("/api/fridge")
+@_inventory_api_errors
 def set_fridge(payload: FridgeUpdate):
     with _lock:
-        items = sorted(set(_normalize(i) for i in payload.ingredients))
+        items = sorted(set(_legacy_inventory_name(i) for i in payload.ingredients))
         save_fridge(items)
     return {"ingredients": items}
 
 @app.post("/api/fridge/add")
+@_inventory_api_errors
 def add_to_fridge(payload: FridgeAddRemove):
     with _lock:
-        fridge = load_fridge()
-        ing = _normalize(payload.ingredient)
-        if ing not in fridge:
-            fridge.append(ing)
-            fridge.sort()
-            save_fridge(fridge)
+        repo = _fridge_repository()
+        ing = _legacy_inventory_name(payload.ingredient)
+        with repo.lock:
+            fridge = repo.load()
+            if ing not in fridge:
+                fridge.append(ing)
+                fridge.sort()
+                repo.save(fridge)
     return {"ingredients": fridge}
 
 @app.post("/api/fridge/remove")
+@_inventory_api_errors
 def remove_from_fridge(payload: FridgeAddRemove):
     with _lock:
-        fridge = load_fridge()
-        ing = _normalize(payload.ingredient)
-        fridge = [i for i in fridge if i != ing]
-        save_fridge(fridge)
+        repo = _fridge_repository()
+        ing = _legacy_inventory_name(payload.ingredient)
+        repo.remove_items([ing])
+        fridge = repo.load()
     return {"ingredients": fridge}
 
 @app.put("/api/fridge/item")
+@_inventory_api_errors
 def rename_fridge_item(payload: FridgeRename):
     old_name = _normalize(payload.old_ingredient)
     new_name = _normalize(payload.new_ingredient)
@@ -629,26 +755,24 @@ def rename_fridge_item(payload: FridgeRename):
         raise HTTPException(400, "Ingredient names must be at most 200 characters")
 
     with _lock:
+        try:
+            item = _fridge_repository().rename_by_name(old_name, new_name)
+        except (InventoryDataError, OSError):
+            raise
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         fridge = load_fridge()
-        if old_name not in fridge:
-            raise HTTPException(404, f"Ingredient '{old_name}' not found")
-        if old_name == new_name:
-            return {
-                "ingredients": fridge,
-                "renamed": {"old_ingredient": old_name, "new_ingredient": new_name},
-                "changed": False,
-            }
-        if new_name in fridge:
-            raise HTTPException(409, f"Ingredient '{new_name}' already exists")
-        fridge = [new_name if item == old_name else item for item in fridge]
-        save_fridge(fridge)
     return {
         "ingredients": fridge,
+        "item": item.to_public_dict(),
         "renamed": {"old_ingredient": old_name, "new_ingredient": new_name},
-        "changed": True,
+        "changed": old_name != new_name,
     }
 
 @app.delete("/api/fridge")
+@_inventory_api_errors
 def clear_fridge():
     with _lock:
         save_fridge([])
@@ -656,6 +780,7 @@ def clear_fridge():
 
 # ─── API: Suggestions & Shopping ────────────────────────────────────────
 @app.get("/api/suggestions")
+@_inventory_api_errors
 def get_suggestions():
     dishes = load_dishes()
     fridge = load_fridge()
@@ -680,6 +805,7 @@ def get_suggestions():
     return {"suggestions": suggestions}
 
 @app.get("/api/shopping")
+@_inventory_api_errors
 def get_shopping():
     dishes = load_dishes()
     fridge = load_fridge()
@@ -691,6 +817,7 @@ def get_history():
     return {"history": load_history()}
 
 @app.post("/api/history")
+@_inventory_api_errors
 def add_history(payload: CookedMeal):
     with _lock:
         history = load_history()
@@ -698,18 +825,24 @@ def add_history(payload: CookedMeal):
             "dish": _normalize(payload.dish),
             "date": payload.date or datetime.now().isoformat(),
         }
-        history.append(entry)
-        save_history(history)
-        # Remove essential ingredients from fridge (same as register_cooked_meal)
         dishes = load_dishes()
         dish = next((d for d in dishes if _normalize(d["name"]) == entry["dish"]), None)
-        if dish:
-            fridge = load_fridge()
-            essentials_to_remove = {
-                ing for ing, ess in dish.get("ingredients", {}).items() if ess
-            }
-            fridge = [i for i in fridge if i not in essentials_to_remove]
-            save_fridge(fridge)
+        repo = _fridge_repository()
+        inventory_before = None
+        with repo.lock:
+            if dish:
+                inventory_before = repo.load_items()
+                essentials_to_remove = {
+                    ing for ing, ess in dish.get("ingredients", {}).items() if ess
+                }
+                repo.remove_items(list(essentials_to_remove))
+            try:
+                history.append(entry)
+                save_history(history)
+            except Exception:
+                if inventory_before is not None:
+                    repo.save_items(inventory_before)
+                raise
     return {"status": "ok", "entry": entry}
 
 @app.delete("/api/history/{entry_index}")
@@ -733,6 +866,7 @@ def get_week_plan_view(week_id: str):
 
 # ─── API: Stats ─────────────────────────────────────────────────────────
 @app.get("/api/stats")
+@_inventory_api_errors
 def get_stats():
     dishes = load_dishes()
     fridge = load_fridge()

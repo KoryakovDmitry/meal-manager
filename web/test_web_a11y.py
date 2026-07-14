@@ -167,6 +167,45 @@ setTimeout(async () => {
   await pendingRename;
   const fridgeSaveRestore = document.activeElement ===
     document.querySelector('#fridge-container [data-action="edit"][data-value="лук новый"]');
+  const expiredRecord = {
+    id: 'inv_expired', name: 'молоко', quantity: '1', unit: 'l',
+    package_count: null, storage: 'fridge', expires_on: '2026-07-13',
+    comment: null, expiry_status: 'expired'
+  };
+  const expiringSoon = {id:'inv_soon', name:'йогурт', quantity:null, unit:null, package_count:null,
+    storage:'fridge', expires_on:'2026-07-16', comment:null, expiry_status:'expiring_soon'};
+  CACHE.inventory = [expiredRecord, expiringSoon];
+  CACHE.fridge = CACHE.inventory.map(item => item.name);
+  renderFridge();
+  const expiryText = document.getElementById('fridge-container').textContent;
+  const expiryAccessible = expiryText.includes('Просрочено') && expiryText.includes('Скоро истекает срок');
+  CACHE.inventory = [expiredRecord];
+  const salt = {id:'inv_salt', name:'соль', quantity:null, unit:null, package_count:null,
+    storage:'pantry', expires_on:null, comment:'старый', expiry_status:'unknown'};
+  CACHE.inventory.push(salt);
+  CACHE.fridge = CACHE.inventory.map(item => item.name);
+  renderFridge();
+  let confirmationText = '';
+  let inventoryCall = null;
+  confirm = text => { confirmationText = text; return true; };
+  api = async (path, method, body) => {
+    inventoryCall = {path, method, body};
+    if (method === 'DELETE') {
+      CACHE.inventory = CACHE.inventory.filter(item => item.id !== 'inv_expired');
+      CACHE.fridge = CACHE.inventory.map(item => item.name);
+      return {item: {id:'inv_expired'}};
+    }
+    return {item: {...salt, ...body}};
+  };
+  refreshAll = async () => renderFridge();
+  await removeFridgeItem('молоко');
+  const deleteAccessible = confirmationText.includes('молоко') && document.activeElement ===
+    document.querySelector('#fridge-container [data-action="edit"][data-value="соль"]');
+  startFridgeItemEdit('соль');
+  document.getElementById('fridge-edit-comment').value = 'новый';
+  await saveFridgeItemEdit();
+  const dirtyPatchOnly = inventoryCall.method === 'PATCH' &&
+    JSON.stringify(Object.keys(inventoryCall.body)) === JSON.stringify(['comment']);
 
   const dishesPage = document.getElementById('page-dishes');
   document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
@@ -254,7 +293,8 @@ setTimeout(async () => {
     xssSafe, planNative, modalSemantics, modalReverseOk, modalForwardOk,
     cancelRestore, backdropRestore, escapeRestore, saveRestore, stateOpacityOk,
     fridgeEditFocus, fridgeCancelRestore,
-    inFlightEditLocked, fridgeSaveRestore,
+    inFlightEditLocked, fridgeSaveRestore, expiryAccessible,
+    deleteAccessible, dirtyPatchOnly,
     window.__qaErrors.length
   ].join(';'));
 }, 500);
@@ -330,7 +370,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
+            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"

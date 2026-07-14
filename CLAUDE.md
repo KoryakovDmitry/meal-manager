@@ -6,7 +6,7 @@ Read `AGENTS.md` before starting — it contains additional repository-specific 
 
 ## Project Overview
 
-A meal planning and fridge inventory manager structured as a Hermes plugin. The entry point is `__init__.py:register(ctx)`, which auto-discovers the 35 tool handlers under `src/handlers/` and installs the skill. All state is persisted in JSON files under `data/`.
+A meal planning and fridge inventory manager structured as a Hermes plugin. The entry point is `__init__.py:register(ctx)`, which auto-discovers the 39 tool handlers under `src/handlers/` and installs the skill. All state is persisted in JSON files under `data/`.
 
 Python 3.12+, no external dependencies (stdlib only).
 
@@ -60,7 +60,7 @@ The data directory is injectable via `src.repositories.configure(data_dir)` — 
 
 - **`base.py`** — `DishRepository`, `FridgeRepository`, `HistoryRepository`, `TuningRepository` Protocols.
 - **`json_dish.py`** — `JsonDishRepository` (`<data_dir>/dishes.json`, wraps the `{"dishes": [...]}` envelope). Owns its own `lock` for load-modify-save sequences. `restore(dish)` is the delta-rollback for delete.
-- **`json_fridge.py`** — `JsonFridgeRepository` (`<data_dir>/fridge.json`, flat list, dedup + lowercase on load). `remove_items(items)` is the delta-rollback for finalize.
+- **`json_fridge.py`** — `JsonFridgeRepository` (`<data_dir>/fridge.json`, versioned `schema_version: 2` structured inventory with a backward-compatible name projection and atomic legacy-list migration). Its re-entrant advisory file lock protects agent/Web read-modify-write sequences across processes; `remove_items(items)` is the delta-rollback for finalize.
 - **`json_history.py`** — `JsonHistoryRepository` (`<data_dir>/history.json`, dish name → ISO date). Encapsulates its own lock; `set_entry` returns the previous value for compare-and-swap rollback via `revert_entry`.
 - **`json_tuning.py`** — `JsonTuningRepository` (`<data_dir>/tuning.json`, the online-learner state). Owns its own `lock` for the cook handler's load-modify-save sequence. `load()` never raises: a missing/corrupt/schema-invalid file yields a fresh `tuning.initialize_state()`.
 
@@ -76,7 +76,7 @@ The data directory is injectable via `src.repositories.configure(data_dir)` — 
 ### Data files (`data/`)
 
 - `dishes.json` — Recipe catalog. Wraps dishes in `{"dishes": [...]}`; each dish has `name` and `ingredients` (name → bool).
-- `fridge.json` — Fridge inventory (flat array of ingredient strings).
+- `fridge.json` — Versioned structured kitchen inventory (`{"schema_version": 2, "items": [...]}`); legacy flat string arrays are read compatibly and migrate on first mutation.
 - `history.json` — Cooking history (dish name → ISO date string).
 - `tuning.json` — (created lazily on the first learning event) Online-learner state for the suggestion blend: candidate grid, discounted reward/count sums (`S`/`C`), `observations`, and the `deployed_match_weight` / `deployed_time_weight`. Missing/corrupt files fall back to a fresh initialized state.
 - `sessions/` — (created lazily) Per-session DII JSON backups for crash recovery. Files are named `{session_id}.json` and auto-cleaned after 30 minutes.

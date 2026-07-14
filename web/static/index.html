@@ -209,13 +209,23 @@ body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
 
 /* ─── Fridge ─── */
 .fridge-grid {
-  display: flex; flex-wrap: wrap; gap: 8px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 10px;
 }
 .fridge-item {
-  background: var(--bg-input); border-radius: 8px; padding: 8px 14px;
-  display: flex; align-items: center; gap: 8px; border: 1px solid var(--border);
-  font-size: 0.9rem;
+  background: var(--bg-input); border-radius: 8px; padding: 10px 12px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border: 1px solid var(--border);
+  font-size: 0.9rem; min-width: 0;
 }
+.inventory-name { font-weight: 650; flex: 1 1 140px; overflow-wrap: anywhere; }
+.inventory-meta { flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: 5px; color: var(--text-dim); font-size: 0.76rem; }
+.inventory-meta span { background: var(--bg-card); border-radius: 10px; padding: 2px 7px; }
+.inventory-expired { border-color: var(--accent); }
+.inventory-expiring_soon { border-color: var(--orange); }
+.inventory-edit-grid { flex: 1 0 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.inventory-edit-grid .wide { grid-column: 1 / -1; }
+.inventory-edit-grid input, .inventory-edit-grid select { min-width: 0; width: 100%; }
+.inventory-add-form { align-items: end; }
+.inventory-add-form input, .inventory-add-form select { flex: 1 1 130px; min-width: 110px; }
 .fridge-item .uses {
   font-size: 0.7rem; color: var(--text-dim); background: var(--bg-card);
   padding: 1px 6px; border-radius: 10px;
@@ -487,9 +497,21 @@ textarea { resize: vertical; min-height: 60px; }
   <div class="page" id="page-fridge">
     <div class="card">
       <div class="section-title">🥶 Что в холодильнике</div>
-      <div class="form-row">
-        <label class="sr-only" for="fridge-add-input">Добавить продукт в холодильник</label>
-        <input type="text" id="fridge-add-input" placeholder="Добавить продукт..." onkeydown="if(event.key==='Enter')addFridgeItem()">
+      <div class="form-row inventory-add-form">
+        <label class="sr-only" for="fridge-add-input">Название продукта</label>
+        <input type="text" id="fridge-add-input" placeholder="Продукт..." maxlength="200" onkeydown="if(event.key==='Enter')addFridgeItem()">
+        <label class="sr-only" for="fridge-add-quantity">Количество</label>
+        <input type="number" id="fridge-add-quantity" placeholder="Количество" min="0" step="any">
+        <label class="sr-only" for="fridge-add-unit">Единица</label>
+        <select id="fridge-add-unit" aria-label="Единица измерения"><option value="">Единица</option><option>g</option><option>kg</option><option>ml</option><option>l</option><option>pcs</option><option>pack</option><option>can</option><option>jar</option><option>bottle</option><option>portion</option></select>
+        <label class="sr-only" for="fridge-add-packages">Упаковок</label>
+        <input type="number" id="fridge-add-packages" placeholder="Упаковок" min="1" step="1">
+        <label class="sr-only" for="fridge-add-storage">Место хранения</label>
+        <select id="fridge-add-storage" aria-label="Место хранения"><option value="">Где хранится</option><option value="fridge">Холодильник</option><option value="freezer">Морозилка</option><option value="pantry">Шкаф / кладовая</option><option value="counter">Столешница</option></select>
+        <label class="sr-only" for="fridge-add-expiry">Годен до</label>
+        <input type="date" id="fridge-add-expiry" aria-label="Годен до">
+        <label class="sr-only" for="fridge-add-comment">Комментарий</label>
+        <input type="text" id="fridge-add-comment" placeholder="Комментарий" maxlength="1000">
         <button class="btn btn-primary" onclick="addFridgeItem()">+ Добавить</button>
       </div>
       <div id="fridge-container" class="fridge-grid"></div>
@@ -547,7 +569,7 @@ textarea { resize: vertical; min-height: 60px; }
 
 <script>
 const API = '';
-let CACHE = { dishes: [], fridge: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, stats: {} };
+let CACHE = { dishes: [], fridge: [], inventory: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, stats: {} };
 let editingFridgeItem = null;
 let fridgeEditSaving = false;
 
@@ -720,22 +742,30 @@ document.addEventListener('keydown', event => {
 
 // ─── Load all data ───
 async function refreshAll() {
-  try {
-    const [dishes, fridge, suggestions, shopping, history, plans, stats] = await Promise.all([
-      api('/api/dishes'), api('/api/fridge'), api('/api/suggestions'),
-      api('/api/shopping'), api('/api/history'), api('/api/plans'), api('/api/stats')
-    ]);
-    CACHE.dishes = dishes.dishes || [];
-    CACHE.fridge = fridge.ingredients || [];
-    CACHE.suggestions = suggestions.suggestions || [];
-    CACHE.shopping = shopping.items || [];
-    CACHE.history = history.history || [];
-    CACHE.plans = plans.plans || [];
-    CACHE.stats = stats;
-    renderAll();
-  } catch (e) {
-    toast('Ошибка: ' + e.message, true);
-  }
+  const requests = [
+    ['рецепты', '/api/dishes'], ['кухонный запас', '/api/inventory/items'],
+    ['рекомендации', '/api/suggestions'], ['покупки', '/api/shopping'],
+    ['историю', '/api/history'], ['планы', '/api/plans'], ['статистику', '/api/stats'],
+  ];
+  const results = await Promise.allSettled(requests.map(([, path]) => api(path)));
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      toast(`Не удалось загрузить ${requests[index][0]}: ${result.reason.message}`, true);
+      return;
+    }
+    const value = result.value;
+    if (index === 0) CACHE.dishes = value.dishes || [];
+    if (index === 1) {
+      CACHE.inventory = value.items || [];
+      CACHE.fridge = CACHE.inventory.map(item => item.name);
+    }
+    if (index === 2) CACHE.suggestions = value.suggestions || [];
+    if (index === 3) CACHE.shopping = value.items || [];
+    if (index === 4) CACHE.history = value.history || [];
+    if (index === 5) CACHE.plans = value.plans || [];
+    if (index === 6) CACHE.stats = value;
+  });
+  renderAll();
 }
 
 function renderAll() {
@@ -1004,38 +1034,64 @@ function closeModal() {
 }
 
 // ─── Fridge ───
+const INVENTORY_UNITS = ['g','kg','ml','l','pcs','pack','can','jar','bottle','portion'];
+const INVENTORY_STORAGE = {fridge:'Холодильник', freezer:'Морозилка', pantry:'Шкаф / кладовая', counter:'Столешница'};
+function inventoryRecords() {
+  return CACHE.inventory.length ? CACHE.inventory : CACHE.fridge.map(name => ({id:null,name,quantity:null,unit:null,package_count:null,storage:null,expires_on:null,comment:null,expiry_status:'unknown'}));
+}
+function selectOptions(values, current, labels={}) {
+  return `<option value="">—</option>` + values.map(value => `<option value="${value}" ${value===current?'selected':''}>${escapeHtml(labels[value] || value)}</option>`).join('');
+}
 function renderFridge() {
   const c = document.getElementById('fridge-container');
-  if (CACHE.fridge.length === 0) {
-    c.innerHTML = '<p style="color:var(--text-dim)">Холодильник пуст</p>';
+  const records = inventoryRecords();
+  if (records.length === 0) {
+    c.innerHTML = '<p style="color:var(--text-dim)">Кухонный запас пуст</p>';
     return;
   }
   const utility = CACHE.stats.fridge_utility || {};
-  c.innerHTML = CACHE.fridge.map(item => {
+  c.innerHTML = records.map(record => {
+    const item = record.name;
     const uses = utility[item] || 0;
     const safeItem = escapeHtml(item);
     if (editingFridgeItem === item) {
       return `<div class="fridge-item editing ${uses===0?'unused':''}" data-editing-item="${safeItem}">
-        <label class="sr-only" for="fridge-edit-input">Новое название продукта ${safeItem}</label>
-        <input class="fridge-edit-input" id="fridge-edit-input" type="text" value="${safeItem}" maxlength="200">
+        <div class="inventory-edit-grid">
+          <label class="sr-only" for="fridge-edit-input">Название продукта ${safeItem}</label>
+          <input class="fridge-edit-input wide" id="fridge-edit-input" type="text" value="${safeItem}" maxlength="200">
+          <input id="fridge-edit-quantity" type="number" min="0" step="any" placeholder="Количество" aria-label="Количество продукта ${safeItem}" value="${escapeHtml(record.quantity ?? '')}">
+          <select id="fridge-edit-unit" aria-label="Единица измерения продукта ${safeItem}">${selectOptions(INVENTORY_UNITS, record.unit)}</select>
+          <input id="fridge-edit-packages" type="number" min="1" step="1" placeholder="Упаковок" aria-label="Количество упаковок продукта ${safeItem}" value="${escapeHtml(record.package_count ?? '')}">
+          <select id="fridge-edit-storage" aria-label="Место хранения продукта ${safeItem}">${selectOptions(Object.keys(INVENTORY_STORAGE), record.storage, INVENTORY_STORAGE)}</select>
+          <input id="fridge-edit-expiry" type="date" aria-label="Срок годности продукта ${safeItem}" value="${escapeHtml(record.expires_on ?? '')}">
+          <input class="wide" id="fridge-edit-comment" type="text" maxlength="1000" placeholder="Комментарий" aria-label="Комментарий продукта ${safeItem}" value="${escapeHtml(record.comment ?? '')}">
+        </div>
         <span class="fridge-edit-actions">
-          <button class="btn btn-primary btn-sm" data-edit-action="save" aria-label="Сохранить новое название продукта ${safeItem}">✓</button>
+          <button class="btn btn-primary btn-sm" data-edit-action="save" aria-label="Сохранить продукт ${safeItem}">✓</button>
           <button class="btn btn-sm" data-edit-action="cancel" aria-label="Отменить редактирование продукта ${safeItem}">Отмена</button>
         </span>
       </div>`;
     }
-    return `<div class="fridge-item ${uses===0?'unused':''}">
-      <span>${safeItem}</span>
+    const metadata = [];
+    if (record.quantity != null) metadata.push(`${escapeHtml(record.quantity)} ${escapeHtml(record.unit || '')}`.trim());
+    if (record.package_count != null) metadata.push(`${Number(record.package_count)} уп.`);
+    if (record.storage) metadata.push(escapeHtml(INVENTORY_STORAGE[record.storage] || record.storage));
+    if (record.expires_on) metadata.push(`до ${escapeHtml(record.expires_on)}`);
+    if (record.expiry_status === 'expired') metadata.push('⚠ Просрочено');
+    if (record.expiry_status === 'expiring_soon') metadata.push('⚠ Скоро истекает срок');
+    if (record.comment) metadata.push(escapeHtml(record.comment));
+    return `<div class="fridge-item ${uses===0?'unused':''} inventory-${escapeHtml(record.expiry_status || 'unknown')}">
+      <span class="inventory-name">${safeItem}</span>
       ${uses > 0 ? `<span class="uses">${Number(uses) || 0} рец.</span>` : '<span class="uses">—</span>'}
-      <button class="edit" data-action="edit" data-value="${safeItem}" aria-label="Редактировать название продукта ${safeItem}" title="Редактировать название продукта ${safeItem}">✎</button>
+      <button class="edit" data-action="edit" data-value="${safeItem}" aria-label="Редактировать продукт ${safeItem}" title="Редактировать продукт ${safeItem}">✎</button>
       <button class="remove" data-action="remove" data-value="${safeItem}" aria-label="Удалить продукт ${safeItem}" title="Удалить продукт ${safeItem}">✕</button>
+      ${metadata.length ? `<div class="inventory-meta">${metadata.map(value => `<span>${value}</span>`).join('')}</div>` : '<div class="inventory-meta"><span>Детали не указаны</span></div>'}
     </div>`;
   }).join('');
   bindDataActions(c, {edit: startFridgeItemEdit, remove: removeFridgeItem});
   const input = c.querySelector('.fridge-edit-input');
   if (input) {
-    input.focus();
-    input.select();
+    input.focus(); input.select();
     input.addEventListener('keydown', event => {
       if (event.key === 'Enter') saveFridgeItemEdit();
       if (event.key === 'Escape') cancelFridgeItemEdit();
@@ -1045,7 +1101,7 @@ function renderFridge() {
   }
 }
 
-function startFridgeItemEdit(item, control) {
+function startFridgeItemEdit(item) {
   if (fridgeEditSaving) return;
   editingFridgeItem = item;
   renderFridge();
@@ -1063,54 +1119,86 @@ async function saveFridgeItemEdit() {
   if (fridgeEditSaving || !editingFridgeItem) return;
   const input = document.getElementById('fridge-edit-input');
   const newName = input?.value.trim() || '';
-  if (!newName) {
-    toast('Название продукта не может быть пустым', true);
-    input?.focus();
+  if (!newName) { toast('Название продукта не может быть пустым', true); input?.focus(); return; }
+  const sourceItem = editingFridgeItem;
+  const record = inventoryRecords().find(item => item.name === sourceItem);
+  const quantity = document.getElementById('fridge-edit-quantity')?.value.trim() || null;
+  const unit = quantity ? (document.getElementById('fridge-edit-unit')?.value || null) : null;
+  const packageCount = document.getElementById('fridge-edit-packages')?.value ? Number(document.getElementById('fridge-edit-packages').value) : null;
+  const storage = document.getElementById('fridge-edit-storage')?.value || null;
+  const expiresOn = document.getElementById('fridge-edit-expiry')?.value || null;
+  const comment = document.getElementById('fridge-edit-comment')?.value.trim() || null;
+  const payload = {};
+  if (newName.toLowerCase() !== record?.name) payload.name = newName;
+  if (quantity !== (record?.quantity ?? null) || unit !== (record?.unit ?? null)) {
+    payload.quantity = quantity;
+    payload.unit = unit;
+  }
+  if (packageCount !== (record?.package_count ?? null)) payload.package_count = packageCount;
+  if (storage !== (record?.storage ?? null)) payload.storage = storage;
+  if (expiresOn !== (record?.expires_on ?? null)) payload.expires_on = expiresOn;
+  if (comment !== (record?.comment ?? null)) payload.comment = comment;
+  if (record?.id && Object.keys(payload).length === 0) {
+    cancelFridgeItemEdit();
     return;
   }
-  const sourceItem = editingFridgeItem;
   fridgeEditSaving = true;
   input.disabled = true;
-  input.closest('.fridge-item')?.querySelectorAll('button').forEach(button => {
-    button.disabled = true;
-  });
+  input.closest('.fridge-item')?.querySelectorAll('button,input,select').forEach(control => { control.disabled = true; });
   try {
-    const result = await api('/api/fridge/item', 'PUT', {
-      old_ingredient: sourceItem,
-      new_ingredient: newName,
-    });
-    if (Array.isArray(result.ingredients)) CACHE.fridge = result.ingredients;
+    let result;
+    if (record?.id) result = await api(`/api/inventory/items/${encodeURIComponent(record.id)}`, 'PATCH', payload);
+    else result = await api('/api/fridge/item', 'PUT', {old_ingredient: sourceItem, new_ingredient: newName});
+    if (result.item && record?.id) {
+      CACHE.inventory = CACHE.inventory.map(item => item.id === record.id ? result.item : item);
+      CACHE.fridge = CACHE.inventory.map(item => item.name);
+    } else if (Array.isArray(result.ingredients)) CACHE.fridge = result.ingredients;
     editingFridgeItem = null;
     renderFridge();
     await refreshAll();
     document.querySelector(`#fridge-container [data-action="edit"][data-value="${CSS.escape(newName.toLowerCase())}"]`)?.focus();
   } catch (e) {
     toast(e.message, true);
-    input.disabled = false;
-    input.closest('.fridge-item')?.querySelectorAll('button').forEach(button => {
-      button.disabled = false;
-    });
+    input.closest('.fridge-item')?.querySelectorAll('button,input,select').forEach(control => { control.disabled = false; });
     input.focus();
-  } finally {
-    fridgeEditSaving = false;
-  }
+  } finally { fridgeEditSaving = false; }
 }
 
 async function addFridgeItem() {
   const input = document.getElementById('fridge-add-input');
-  const val = input.value.trim();
-  if (!val) return;
+  const name = input.value.trim();
+  if (!name) return;
+  const quantity = document.getElementById('fridge-add-quantity').value.trim();
+  const body = {name};
+  if (quantity) { body.quantity = quantity; body.unit = document.getElementById('fridge-add-unit').value || null; }
+  const packages = document.getElementById('fridge-add-packages').value;
+  if (packages) body.package_count = Number(packages);
+  for (const [field, id] of [['storage','fridge-add-storage'],['expires_on','fridge-add-expiry'],['comment','fridge-add-comment']]) {
+    const value = document.getElementById(id).value.trim(); if (value) body[field] = value;
+  }
   try {
-    await api('/api/fridge/add', 'POST', { ingredient: val });
-    input.value = '';
+    await api('/api/inventory/items', 'POST', body);
+    ['fridge-add-input','fridge-add-quantity','fridge-add-unit','fridge-add-packages','fridge-add-storage','fridge-add-expiry','fridge-add-comment'].forEach(id => { document.getElementById(id).value = ''; });
     await refreshAll();
   } catch (e) { toast(e.message, true); }
 }
 
-async function removeFridgeItem(item) {
+async function removeFridgeItem(name) {
+  const before = inventoryRecords();
+  const record = before.find(item => item.name === name);
+  const removedIndex = before.findIndex(item => item.name === name);
+  if (!confirm(`Удалить продукт «${name}»?`)) return;
   try {
-    await api('/api/fridge/remove', 'POST', { ingredient: item });
+    if (record?.id) await api(`/api/inventory/items/${encodeURIComponent(record.id)}`, 'DELETE');
+    else await api('/api/fridge/remove', 'POST', {ingredient: name});
     await refreshAll();
+    const remaining = inventoryRecords();
+    const focusTarget = remaining[Math.min(Math.max(removedIndex, 0), remaining.length - 1)];
+    if (focusTarget) {
+      document.querySelector(`#fridge-container [data-action="edit"][data-value="${CSS.escape(focusTarget.name)}"]`)?.focus();
+    } else {
+      document.getElementById('fridge-add-input')?.focus();
+    }
   } catch (e) { toast(e.message, true); }
 }
 

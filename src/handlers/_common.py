@@ -72,6 +72,14 @@ def require_arg(args: dict, key: str):
     return args[key]
 
 
+def reject_unknown_args(args: dict, allowed: set[str]) -> None:
+    if not isinstance(args, dict):
+        raise ValueError("tool arguments must be an object")
+    unknown = set(args) - allowed
+    if unknown:
+        raise ValueError(f"unknown arguments: {sorted(unknown)}")
+
+
 def maybe_parse_json_arg(value):
     """Coerce a possibly-JSON-string argument to its parsed form.
 

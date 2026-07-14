@@ -32,16 +32,7 @@ def HANDLER(args: dict, **kwargs):
     old_name = normalize_ingredient_name(require_arg(args, "old_ingredient"))
     new_name = normalize_ingredient_name(require_arg(args, "new_ingredient"))
 
-    with fridge_repo.lock:
-        fridge = fridge_repo.load()
-        if old_name not in fridge:
-            raise LookupError(f"Ingredient '{old_name}' not found in kitchen inventory")
-        if old_name == new_name:
-            return f"No changes — '{old_name}' already has that name."
-        if new_name in fridge:
-            raise ValueError(f"Ingredient '{new_name}' already exists in kitchen inventory")
-
-        renamed = [new_name if item == old_name else item for item in fridge]
-        fridge_repo.save(renamed)
-
+    fridge_repo.rename_by_name(old_name, new_name)
+    if old_name == new_name:
+        return f"No changes — '{old_name}' already has that name."
     return f"Successfully renamed '{old_name}' to '{new_name}' in kitchen inventory."

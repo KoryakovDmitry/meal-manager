@@ -254,6 +254,209 @@ def test_list_fridge():
     check("has exactly 2 items", len(result) == 2, f"got {len(result)}")
 
 
+def test_structured_fridge_repository_migrates_legacy_atomically():
+    print("\n-- structured fridge repository legacy migration --")
+    from tempfile import TemporaryDirectory
+    import os
+
+    repo_mod = importlib.import_module(".src.repositories.json_fridge", _PLUGIN_DIR.name)
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "fridge.json"
+        legacy = [" Куриные Голени ", "паста"]
+        path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+        os.utime(path, (946684800, 946684800))
+        repo = repo_mod.JsonFridgeRepository(path)
+
+        try:
+            first = repo.load_items()
+        except AttributeError:
+            check("structured repository exposes load_items", False)
+            return
+        second = repo.load_items()
+        check("legacy names remain available", repo.load() == ["куриные голени", "паста"])
+        check("legacy projection returns structured items", len(first) == 2)
+        check("legacy migration ids are deterministic", [x.id for x in first] == [x.id for x in second])
+        check("legacy metadata remains unknown", all(
+            x.quantity is None and x.unit is None and x.storage is None
+            and x.expires_on is None and x.comment is None
+            for x in first
+        ))
+
+        repo.save(["куриные голени", "паста", "масло"])
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        check("first mutation writes v2 envelope", persisted.get("schema_version") == 2)
+        check("v2 envelope contains all names", [x["name"] for x in persisted["items"]] == [
+            "куриные голени", "паста", "масло",
+        ])
+        check("migrated ids survive first write", [x["id"] for x in persisted["items"][:2]] == [x.id for x in first])
+        check("migration timestamps are assigned at first v2 write", all(
+            not item["created_at"].startswith("2000-") for item in persisted["items"]
+        ))
+
+
+def test_structured_repository_integrity_and_compatibility():
+    print("\n-- structured repository integrity and compatibility --")
+    from tempfile import TemporaryDirectory
+    import threading
+
+    repo_mod = importlib.import_module(".src.repositories.json_fridge", _PLUGIN_DIR.name)
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "fridge.json"
+        path.write_text("[]", encoding="utf-8")
+        repo = repo_mod.JsonFridgeRepository(path)
+        item = repo.add_item(
+            name="молоко", quantity="2", unit="l", storage="fridge", comment="важно"
+        )
+        repo.save(["молоко", "рис"])
+        preserved = next(x for x in repo.load_items() if x.id == item.id)
+        check("compatibility save preserves stable id", preserved.id == item.id)
+        check("compatibility save preserves metadata", preserved.quantity == "2" and preserved.comment == "важно")
+
+        renamed = repo.rename_by_name("молоко", "молоко цельное")
+        check("compatibility rename preserves id", renamed.id == item.id)
+        check("compatibility rename preserves metadata", renamed.quantity == "2" and renamed.storage == "fridge")
+
+        peer_repo = repo_mod.JsonFridgeRepository(path)
+        barrier = threading.Barrier(2)
+        def concurrent_add(target_repo, name):
+            barrier.wait()
+            target_repo.add_item(name=name)
+        threads = [
+            threading.Thread(target=concurrent_add, args=(target_repo, name))
+            for target_repo, name in ((repo, "масло"), (peer_repo, "соль"))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        check("concurrent unrelated adds are not lost", {"масло", "соль"}.issubset(repo.load_set()))
+
+        import multiprocessing
+        ctx = multiprocessing.get_context("fork")
+        start = ctx.Event()
+
+        def web_add_worker(data_path):
+            web_mod = importlib.import_module(f"{_PLUGIN_DIR.name}.web.main")
+            setattr(web_mod, "FRIDGE_PATH", Path(data_path))
+            start.wait()
+            for number in range(20):
+                web_mod.add_to_fridge(web_mod.FridgeAddRemove(ingredient=f"web-race-{number}"))
+
+        def native_add_worker(data_path):
+            worker_repo = repo_mod.JsonFridgeRepository(Path(data_path))
+            start.wait()
+            for number in range(20):
+                worker_repo.add_item(name=f"agent-race-{number}")
+
+        processes = [
+            ctx.Process(target=web_add_worker, args=(path,)),
+            ctx.Process(target=native_add_worker, args=(path,)),
+        ]
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(20)
+        process_names = repo.load_set()
+        check("web and native mutations complete in separate processes", all(
+            process.exitcode == 0 for process in processes
+        ))
+        check("web and native cross-process adds are not lost", all(
+            f"{prefix}-race-{number}" in process_names
+            for prefix in ("web", "agent") for number in range(20)
+        ))
+
+        other_path = Path(tmp) / "other-fridge.json"
+        with repo.lock:
+            locked_items = repo.load_items()
+            repo.path = other_path
+            repo.save_items(locked_items)
+        check("lock binds reads and writes to captured path", not other_path.exists())
+        repo.path = path
+
+        malformed = b'["valid", 42]'
+        path.write_bytes(malformed)
+        try:
+            repo.save(["valid", "new"])
+            check("malformed legacy mutation fails closed", False)
+        except ValueError:
+            check("malformed legacy mutation fails closed", True)
+        check("malformed legacy bytes stay untouched", path.read_bytes() == malformed)
+
+        path.write_text(json.dumps({"schema_version": 999, "items": []}), encoding="utf-8")
+        try:
+            repo.load_items()
+            check("unsupported schema version rejected", False)
+        except ValueError:
+            check("unsupported schema version rejected", True)
+
+
+def test_structured_inventory_native_crud():
+    print("\n-- structured inventory native CRUD --")
+    try:
+        add_item = _load_handler("add_inventory_item")
+        list_items = _load_handler("list_inventory_items")
+        edit_item = _load_handler("edit_inventory_item")
+        remove_item = _load_handler("remove_inventory_item")
+    except ModuleNotFoundError:
+        check("structured inventory handlers exist", False)
+        return
+
+    unknown = parse(add_item({"name": "unknown qa", "bogus": True}))
+    check("structured native rejects unknown arguments", "unknown arguments" in unknown.get("error", ""))
+    check("unknown-argument request does not mutate inventory", "unknown qa" not in parse(list_fridge({})))
+
+    add_schema = importlib.import_module(
+        ".src.handlers.add_inventory_item", _PLUGIN_DIR.name
+    ).SCHEMA
+    check("structured add schema exposes nullable optional metadata", all(
+        any(branch.get("type") == "null" for branch in add_schema["properties"][field]["oneOf"])
+        for field in ("quantity", "unit", "package_count", "storage", "expires_on", "comment")
+    ))
+    nullable_created = parse(add_item({
+        "name": "nullable qa", "quantity": None, "unit": None,
+        "package_count": None, "storage": None, "expires_on": None, "comment": None,
+    }))
+    check("structured native create accepts schema-declared nulls", nullable_created.get("name") == "nullable qa")
+    parse(remove_item({"item_id": nullable_created["id"]}))
+
+    created = parse(add_item({
+        "name": " Leche QA ",
+        "quantity": "2.000",
+        "unit": "l",
+        "package_count": 2,
+        "storage": "fridge",
+        "expires_on": "2026-07-17",
+        "comment": "  prueba  ",
+    }))
+    check("structured add returns record", isinstance(created, dict) and created.get("name") == "leche qa")
+    check("structured add canonicalizes quantity", created.get("quantity") == "2")
+    item_id = created.get("id") if isinstance(created, dict) else None
+
+    detailed = parse(list_items({}))
+    listed = next((item for item in detailed if item.get("id") == item_id), None)
+    check("structured list reverse-reads metadata", listed is not None and listed.get("package_count") == 2)
+    check("structured list derives expiry status", listed is not None and "expiry_status" in listed)
+    check("compatibility list exposes structured name", "leche qa" in parse(list_fridge({})))
+
+    edited = parse(edit_item({
+        "item_id": item_id,
+        "name": "Leche Entera QA",
+        "quantity": "1.5",
+        "unit": "l",
+        "comment": None,
+    }))
+    check("structured edit preserves stable id", isinstance(edited, dict) and edited.get("id") == item_id)
+    check("structured edit persists name and quantity", edited.get("name") == "leche entera qa" and edited.get("quantity") == "1.5")
+    check("structured edit explicitly clears comment", edited.get("comment") is None)
+
+    removed = parse(remove_item({"item_id": item_id}))
+    check("structured remove returns removed record", isinstance(removed, dict) and removed.get("id") == item_id)
+    check("structured remove disappears from reverse read", all(
+        item.get("id") != item_id for item in parse(list_items({}))
+    ))
+
+
 def test_update_fridge_add():
     print("\n-- update_fridge_inventory (add) --")
     result = parse(update_fridge_inventory({"action": "add", "ingredients": ["pollo", "huevos"]}))
@@ -1116,6 +1319,9 @@ def main():
     try:
         test_registered_update_fridge_schema_exposes_required_arguments()
         test_list_fridge()
+        test_structured_fridge_repository_migrates_legacy_atomically()
+        test_structured_repository_integrity_and_compatibility()
+        test_structured_inventory_native_crud()
         test_update_fridge_add()
         test_update_fridge_add_duplicate()
         test_update_fridge_remove()

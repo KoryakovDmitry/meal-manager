@@ -2,7 +2,7 @@
 
 An intelligent meal planning and fridge inventory management system structured as an official Hermes plugin. It helps users decide what to cook for dinner and what to buy at the grocery store by analyzing their current fridge contents, recipe catalog, and cooking history.
 
-An AI assistant invokes the 35 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
+An AI assistant invokes the 39 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
 
 ---
 
@@ -80,6 +80,10 @@ The result is a system that offers the user the freedom of conversation while gu
 
 No build step, dependency installation, or configuration is needed. Data files under `data/` are created lazily by the tools when first needed.
 
+### Upgrading a live legacy inventory to schema v2
+
+The first inventory mutation after this release converts the legacy string array to the structured `schema_version: 2` envelope. This is a **coordinated deployment**, not a rolling upgrade: back up `fridge.json`, stop every old agent/Web writer, deploy and restart both Hermes and `meal-web`, verify the name projection and unique IDs, and only then resume mutations. An old process must never write after the first v2 mutation because it neither understands the envelope nor participates in the POSIX `flock` protocol. The repository therefore targets the Linux/POSIX deployment used by this plugin.
+
 ---
 
 ## Usage
@@ -133,7 +137,7 @@ Reply naturally — *"yes"*, *"skip"*, *"remove X"*, *"also add Y"*, or *"done"*
 
 ### As a Hermes Plugin
 
-The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 35 tools:
+The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 39 tools:
 
 | Tool | Purpose |
 |---|---|
@@ -142,6 +146,10 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `get_tuning_state` | Reports the current self-adjusted availability/recency blend and learning status |
 | `update_fridge_inventory` | Adds or removes ingredients from the fridge |
 | `rename_fridge_item` | Atomically renames one kitchen-inventory item |
+| `list_inventory_items` | Returns complete structured inventory records and expiry status |
+| `add_inventory_item` | Adds a structured item with quantity, storage, expiry, and comment |
+| `edit_inventory_item` | Patches a structured item by stable ID without losing omitted metadata |
+| `remove_inventory_item` | Removes exactly one structured item by stable ID |
 | `register_cooked_meal` | Logs a dish as cooked today and removes its essential ingredients |
 | `delete_history_entry` | Undo for `register_cooked_meal` — removes a dish from history |
 | `list_fridge` | Returns the current fridge contents |

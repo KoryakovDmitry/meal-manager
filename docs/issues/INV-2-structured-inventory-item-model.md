@@ -1,6 +1,6 @@
 # INV-2 — Structured kitchen inventory item model
 
-**Status:** 📐 Ready
+**Status:** 🔨 Doing
 **Requested by:** Dmitrii Koriakov
 **Source:** Meal Planning Development, immediately after INV-1 rename/edit intake
 

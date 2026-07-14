@@ -337,6 +337,112 @@ def main():
                 except HTTPException as exc:
                     assert exc.status_code == expected_status
                 assert web.load_fridge() == baseline_fridge
+
+            try:
+                created_item = web.add_inventory_item(web.InventoryItemCreate(
+                    name="Молоко QA",
+                    quantity="2.0",
+                    unit="l",
+                    package_count=2,
+                    storage="fridge",
+                    expires_on="2026-07-17",
+                    comment="тест",
+                ))
+            except AttributeError as exc:
+                raise AssertionError("structured inventory web API is missing") from exc
+            structured_id = created_item["item"]["id"]
+            assert created_item["item"]["quantity"] == "2"
+            assert any(
+                item["id"] == structured_id
+                for item in web.list_inventory_items()["items"]
+            )
+            updated_item = web.edit_inventory_item(
+                structured_id,
+                web.InventoryItemPatch(comment=None, quantity="1.5", unit="l"),
+            )
+            assert updated_item["item"]["comment"] is None
+            assert updated_item["item"]["quantity"] == "1.5"
+            try:
+                web.InventoryItemCreate(name="x" * 201)
+                raise AssertionError("web create accepted an overlong inventory name")
+            except Exception as exc:
+                assert exc.__class__.__name__ == "ValidationError"
+            try:
+                web.InventoryItemCreate(name="strict package", package_count=True)
+                raise AssertionError("web create coerced boolean package_count")
+            except Exception as exc:
+                assert exc.__class__.__name__ == "ValidationError"
+            try:
+                web.edit_inventory_item(structured_id, web.InventoryItemPatch(name=None))
+                raise AssertionError("web edit accepted a null inventory name")
+            except HTTPException as exc:
+                assert exc.status_code == 400
+            deleted_item = web.remove_inventory_item(structured_id)
+            assert deleted_item["item"]["id"] == structured_id
+            assert "молоко qa" not in web.load_fridge()
+
+            inventory_before_history_failure = web._fridge_repository().load_items()
+            history_before_failure = web.load_history()
+            original_save_history = web.save_history
+            web.save_history = lambda _entries: (_ for _ in ()).throw(OSError("simulated history write failure"))
+            try:
+                web.add_history(web.CookedMeal(dish="суп"))
+                raise AssertionError("history write failure was not surfaced")
+            except HTTPException as exc:
+                assert exc.status_code == 503
+            finally:
+                web.save_history = original_save_history
+            assert web.load_history() == history_before_failure
+            assert [item.to_dict() for item in web._fridge_repository().load_items()] == [
+                item.to_dict() for item in inventory_before_history_failure
+            ]
+
+            valid_inventory_before_bad_request = web.load_fridge()
+            invalid_legacy_calls = [
+                lambda: web.set_fridge(web.FridgeUpdate(ingredients=[" "])),
+                lambda: web.set_fridge(web.FridgeUpdate(ingredients=["x" * 201])),
+                lambda: web.add_to_fridge(web.FridgeAddRemove(ingredient=" ")),
+                lambda: web.add_to_fridge(web.FridgeAddRemove(ingredient="x" * 201)),
+                lambda: web.remove_from_fridge(web.FridgeAddRemove(ingredient=" ")),
+            ]
+            for call in invalid_legacy_calls:
+                try:
+                    call()
+                    raise AssertionError("invalid legacy inventory name was accepted")
+                except HTTPException as exc:
+                    assert exc.status_code == 400
+            assert web.load_fridge() == valid_inventory_before_bad_request
+
+            web.FRIDGE_PATH.write_text("{broken", encoding="utf-8")
+            corrupt_calls = [
+                lambda: web.get_fridge(),
+                lambda: web.set_fridge(web.FridgeUpdate(ingredients=["лук"])),
+                lambda: web.add_to_fridge(web.FridgeAddRemove(ingredient="лук")),
+                lambda: web.remove_from_fridge(web.FridgeAddRemove(ingredient="лук")),
+                lambda: web.rename_fridge_item(web.FridgeRename(old_ingredient="лук", new_ingredient="лук 2")),
+                lambda: web.clear_fridge(),
+                lambda: web.get_suggestions(),
+                lambda: web.get_shopping(),
+                lambda: web.get_stats(),
+                lambda: web.add_history(web.CookedMeal(dish="суп")),
+                lambda: web.list_inventory_items(),
+            ]
+            for call in corrupt_calls:
+                try:
+                    call()
+                    raise AssertionError("corrupt inventory did not return storage error")
+                except HTTPException as exc:
+                    assert exc.status_code == 503
+                    assert exc.detail == "Inventory storage is temporarily unavailable"
+                    assert str(web.FRIDGE_PATH) not in exc.detail
+            assert web.load_history() == history_before_failure
+            web.FRIDGE_PATH.write_bytes(b"\xff")
+            try:
+                web.list_inventory_items()
+                raise AssertionError("invalid UTF-8 did not return storage error")
+            except HTTPException as exc:
+                assert exc.status_code == 503
+                assert "codec" not in exc.detail.lower()
         finally:
             web.DISHES_PATH, web.FRIDGE_PATH, web.HISTORY_PATH = original_paths
         assert stats["fridge_utility"] == {"лук": 2, "морковь": 1, "банан": 0}
@@ -385,13 +491,20 @@ def main():
     assert 'data-action="edit" data-value="${suggestionName}" aria-label="Изменить рецепт ${suggestionName}"' in html
     assert 'aria-label="Удалить запись истории ${dishName}"' in html
     assert 'aria-label="Удалить продукт ${safeItem}"' in html
-    assert 'aria-label="Редактировать название продукта ${safeItem}"' in html
+    assert 'aria-label="Редактировать продукт ${safeItem}"' in html
     assert 'data-action="edit" data-value="${safeItem}"' in html
+    assert 'id="fridge-add-quantity"' in html
+    assert 'id="fridge-add-storage"' in html
+    assert 'id="fridge-edit-expiry"' in html
+    assert "metadata.push('⚠ Просрочено')" in html
+    assert "metadata.push('⚠ Скоро истекает срок')" in html
+    assert "'/api/inventory/items', 'POST'" in html
+    assert "'PATCH', payload" in html
     assert "function startFridgeItemEdit" in html
     assert "function saveFridgeItemEdit" in html
     assert "function cancelFridgeItemEdit" in html
     assert "'/api/fridge/item', 'PUT'" in html
-    assert 'class="fridge-edit-input"' in html
+    assert 'class="fridge-edit-input wide"' in html
     assert 'data-edit-action="save"' in html
     assert 'data-edit-action="cancel"' in html
     assert 'aria-label="Удалить ингредиент ${safeName}"' in html

@@ -1063,6 +1063,116 @@ def test_split_shopping_trips_respects_soft_limit():
         check("trip split rejects item missing to_buy", True)
 
 
+# ── Structured inventory item tests ──
+
+
+def test_inventory_item_roundtrip():
+    print("\n-- InventoryItem roundtrip --")
+    try:
+        inventory_mod = importlib.import_module(".src.inventory", _PLUGIN_DIR.name)
+    except ModuleNotFoundError:
+        check("inventory module exists", False, "src/inventory.py is missing")
+        return
+
+    item = inventory_mod.InventoryItem(
+        id="inv_test",
+        name="  Куриные Голени  ",
+        quantity="2.000",
+        unit="kg",
+        package_count=1,
+        storage="fridge",
+        expires_on="2026-07-17",
+        comment="  сырые  ",
+        created_at="2026-07-14T01:15:00+00:00",
+        updated_at="2026-07-14T01:15:00+00:00",
+    )
+    payload = item.to_dict()
+    restored = inventory_mod.InventoryItem.from_dict(payload)
+
+    check("inventory name normalized", item.name == "куриные голени")
+    check("quantity canonicalized", item.quantity == "2")
+    check("comment trimmed", item.comment == "сырые")
+    check("inventory roundtrip exact", restored == item)
+    check("serialized fields are complete", set(payload) == {
+        "id", "name", "quantity", "unit", "package_count", "storage",
+        "expires_on", "comment", "created_at", "updated_at",
+    })
+
+
+def test_inventory_item_validation():
+    print("\n-- InventoryItem validation --")
+    inventory_mod = importlib.import_module(".src.inventory", _PLUGIN_DIR.name)
+    base = {
+        "id": "inv_test",
+        "name": "рис",
+        "created_at": "2026-07-14T01:15:00+00:00",
+        "updated_at": "2026-07-14T01:15:00+00:00",
+    }
+    invalid_cases = [
+        ({"id": ""}, "blank id"),
+        ({"name": "   "}, "blank name"),
+        ({"name": None}, "null name"),
+        ({"name": "x" * 201}, "overlong name"),
+        ({"quantity": "2"}, "quantity without unit"),
+        ({"unit": "kg"}, "unit without quantity"),
+        ({"quantity": True, "unit": "kg"}, "boolean quantity"),
+        ({"quantity": "0", "unit": "kg"}, "zero quantity"),
+        ({"quantity": "-1", "unit": "kg"}, "negative quantity"),
+        ({"quantity": "NaN", "unit": "kg"}, "non-finite quantity"),
+        ({"quantity": "1.1234567", "unit": "kg"}, "excessive quantity precision"),
+        ({"quantity": "1000000001", "unit": "kg"}, "unsafe quantity magnitude"),
+        ({"quantity": "2", "unit": "stone"}, "unknown unit"),
+        ({"package_count": True}, "boolean package count"),
+        ({"package_count": 0}, "zero package count"),
+        ({"package_count": 10001}, "unsafe package count"),
+        ({"storage": "cellar"}, "unknown storage"),
+        ({"expires_on": "2026-02-30"}, "invalid expiry date"),
+        ({"expires_on": "20260717"}, "compact expiry date"),
+        ({"expires_on": "2026-W29-5"}, "week expiry date"),
+        ({"comment": "x" * 1001}, "overlong comment"),
+        ({"created_at": "not-a-date"}, "invalid created timestamp"),
+        ({"created_at": "2026-07-15T01:15:00+00:00"}, "updated timestamp before created"),
+    ]
+    for patch_values, label in invalid_cases:
+        try:
+            inventory_mod.InventoryItem(**(base | patch_values))
+            check(f"rejects {label}", False)
+        except (TypeError, ValueError, ArithmeticError):
+            check(f"rejects {label}", True)
+
+    try:
+        inventory_mod.InventoryItem.from_dict(base | {"unknown": "field"})
+        check("rejects unknown persisted fields", False)
+    except (TypeError, ValueError):
+        check("rejects unknown persisted fields", True)
+
+
+def test_inventory_item_expiry_status():
+    print("\n-- InventoryItem expiry status --")
+    from datetime import date
+
+    inventory_mod = importlib.import_module(".src.inventory", _PLUGIN_DIR.name)
+    base = {
+        "id": "inv_test",
+        "name": "рис",
+        "created_at": "2026-07-14T01:15:00+00:00",
+        "updated_at": "2026-07-14T01:15:00+00:00",
+    }
+    statuses = {
+        None: "unknown",
+        "2026-07-13": "expired",
+        "2026-07-14": "expiring_soon",
+        "2026-07-17": "expiring_soon",
+        "2026-07-18": "ok",
+    }
+    for expires_on, expected in statuses.items():
+        item = inventory_mod.InventoryItem(**base, expires_on=expires_on)
+        check(
+            f"expiry {expires_on} -> {expected}",
+            item.expiry_status(today=date(2026, 7, 14)) == expected,
+        )
+
+
 def main():
     test_dish_normalize_ingredient()
     test_dish_normalize_name()
@@ -1137,6 +1247,10 @@ def main():
     test_week_plan_invalid_status()
     test_week_plan_rejects_noncanonical_days()
     test_week_plan_rejects_malformed_shopping()
+
+    test_inventory_item_roundtrip()
+    test_inventory_item_validation()
+    test_inventory_item_expiry_status()
 
     print("\n-- Phase 3 shopping/budget --")
     test_build_plan_shopping_list_aggregates_occurrences_and_prep()

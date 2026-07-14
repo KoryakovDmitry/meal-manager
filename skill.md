@@ -46,6 +46,12 @@ Adds or removes ingredients from the fridge. Accepts an action ("add" or "remove
 
 Atomically renames one existing kitchen-inventory item. Accepts `old_ingredient` and `new_ingredient`. Use it to correct a typo, brand, product variant, or naming convention without issuing separate remove/add calls. A missing source or duplicate target is an error; a normalized same-name request is a no-op. This changes inventory only, not recipe ingredient names.
 
+### Structured kitchen inventory
+
+Use `list_inventory_items` whenever quantities, units, package count, storage, expiry, comments, or stable IDs matter. Use `add_inventory_item` for a newly described product with metadata, `edit_inventory_item` to patch only named fields by `item_id`, and `remove_inventory_item` to remove exactly that record. Passing `null` to `edit_inventory_item` explicitly clears nullable metadata; omitted fields are preserved. Continue using `update_fridge_inventory` only for simple presence-only bulk updates and `list_fridge` when only ingredient names are needed by compatibility workflows.
+
+Phase 1 stores one record per normalized product name. Do not infer unknown quantities or claim quantitative recipe sufficiency from stored inventory amounts.
+
 ### `register_cooked_meal`
 
 Registers that a dish was cooked today so the suggestion engine doesn't recommend it again too soon.

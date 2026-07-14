@@ -7,6 +7,10 @@ provides_tools:
   - get_tuning_state
   - update_fridge_inventory
   - rename_fridge_item
+  - list_inventory_items
+  - add_inventory_item
+  - edit_inventory_item
+  - remove_inventory_item
   - register_cooked_meal
   - delete_history_entry
   - list_fridge
