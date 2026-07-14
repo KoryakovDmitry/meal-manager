@@ -1,8 +1,10 @@
 # INV-3 — Web ↔ agent inventory synchronization and conflict detection
 
-**Status:** 🧭 Discovery
+**Status:** 🧊 Icebox — super low priority
 **Requested by:** Iliana
 **Source:** Meal Planning Development, after INV-2 live release
+
+**Product decision (2026-07-14):** automatic Web ↔ agent synchronization is deferred. Until this becomes a real recurring problem, Dima and Iliana will tell Hermes directly when they change inventory through the Web UI. Hermes may perform a fresh native inventory read before important planning. Resume only if manual notification becomes unreliable, same-field collisions occur in practice, or Web becomes the primary inventory surface.
 
 ## User problem
 

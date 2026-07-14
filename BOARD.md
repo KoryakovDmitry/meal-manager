@@ -241,16 +241,6 @@
 
 ## 🧭 DISCOVERY
 
-### INV-3 — Web ↔ agent inventory synchronization and conflict detection
-
-**Проблема.** Web UI и Hermes могут менять один кухонный запас параллельно. Текущий `flock` защищает файл, а dirty-field PATCH сохраняет несвязанные поля, но активная Telegram-сессия не узнаёт о Web-изменении автоматически, и stale edit одного и того же поля всё ещё может завершиться last-writer-wins.
-
-**Цель.** Добавить optimistic version preconditions, monotonic inventory revision/change receipts и безопасную синхронизацию Meal Planning перед inventory-dependent reasoning/mutations. По умолчанию — без Telegram-спама на каждый Web-клик.
-
-**Discovery.** Сравнить атомарный schema-v3 envelope, sidecar journal и Hermes gateway push; определить гарантию для уже выполняющегося turn и способ отличать `web` от конкретного пользователя без Web-аутентификации.
-
-Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
-
 ### Receipt ingestion and price history
 
 **Зачем.** Уйти от ручной explicit price map к реальным люксембургским ценам и видеть динамику бюджета.
@@ -272,6 +262,16 @@
 ---
 
 ## 📋 BACKLOG
+
+### INV-3 — Web ↔ agent inventory synchronization and conflict detection 🧊
+
+**Приоритет:** super low / дальний ящик. Автоматическую синхронизацию сейчас не разрабатываем.
+
+**Временный рабочий процесс:** после ручного изменения кухонного запаса через Web Дима или Илиана прямо пишут Hermes, что именно изменилось. Перед важным планированием Hermes может заново прочитать актуальный запас нативным инструментом. Существующие `flock` и dirty-field PATCH продолжают защищать storage и несвязанные поля.
+
+**Когда вернуться:** только если ручное уведомление начнёт регулярно забываться, появятся реальные same-field коллизии или Web станет основным способом ведения запаса.
+
+Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
 
 - [ ] Luxembourg seasonality auto-hints и market availability.
 - [ ] Prep-day workflow и aggregated weekend batch plan.
