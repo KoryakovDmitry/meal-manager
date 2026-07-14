@@ -130,6 +130,9 @@ setTimeout(async () => {
   CACHE.shopping = [{ingredient: attack, unlocks: [attack]}];
   CACHE.history = [{dish: attack, date: '2026-07-13T12:00:00'}];
   CACHE.plans = [{week: attack, status: attack, meals_count: 1, prep_count: 0}];
+  CACHE.products = [{id:null, name:attack, status:'recipe_only', available:false,
+    quantity:null, unit:null, package_count:null, storage:null, expires_on:null,
+    comment:null, expiry_status:'unknown', recipe_count:1, in_recipes:true}];
   renderStats();
   renderDishes();
   renderFridge();
@@ -137,6 +140,7 @@ setTimeout(async () => {
   renderShopping();
   renderHistory();
   renderPlans();
+  renderProductCatalog();
 
   document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
   document.getElementById('page-fridge').classList.add('active');
@@ -212,7 +216,7 @@ setTimeout(async () => {
   dishesPage.classList.add('active');
   const dynamicContainers = [
     'stats-grid', 'unused-list', 'top-ing-list', 'dishes-container',
-    'fridge-container', 'suggestions-container', 'shopping-container',
+    'fridge-container', 'product-catalog-container', 'suggestions-container', 'shopping-container',
     'plans-history', 'history-container'
   ].map(id => document.getElementById(id));
   const xssImages = dynamicContainers.flatMap(container => [...container.querySelectorAll('img')]);
@@ -228,6 +232,21 @@ setTimeout(async () => {
     document.querySelector('.fridge-item.unused'),
     document.querySelector('.dish-card.recent')
   ].every(element => element && getComputedStyle(element).opacity === '1');
+  dishesPage.classList.remove('active');
+  document.getElementById('page-products').classList.add('active');
+  const productOpener = document.querySelector('#product-catalog-container [data-action="replenish"]');
+  productOpener.focus();
+  productOpener.click();
+  const productDialog = document.querySelector('#modal-container [role="dialog"]');
+  const productModalSemantics = productDialog?.getAttribute('aria-modal') === 'true' &&
+    productDialog?.getAttribute('aria-labelledby') === 'replenish-modal-title' &&
+    document.querySelector('.app').hasAttribute('inert');
+  const replenishFreshBatch = document.getElementById('replenish-expiry').value === '' &&
+    document.getElementById('replenish-comment').value === '';
+  productDialog.querySelector('[data-modal-action="cancel"]').click();
+  const productFocusRestore = document.activeElement === productOpener;
+  document.getElementById('page-products').classList.remove('active');
+  dishesPage.classList.add('active');
   const opener = document.querySelector('#dishes-container [data-action="edit"]');
 
   opener.focus();
@@ -295,6 +314,7 @@ setTimeout(async () => {
     fridgeEditFocus, fridgeCancelRestore,
     inFlightEditLocked, fridgeSaveRestore, expiryAccessible,
     deleteAccessible, dirtyPatchOnly,
+    productModalSemantics, replenishFreshBatch, productFocusRestore,
     window.__qaErrors.length
   ].join(';'));
 }, 500);
@@ -370,7 +390,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
+            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"

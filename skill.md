@@ -52,6 +52,14 @@ Use `list_inventory_items` whenever quantities, units, package count, storage, e
 
 Phase 1 stores one record per normalized product name. Do not infer unknown quantities or claim quantitative recipe sufficiency from stored inventory amounts.
 
+### Product catalog and replenishment
+
+Use `list_product_catalog` when the user asks about all known products, products that ran out, or ingredients known only from recipes. It supports `status` (`all`, `in_stock`, `out_of_stock`, `recipe_only`) and an optional case-insensitive `query`. Current inventory tools continue to return only products physically present now.
+
+Use `replenish_product` only after the user confirms that a product is physically back in the kitchen. Select a previously stocked product by `product_id`, or a recipe-only product by `name`. This preserves the stable product identity but creates a fresh current batch: do not carry an old expiry or comment forward unless the user explicitly supplies new values. Replenishment is not the same as adding an item to a shopping list.
+
+Removing, consuming, or clearing current stock marks catalog identities as unavailable instead of forgetting them. The catalog states are `in_stock`, `out_of_stock`, and `recipe_only`.
+
 ### `register_cooked_meal`
 
 Registers that a dish was cooked today so the suggestion engine doesn't recommend it again too soon.

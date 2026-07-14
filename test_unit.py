@@ -1077,6 +1077,7 @@ def test_inventory_item_roundtrip():
     item = inventory_mod.InventoryItem(
         id="inv_test",
         name="  Куриные Голени  ",
+        available=False,
         quantity="2.000",
         unit="kg",
         package_count=1,
@@ -1092,9 +1093,16 @@ def test_inventory_item_roundtrip():
     check("inventory name normalized", item.name == "куриные голени")
     check("quantity canonicalized", item.quantity == "2")
     check("comment trimmed", item.comment == "сырые")
+    check("availability roundtrips", restored.available is False)
+    positional = inventory_mod.InventoryItem(
+        "inv_positional", "рис", "2", "kg", None, None, None, None,
+        "2026-07-14T01:15:00+00:00", "2026-07-14T01:15:00+00:00",
+    )
+    check("positional inventory constructor remains compatible", positional.quantity == "2" and positional.available is True)
+    check("legacy public inventory shape hides availability", "available" not in item.to_public_dict())
     check("inventory roundtrip exact", restored == item)
     check("serialized fields are complete", set(payload) == {
-        "id", "name", "quantity", "unit", "package_count", "storage",
+        "id", "name", "available", "quantity", "unit", "package_count", "storage",
         "expires_on", "comment", "created_at", "updated_at",
     })
 
@@ -1113,6 +1121,7 @@ def test_inventory_item_validation():
         ({"name": "   "}, "blank name"),
         ({"name": None}, "null name"),
         ({"name": "x" * 201}, "overlong name"),
+        ({"available": "yes"}, "non-boolean availability"),
         ({"quantity": "2"}, "quantity without unit"),
         ({"unit": "kg"}, "unit without quantity"),
         ({"quantity": True, "unit": "kg"}, "boolean quantity"),
@@ -1171,6 +1180,44 @@ def test_inventory_item_expiry_status():
             f"expiry {expires_on} -> {expected}",
             item.expiry_status(today=date(2026, 7, 14)) == expected,
         )
+
+
+def test_product_catalog_statuses_and_filters():
+    print("\n-- product catalog statuses and filters --")
+    catalog_mod = importlib.import_module(".src.product_catalog", _PLUGIN_DIR.name)
+    inventory_mod = importlib.import_module(".src.inventory", _PLUGIN_DIR.name)
+    stamp = "2026-07-14T01:15:00+00:00"
+    items = [
+        inventory_mod.InventoryItem(
+            id="inv_rice", name="рис", available=True,
+            created_at=stamp, updated_at=stamp,
+        ),
+        inventory_mod.InventoryItem(
+            id="inv_milk", name="молоко", available=False,
+            storage="fridge", created_at=stamp, updated_at=stamp,
+        ),
+    ]
+    dishes = [
+        Dish("каша", {"молоко": True, "томаты": False}),
+        Dish("салат", {"томаты": True}),
+    ]
+
+    rows = catalog_mod.build_product_catalog(items, dishes)
+    by_name = {row["name"]: row for row in rows}
+    check("current product is in_stock", by_name["рис"]["status"] == "in_stock")
+    check("removed product is out_of_stock", by_name["молоко"]["status"] == "out_of_stock")
+    check("recipe-only product is distinguished", by_name["томаты"]["status"] == "recipe_only")
+    check("recipe usage count is aggregated", by_name["томаты"]["recipe_count"] == 2)
+    filtered = catalog_mod.build_product_catalog(
+        items, dishes, status="recipe_only", query="ТОМ",
+    )
+    check("catalog status and query filters compose", [row["name"] for row in filtered] == ["томаты"])
+    for kwargs in ({"status": "missing"}, {"query": "x" * 201}):
+        try:
+            catalog_mod.build_product_catalog(items, dishes, **kwargs)
+            check("catalog rejects invalid filter", False)
+        except ValueError:
+            check("catalog rejects invalid filter", True)
 
 
 def main():
@@ -1251,6 +1298,7 @@ def main():
     test_inventory_item_roundtrip()
     test_inventory_item_validation()
     test_inventory_item_expiry_status()
+    test_product_catalog_statuses_and_filters()
 
     print("\n-- Phase 3 shopping/budget --")
     test_build_plan_shopping_list_aggregates_occurrences_and_prep()

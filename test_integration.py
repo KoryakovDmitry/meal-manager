@@ -284,8 +284,8 @@ def test_structured_fridge_repository_migrates_legacy_atomically():
 
         repo.save(["куриные голени", "паста", "масло"])
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("first mutation writes v2 envelope", persisted.get("schema_version") == 2)
-        check("v2 envelope contains all names", [x["name"] for x in persisted["items"]] == [
+        check("first mutation writes v3 envelope", persisted.get("schema_version") == 3)
+        check("v3 envelope contains all names", [x["name"] for x in persisted["items"]] == [
             "куриные голени", "паста", "масло",
         ])
         check("migrated ids survive first write", [x["id"] for x in persisted["items"][:2]] == [x.id for x in first])
@@ -366,6 +366,44 @@ def test_structured_repository_integrity_and_compatibility():
             for prefix in ("web", "agent") for number in range(20)
         ))
 
+        replenish_target = repo.add_item(name="replenish-race-target")
+        repo.remove_item(replenish_target.id)
+        remove_target = repo.add_item(name="remove-race-target")
+        catalog_start = ctx.Event()
+
+        def web_replenish_worker(data_path, item_id):
+            web_mod = importlib.import_module(f"{_PLUGIN_DIR.name}.web.main")
+            setattr(web_mod, "FRIDGE_PATH", Path(data_path))
+            catalog_start.wait()
+            web_mod.replenish_product(web_mod.ProductReplenish(
+                product_id=item_id, storage="pantry",
+            ))
+
+        def native_catalog_worker(data_path, item_id):
+            worker_repo = repo_mod.JsonFridgeRepository(Path(data_path))
+            catalog_start.wait()
+            worker_repo.add_item(name="native-race-unrelated")
+            worker_repo.remove_item(item_id)
+
+        catalog_processes = [
+            ctx.Process(target=web_replenish_worker, args=(path, replenish_target.id)),
+            ctx.Process(target=native_catalog_worker, args=(path, remove_target.id)),
+        ]
+        for process in catalog_processes:
+            process.start()
+        catalog_start.set()
+        for process in catalog_processes:
+            process.join(20)
+        catalog_by_id = {item.id: item for item in repo.load_catalog_items()}
+        check("web replenish and native add/remove complete cross-process", all(
+            process.exitcode == 0 for process in catalog_processes
+        ))
+        check("cross-process catalog transitions preserve every identity",
+              catalog_by_id[replenish_target.id].available and
+              not catalog_by_id[remove_target.id].available and
+              any(item.name == "native-race-unrelated" and item.available
+                  for item in catalog_by_id.values()))
+
         other_path = Path(tmp) / "other-fridge.json"
         with repo.lock:
             locked_items = repo.load_items()
@@ -389,6 +427,65 @@ def test_structured_repository_integrity_and_compatibility():
             check("unsupported schema version rejected", False)
         except ValueError:
             check("unsupported schema version rejected", True)
+
+        invalid_v2 = json.dumps({
+            "schema_version": 2,
+            "items": [{
+                "id": "inv_bad_v2",
+                "name": "hidden stock",
+                "quantity": None,
+                "unit": None,
+                "package_count": None,
+                "storage": None,
+                "expires_on": None,
+                "comment": None,
+                "created_at": "2026-07-14T01:00:00+00:00",
+                "updated_at": "2026-07-14T01:00:00+00:00",
+                "available": False,
+            }],
+        }, ensure_ascii=False).encode()
+        path.write_bytes(invalid_v2)
+        try:
+            repo.load_catalog_items()
+            check("v2 rejects v3-only availability", False)
+        except ValueError:
+            check("v2 rejects v3-only availability", True)
+        check("invalid v2 bytes remain untouched", path.read_bytes() == invalid_v2)
+
+
+def test_inventory_catalog_availability_lifecycle():
+    print("\n-- inventory catalog availability lifecycle --")
+    from tempfile import TemporaryDirectory
+
+    repo_mod = importlib.import_module(".src.repositories.json_fridge", _PLUGIN_DIR.name)
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "fridge.json"
+        repo = repo_mod.JsonFridgeRepository(path)
+        created = repo.add_item(
+            name="молоко",
+            quantity="2",
+            unit="l",
+            storage="fridge",
+            expires_on="2026-07-20",
+            comment="старая партия",
+        )
+
+        removed = repo.remove_item(created.id)
+        check("remove returns unavailable identity", removed.available is False)
+        check("removed product leaves current stock", repo.load() == [])
+        catalog = repo.load_catalog_items()
+        check("removed product remains in catalog", len(catalog) == 1 and catalog[0].id == created.id)
+        check("catalog marks removed product unavailable", catalog[0].available is False)
+
+        replenished = repo.add_item(
+            name="молоко", quantity="1", unit="l", storage="fridge"
+        )
+        check("replenish through add preserves stable id", replenished.id == created.id)
+        check("replenished product is current", replenished.available and repo.load() == ["молоко"])
+        check("replenish does not copy old expiry", replenished.expires_on is None)
+        check("replenish does not copy old comment", replenished.comment is None)
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        check("catalog lifecycle writes schema v3", persisted.get("schema_version") == 3)
 
 
 def test_structured_inventory_native_crud():
@@ -455,6 +552,63 @@ def test_structured_inventory_native_crud():
     check("structured remove disappears from reverse read", all(
         item.get("id") != item_id for item in parse(list_items({}))
     ))
+
+
+def test_product_catalog_native_tools():
+    print("\n-- product catalog native tools --")
+    try:
+        list_catalog = _load_handler("list_product_catalog")
+        replenish = _load_handler("replenish_product")
+        add_item = _load_handler("add_inventory_item")
+        remove_item = _load_handler("remove_inventory_item")
+    except ModuleNotFoundError:
+        check("product catalog native handlers exist", False)
+        return
+
+    add_dish({
+        "name": "catalog qa recipe",
+        "ingredients": {"catalog recipe only": True},
+    })
+    created = parse(add_item({
+        "name": "catalog stocked qa", "quantity": "2", "unit": "pcs",
+        "expires_on": "2026-07-20", "comment": "old batch",
+    }))
+    parse(remove_item({"item_id": created["id"]}))
+
+    out_rows = parse(list_catalog({
+        "status": "out_of_stock", "query": "STOCKED",
+    }))
+    check("native catalog filters out-of-stock products", [row["name"] for row in out_rows] == ["catalog stocked qa"])
+    check("native catalog preserves stocked identity", out_rows[0]["id"] == created["id"])
+    recipe_rows = parse(list_catalog({
+        "status": "recipe_only", "query": "recipe only",
+    }))
+    check("native catalog exposes recipe-only products", [row["name"] for row in recipe_rows] == ["catalog recipe only"])
+
+    restored = parse(replenish({
+        "product_id": created["id"], "quantity": "1", "unit": "pcs",
+    }))
+    check("native replenish preserves stable id", restored["id"] == created["id"])
+    check("native replenish clears old expiry and comment", restored["expires_on"] is None and restored["comment"] is None)
+    active_replenish = parse(replenish({"product_id": restored["id"]}))
+    check("native replenish rejects an already stocked product", "error" in active_replenish)
+    promoted = parse(replenish({"name": "catalog recipe only", "storage": "pantry"}))
+    check("native replenish promotes recipe-only product", promoted["name"] == "catalog recipe only")
+    check("native replenish updates current fridge", {
+        "catalog stocked qa", "catalog recipe only",
+    }.issubset(set(parse(list_fridge({})))))
+    check("native catalog rejects overlong search", "error" in parse(
+        list_catalog({"query": "x" * 201})
+    ))
+    raw_inventory = _repos_mod.fridge_repo.path.read_bytes()
+    try:
+        _repos_mod.fridge_repo.path.write_text("{broken", encoding="utf-8")
+        storage_error = parse(list_catalog({}))
+        check("catalog native storage errors are sanitized", storage_error == {
+            "error": "Inventory storage is temporarily unavailable"
+        })
+    finally:
+        _repos_mod.fridge_repo.path.write_bytes(raw_inventory)
 
 
 def test_update_fridge_add():
@@ -577,6 +731,9 @@ def test_register_cooked_meal():
           f"got: {result}")
     check("removes essentials from fridge",
           "arroz" not in parse(list_fridge({})) and "pollo" not in parse(list_fridge({})))
+    catalog = {item.name: item for item in _repos_mod.fridge_repo.load_catalog_items()}
+    check("cooking preserves consumed catalog identities",
+          all(name in catalog and not catalog[name].available for name in ("arroz", "pollo")))
 
 
 def test_register_cooked_meal_bogus():
@@ -703,6 +860,8 @@ def test_add_dishes_batch():
 def test_dii_finalize_rollback():
     print("\n-- DII: finalize rollback --")
     fridge_before = parse(list_fridge({}))
+    _repos_mod.fridge_repo.save(fridge_before)
+    catalog_before = [item.to_dict() for item in _repos_mod.fridge_repo.load_catalog_items()]
     state = parse(init_ingredient_session({
         "dish_name": "Rollback Test",
         "ingredients": ["harina"],
@@ -720,6 +879,9 @@ def test_dii_finalize_rollback():
         result = parse(finalize_ingredient_session({"session_id": sid}))
         check("returns error on dish failure", isinstance(result, dict) and "error" in result)
         check("fridge rolled back after failure", parse(list_fridge({})) == fridge_before)
+        check("catalog rolled back exactly after failure", [
+            item.to_dict() for item in _repos_mod.fridge_repo.load_catalog_items()
+        ] == catalog_before)
     finally:
         _repos_mod.dish_repo.save = original_save
         parse(finalize_ingredient_session({
@@ -731,11 +893,16 @@ def test_dii_finalize_rollback():
 
 def test_clear_fridge():
     print("\n-- clear_fridge --")
+    catalog_ids_before = {item.id for item in _repos_mod.fridge_repo.load_catalog_items()}
     result = parse(clear_fridge({}))
     check("success message", isinstance(result, str) and "cleared" in result.lower(), f"got: {result}")
 
     fridge = parse(list_fridge({}))
     check("fridge is empty", len(fridge) == 0, f"got {fridge}")
+    catalog_after = _repos_mod.fridge_repo.load_catalog_items()
+    check("clear preserves every catalog identity",
+          {item.id for item in catalog_after} == catalog_ids_before and
+          all(not item.available for item in catalog_after))
 
 
 def test_clear_fridge_already_empty():
@@ -1321,7 +1488,9 @@ def main():
         test_list_fridge()
         test_structured_fridge_repository_migrates_legacy_atomically()
         test_structured_repository_integrity_and_compatibility()
+        test_inventory_catalog_availability_lifecycle()
         test_structured_inventory_native_crud()
+        test_product_catalog_native_tools()
         test_update_fridge_add()
         test_update_fridge_add_duplicate()
         test_update_fridge_remove()

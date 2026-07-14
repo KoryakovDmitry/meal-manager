@@ -40,6 +40,7 @@ def commit(
     # rollback could otherwise clobber). No path acquires dish-before-fridge, so
     # nesting the dish lock inside the fridge lock introduces no lock cycle.
     with fridge_repo.lock:
+        catalog_before = fridge_repo.load_catalog_items()
         added_to_fridge: list[str] = []
         if commit_to_fridge and all_ingredients:
             fridge = fridge_repo.load()
@@ -72,9 +73,7 @@ def commit(
         except Exception:
             if added_to_fridge:
                 try:
-                    remove = set(added_to_fridge)
-                    fridge = fridge_repo.load()
-                    fridge_repo.save([ing for ing in fridge if ing not in remove])
+                    fridge_repo.save_items(catalog_before)
                 except Exception:
                     logger.exception("finalize_session fridge rollback failed")
             raise

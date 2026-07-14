@@ -32,8 +32,14 @@ sys.path.insert(0, str(PLUGIN_ROOT.parent))
 _inventory_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_fridge"
 )
+_dish_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.dish")
+_product_catalog_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.product_catalog"
+)
 JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
 InventoryDataError = _inventory_repository_module.InventoryDataError
+Dish = _dish_module.Dish
+build_product_catalog = _product_catalog_module.build_product_catalog
 logger = logging.getLogger(__name__)
 DATA_DIR = Path(__import__("os").environ.get("MEAL_DATA_DIR", PLUGIN_ROOT / "data"))
 DISHES_PATH = DATA_DIR / "dishes.json"
@@ -581,6 +587,19 @@ class InventoryItemPatch(BaseModel):
     class Config:
         extra = "forbid"
 
+class ProductReplenish(BaseModel):
+    product_id: str | None = Field(default=None, max_length=100)
+    name: str | None = Field(default=None, max_length=200)
+    quantity: Any = None
+    unit: str | None = None
+    package_count: StrictInt | None = None
+    storage: str | None = None
+    expires_on: str | None = None
+    comment: str | None = None
+
+    class Config:
+        extra = "forbid"
+
 class CookedMeal(BaseModel):
     dish: str
     date: str | None = None  # ISO date, defaults to today
@@ -702,6 +721,39 @@ def edit_inventory_item(item_id: str, payload: InventoryItemPatch):
 def remove_inventory_item(item_id: str):
     try:
         item = _fridge_repository().remove_item(item_id)
+        return {"item": item.to_public_dict()}
+    except (TypeError, ValueError, LookupError, OSError) as exc:
+        _inventory_error(exc)
+
+
+@app.get("/api/products")
+@_inventory_api_errors
+def list_product_catalog(status: str = "all", query: str | None = None):
+    dishes = []
+    for entry in load_dishes():
+        try:
+            dishes.append(Dish.from_dict(entry))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return {"items": build_product_catalog(
+        _fridge_repository().load_catalog_items(),
+        dishes,
+        status=status,
+        query=query,
+    )}
+
+
+@app.post("/api/products/replenish")
+def replenish_product(payload: ProductReplenish):
+    fields = _model_patch(payload)
+    product_id = fields.pop("product_id", None)
+    name = fields.pop("name", None)
+    try:
+        item = _fridge_repository().replenish_item(
+            item_id=product_id,
+            name=name,
+            **fields,
+        )
         return {"item": item.to_public_dict()}
     except (TypeError, ValueError, LookupError, OSError) as exc:
         _inventory_error(exc)
@@ -831,7 +883,7 @@ def add_history(payload: CookedMeal):
         inventory_before = None
         with repo.lock:
             if dish:
-                inventory_before = repo.load_items()
+                inventory_before = repo.load_catalog_items()
                 essentials_to_remove = {
                     ing for ing, ess in dish.get("ingredients", {}).items() if ess
                 }

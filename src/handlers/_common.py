@@ -11,6 +11,7 @@ from datetime import date
 
 from ..dish import Dish
 from ..repositories import history_repo
+from ..repositories.json_fridge import InventoryDataError
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,13 @@ def tool_handler(name: str):
                 return json.dumps(fn(args, **kwargs), ensure_ascii=False)
             except Exception as exc:
                 log.exception("%s failed", name)
-                return json.dumps({"error": str(exc)}, ensure_ascii=False)
+                if isinstance(exc, InventoryDataError):
+                    message = "Inventory storage is temporarily unavailable"
+                elif isinstance(exc, OSError):
+                    message = "Storage is temporarily unavailable"
+                else:
+                    message = str(exc)
+                return json.dumps({"error": message}, ensure_ascii=False)
 
         return runner
 

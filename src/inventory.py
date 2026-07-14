@@ -67,6 +67,7 @@ class InventoryItem:
     comment: str | None = None
     created_at: str = ""
     updated_at: str = ""
+    available: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -82,6 +83,9 @@ class InventoryItem:
             raise ValueError("name cannot be empty")
         if len(self.name) > MAX_NAME_LEN:
             raise ValueError(f"name too long (max {MAX_NAME_LEN} chars)")
+
+        if not isinstance(self.available, bool):
+            raise ValueError("available must be a boolean")
 
         if self.quantity is None:
             if self.unit is not None:
@@ -149,7 +153,9 @@ class InventoryItem:
         return "ok"
 
     def to_public_dict(self, *, today: date | None = None) -> dict:
-        return self.to_dict() | {"expiry_status": self.expiry_status(today=today)}
+        payload = self.to_dict()
+        payload.pop("available")
+        return payload | {"expiry_status": self.expiry_status(today=today)}
 
     @classmethod
     def from_dict(cls, data: dict) -> "InventoryItem":

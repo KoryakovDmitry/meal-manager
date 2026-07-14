@@ -381,7 +381,41 @@ def main():
             assert deleted_item["item"]["id"] == structured_id
             assert "молоко qa" not in web.load_fridge()
 
-            inventory_before_history_failure = web._fridge_repository().load_items()
+            catalog_rows = web.list_product_catalog(status="out_of_stock", query="МОЛОКО")["items"]
+            assert [row["name"] for row in catalog_rows] == ["молоко qa"]
+            assert catalog_rows[0]["id"] == structured_id
+            try:
+                web.list_product_catalog(status="all", query="x" * 201)
+                raise AssertionError("catalog accepted an overlong query")
+            except HTTPException as exc:
+                assert exc.status_code == 400
+            recipe_only = web.list_product_catalog(status="recipe_only", query="томаты")["items"]
+            assert [row["name"] for row in recipe_only] == ["томаты"]
+
+            restored_item = web.replenish_product(web.ProductReplenish(
+                product_id=structured_id,
+                quantity="1",
+                unit="l",
+                storage="fridge",
+            ))
+            assert restored_item["item"]["id"] == structured_id
+            assert restored_item["item"]["expires_on"] is None
+            assert restored_item["item"]["comment"] is None
+            assert "молоко qa" in web.load_fridge()
+            try:
+                web.replenish_product(web.ProductReplenish(product_id=structured_id))
+                raise AssertionError("replenishment accepted an already stocked product")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+            web.remove_inventory_item(structured_id)
+
+            promoted_item = web.replenish_product(web.ProductReplenish(
+                name="томаты", storage="pantry",
+            ))
+            assert promoted_item["item"]["name"] == "томаты"
+            web.remove_inventory_item(promoted_item["item"]["id"])
+
+            inventory_before_history_failure = web._fridge_repository().load_catalog_items()
             history_before_failure = web.load_history()
             original_save_history = web.save_history
             web.save_history = lambda _entries: (_ for _ in ()).throw(OSError("simulated history write failure"))
@@ -393,7 +427,7 @@ def main():
             finally:
                 web.save_history = original_save_history
             assert web.load_history() == history_before_failure
-            assert [item.to_dict() for item in web._fridge_repository().load_items()] == [
+            assert [item.to_dict() for item in web._fridge_repository().load_catalog_items()] == [
                 item.to_dict() for item in inventory_before_history_failure
             ]
 
@@ -457,6 +491,15 @@ def main():
         "/api/plans": {"GET"},
         "/api/plans/{week_id}": {"GET"},
     }
+    product_routes = {
+        route.path: route.methods
+        for route in web.app.routes
+        if route.path.startswith("/api/products")
+    }
+    assert product_routes == {
+        "/api/products": {"GET"},
+        "/api/products/replenish": {"POST"},
+    }
 
     html = (WEB_DIR / "static" / "index.html").read_text(encoding="utf-8")
     assert "function escapeHtml" in html
@@ -503,6 +546,15 @@ def main():
     assert "function startFridgeItemEdit" in html
     assert "function saveFridgeItemEdit" in html
     assert "function cancelFridgeItemEdit" in html
+    assert 'data-tab="products" data-title="Каталог продуктов"' in html
+    assert 'id="page-products"' in html
+    assert 'id="product-catalog-search"' in html
+    assert 'id="product-catalog-status"' in html
+    assert "function renderProductCatalog" in html
+    assert "function showReplenishProductModal" in html
+    assert "function saveReplenishedProduct" in html
+    assert "'/api/products/replenish', 'POST'" in html
+    assert "['каталог продуктов', '/api/products']" in html
     assert "'/api/fridge/item', 'PUT'" in html
     assert 'class="fridge-edit-input wide"' in html
     assert 'data-edit-action="save"' in html

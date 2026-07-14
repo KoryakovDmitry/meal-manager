@@ -11,6 +11,8 @@ provides_tools:
   - add_inventory_item
   - edit_inventory_item
   - remove_inventory_item
+  - list_product_catalog
+  - replenish_product
   - register_cooked_meal
   - delete_history_entry
   - list_fridge

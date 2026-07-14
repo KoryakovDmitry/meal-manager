@@ -243,6 +243,19 @@ body.sidebar-collapsed .sidebar-refresh { justify-content: center; }
 .fridge-edit-input { min-width: 0; flex: 1 1 240px; }
 .fridge-edit-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .fridge-edit-actions .btn { min-width: 44px; min-height: 44px; }
+.product-catalog-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr)); gap:10px; }
+.product-card { background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:14px; display:grid; gap:10px; min-width:0; }
+.product-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+.product-card-name { font-weight:600; overflow-wrap:anywhere; }
+.product-badge { border-radius:999px; padding:3px 8px; font-size:.72rem; white-space:nowrap; }
+.product-badge.in_stock { color:var(--green); background:rgba(68,207,142,.12); }
+.product-badge.out_of_stock { color:var(--orange); background:rgba(255,169,49,.12); }
+.product-badge.recipe_only { color:var(--text-muted); background:var(--bg-card); }
+.product-card-meta { color:var(--text-dim); font-size:.8rem; min-height:1.2em; }
+.product-card .btn { min-height:44px; justify-self:start; }
+.catalog-filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+.catalog-filters input { flex:1 1 220px; }
+.catalog-filters select { flex:0 1 220px; }
 
 /* ─── Forms ─── */
 .form-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -439,6 +452,7 @@ textarea { resize: vertical; min-height: 60px; }
       <button class="tab active" data-tab="overview" data-title="Обзор" aria-current="page" title="Обзор"><span class="tab-icon">▦</span><span class="tab-label">Обзор</span></button>
       <button class="tab" data-tab="dishes" data-title="Рецепты" title="Рецепты"><span class="tab-icon">◉</span><span class="tab-label">Рецепты</span></button>
       <button class="tab" data-tab="fridge" data-title="Холодильник" title="Холодильник"><span class="tab-icon">❄</span><span class="tab-label">Холодильник</span></button>
+      <button class="tab" data-tab="products" data-title="Каталог продуктов" title="Каталог продуктов"><span class="tab-icon">▦</span><span class="tab-label">Каталог продуктов</span></button>
       <button class="tab" data-tab="suggestions" data-title="Рекомендации" title="Рекомендации"><span class="tab-icon">✦</span><span class="tab-label">Рекомендации</span></button>
       <button class="tab" data-tab="shopping" data-title="Покупки" title="Покупки"><span class="tab-icon">⌑</span><span class="tab-label">Покупки</span></button>
       <button class="tab" data-tab="plans" data-title="Планы" title="Планы"><span class="tab-icon">▣</span><span class="tab-label">Планы</span></button>
@@ -521,6 +535,26 @@ textarea { resize: vertical; min-height: 60px; }
     </div>
   </div>
 
+  <!-- ═══ Product catalog ═══ -->
+  <div class="page" id="page-products">
+    <div class="card">
+      <div class="section-title">▦ Каталог продуктов</div>
+      <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:12px">Все продукты: текущий запас, закончившиеся позиции и ингредиенты только из рецептов.</p>
+      <div class="catalog-filters">
+        <label class="sr-only" for="product-catalog-search">Поиск продукта</label>
+        <input type="search" id="product-catalog-search" maxlength="200" placeholder="🔍 Поиск продукта..." oninput="renderProductCatalog()">
+        <label class="sr-only" for="product-catalog-status">Статус продукта</label>
+        <select id="product-catalog-status" onchange="renderProductCatalog()">
+          <option value="all">Все</option>
+          <option value="in_stock">Сейчас в запасе</option>
+          <option value="out_of_stock">Нет в запасе</option>
+          <option value="recipe_only">Только в рецептах</option>
+        </select>
+      </div>
+      <div id="product-catalog-container" class="product-catalog-grid"><div class="loading">Загрузка...</div></div>
+    </div>
+  </div>
+
   <!-- ═══ Suggestions ═══ -->
   <div class="page" id="page-suggestions">
     <div id="suggestions-container">
@@ -569,7 +603,7 @@ textarea { resize: vertical; min-height: 60px; }
 
 <script>
 const API = '';
-let CACHE = { dishes: [], fridge: [], inventory: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, stats: {} };
+let CACHE = { dishes: [], fridge: [], inventory: [], products: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, stats: {} };
 let editingFridgeItem = null;
 let fridgeEditSaving = false;
 
@@ -606,6 +640,7 @@ const pageSubtitles = {
   overview: 'Состояние кухни и быстрые сигналы',
   dishes: 'Каталог блюд и ингредиентов',
   fridge: 'Продукты, которые сейчас под рукой',
+  products: 'В наличии, закончились или известны только из рецептов',
   suggestions: 'Что можно приготовить из имеющегося',
   shopping: 'Быстрые покупки, открывающие новые блюда',
   plans: 'Недельные планы, покупки и бюджет',
@@ -744,6 +779,7 @@ document.addEventListener('keydown', event => {
 async function refreshAll() {
   const requests = [
     ['рецепты', '/api/dishes'], ['кухонный запас', '/api/inventory/items'],
+    ['каталог продуктов', '/api/products'],
     ['рекомендации', '/api/suggestions'], ['покупки', '/api/shopping'],
     ['историю', '/api/history'], ['планы', '/api/plans'], ['статистику', '/api/stats'],
   ];
@@ -759,17 +795,18 @@ async function refreshAll() {
       CACHE.inventory = value.items || [];
       CACHE.fridge = CACHE.inventory.map(item => item.name);
     }
-    if (index === 2) CACHE.suggestions = value.suggestions || [];
-    if (index === 3) CACHE.shopping = value.items || [];
-    if (index === 4) CACHE.history = value.history || [];
-    if (index === 5) CACHE.plans = value.plans || [];
-    if (index === 6) CACHE.stats = value;
+    if (index === 2) CACHE.products = value.items || [];
+    if (index === 3) CACHE.suggestions = value.suggestions || [];
+    if (index === 4) CACHE.shopping = value.items || [];
+    if (index === 5) CACHE.history = value.history || [];
+    if (index === 6) CACHE.plans = value.plans || [];
+    if (index === 7) CACHE.stats = value;
   });
   renderAll();
 }
 
 function renderAll() {
-  renderStats(); renderDishes(); renderFridge(); renderSuggestions(); renderShopping(); renderPlans(); renderHistory();
+  renderStats(); renderDishes(); renderFridge(); renderProductCatalog(); renderSuggestions(); renderShopping(); renderPlans(); renderHistory();
 }
 
 function escapeHtml(value) {
@@ -1031,6 +1068,120 @@ function closeModal() {
   modalReturnFocus = null;
   if (returnFocus?.isConnected) returnFocus.focus();
   else document.getElementById('dish-search')?.focus();
+}
+
+// ─── Product catalog ───
+const PRODUCT_STATUS_LABELS = {in_stock:'В запасе', out_of_stock:'Закончился', recipe_only:'Только в рецепте'};
+function renderProductCatalog() {
+  const container = document.getElementById('product-catalog-container');
+  if (!container) return;
+  const query = (document.getElementById('product-catalog-search')?.value || '').trim().toLowerCase();
+  const status = document.getElementById('product-catalog-status')?.value || 'all';
+  const rows = CACHE.products.filter(row =>
+    (status === 'all' || row.status === status) && (!query || row.name.includes(query))
+  );
+  if (!rows.length) {
+    container.innerHTML = '<p style="color:var(--text-dim)">Продукты не найдены</p>';
+    return;
+  }
+  container.innerHTML = rows.map(row => {
+    const productIndex = CACHE.products.indexOf(row);
+    const safeName = escapeHtml(row.name);
+    const label = PRODUCT_STATUS_LABELS[row.status] || row.status;
+    const recipeMeta = row.recipe_count ? `В рецептах: ${Number(row.recipe_count)}` : 'Не используется в рецептах';
+    const storageMeta = row.storage ? ` · ${escapeHtml(INVENTORY_STORAGE[row.storage] || row.storage)}` : '';
+    const action = row.status === 'in_stock' ? 'edit' : 'replenish';
+    const actionLabel = row.status === 'in_stock' ? 'Изменить запас' : (row.status === 'out_of_stock' ? 'Восполнить' : 'Добавить в запас');
+    return `<article class="product-card">
+      <div class="product-card-head">
+        <span class="product-card-name">${safeName}</span>
+        <span class="product-badge ${escapeHtml(row.status)}">${escapeHtml(label)}</span>
+      </div>
+      <div class="product-card-meta">${escapeHtml(recipeMeta)}${storageMeta}</div>
+      <button class="btn btn-ghost btn-sm" type="button" data-action="${action}" data-value="${productIndex}" aria-label="${escapeHtml(actionLabel)}: ${safeName}">${escapeHtml(actionLabel)}</button>
+    </article>`;
+  }).join('');
+  bindDataActions(container, {
+    replenish: value => showReplenishProductModal(Number(value)),
+    edit: value => editCatalogStock(Number(value)),
+  });
+}
+
+function editCatalogStock(index) {
+  const row = CACHE.products[index];
+  if (!row?.id) return;
+  const record = CACHE.inventory.find(item => item.id === row.id);
+  if (!record) return;
+  selectTab(document.querySelector('.tab[data-tab="fridge"]'));
+  startFridgeItemEdit(record.name);
+}
+
+function showReplenishProductModal(index) {
+  const row = CACHE.products[index];
+  if (!row || row.status === 'in_stock') return;
+  const container = document.getElementById('modal-container');
+  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.querySelector('.app').setAttribute('inert', '');
+  const safeName = escapeHtml(row.name);
+  container.innerHTML = `<div class="modal-bg">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="replenish-modal-title">
+      <h2 id="replenish-modal-title">${row.status === 'out_of_stock' ? 'Восполнить' : 'Добавить в запас'}: ${safeName}</h2>
+      <p style="color:var(--text-dim);font-size:.85rem;margin-bottom:12px">Подтвердите данные новой текущей партии. Старые срок годности и комментарий не переносятся.</p>
+      <div class="inventory-edit-grid">
+        <label>Количество<input type="number" id="replenish-quantity" min="0" step="any" value="${escapeHtml(row.quantity || '')}"></label>
+        <label>Единица<select id="replenish-unit">${selectOptions(INVENTORY_UNITS, row.quantity ? row.unit : null)}</select></label>
+        <label>Упаковок<input type="number" id="replenish-packages" min="1" step="1" value="${escapeHtml(row.package_count || '')}"></label>
+        <label>Место хранения<select id="replenish-storage">${selectOptions(Object.keys(INVENTORY_STORAGE), row.storage, INVENTORY_STORAGE)}</select></label>
+        <label>Годен до<input type="date" id="replenish-expiry" value=""></label>
+        <label class="wide">Комментарий<input type="text" id="replenish-comment" maxlength="1000" value=""></label>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
+        <button class="btn btn-primary" type="button" data-modal-action="save">Добавить в запас</button>
+        <button class="btn btn-ghost" type="button" data-modal-action="cancel">Отмена</button>
+      </div>
+    </div>
+  </div>`;
+  const backdrop = container.querySelector('.modal-bg');
+  const dialog = container.querySelector('[role="dialog"]');
+  backdrop.addEventListener('click', event => { if (event.target === backdrop) closeModal(); });
+  dialog.addEventListener('keydown', trapModalFocus);
+  dialog.querySelector('[data-modal-action="save"]').addEventListener('click', () => saveReplenishedProduct(index));
+  dialog.querySelector('[data-modal-action="cancel"]').addEventListener('click', closeModal);
+  document.getElementById('replenish-quantity').focus();
+}
+
+async function saveReplenishedProduct(index) {
+  const row = CACHE.products[index];
+  if (!row) return;
+  const saveButton = document.querySelector('[data-modal-action="save"]');
+  const quantity = document.getElementById('replenish-quantity').value.trim();
+  const unit = document.getElementById('replenish-unit').value || null;
+  if (quantity && !unit) {
+    toast('Для количества выберите единицу', true);
+    document.getElementById('replenish-unit').focus();
+    return;
+  }
+  const body = row.id ? {product_id: row.id} : {name: row.name};
+  if (quantity) { body.quantity = quantity; body.unit = unit; }
+  const packages = document.getElementById('replenish-packages').value;
+  if (packages) body.package_count = Number(packages);
+  const storage = document.getElementById('replenish-storage').value;
+  if (storage) body.storage = storage;
+  const expiry = document.getElementById('replenish-expiry').value;
+  if (expiry) body.expires_on = expiry;
+  const comment = document.getElementById('replenish-comment').value.trim();
+  if (comment) body.comment = comment;
+  saveButton.disabled = true;
+  try {
+    await api('/api/products/replenish', 'POST', body);
+    closeModal();
+    toast(`${row.name} добавлен в запас`);
+    await refreshAll();
+  } catch (error) {
+    toast(error.message, true);
+    saveButton.disabled = false;
+    document.getElementById('replenish-quantity').focus();
+  }
 }
 
 // ─── Fridge ───

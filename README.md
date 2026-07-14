@@ -80,9 +80,9 @@ The result is a system that offers the user the freedom of conversation while gu
 
 No build step, dependency installation, or configuration is needed. Data files under `data/` are created lazily by the tools when first needed.
 
-### Upgrading a live legacy inventory to schema v2
+### Upgrading a live inventory to schema v3
 
-The first inventory mutation after this release converts the legacy string array to the structured `schema_version: 2` envelope. This is a **coordinated deployment**, not a rolling upgrade: back up `fridge.json`, stop every old agent/Web writer, deploy and restart both Hermes and `meal-web`, verify the name projection and unique IDs, and only then resume mutations. An old process must never write after the first v2 mutation because it neither understands the envelope nor participates in the POSIX `flock` protocol. The repository therefore targets the Linux/POSIX deployment used by this plugin.
+The first inventory mutation after this release converts a legacy string array or `schema_version: 2` inventory to the `schema_version: 3` envelope. Version 3 keeps product identities after stock is consumed or removed by setting `available: false`; existing fridge and structured-inventory projections still expose only current `available: true` records. This is a **coordinated deployment**, not a rolling upgrade: back up `fridge.json`, stop every old agent/Web writer, deploy and restart both Hermes and `meal-web`, verify the current-stock projection, stable IDs, and catalog states, and only then resume mutations. An old process must never write after the first v3 mutation because it does not understand soft availability. The repository targets the Linux/POSIX deployment used by this plugin and continues to use one cross-process lock plus atomic replacement for the complete envelope.
 
 ---
 
@@ -149,8 +149,10 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `list_inventory_items` | Returns complete structured inventory records and expiry status |
 | `add_inventory_item` | Adds a structured item with quantity, storage, expiry, and comment |
 | `edit_inventory_item` | Patches a structured item by stable ID without losing omitted metadata |
-| `remove_inventory_item` | Removes exactly one structured item by stable ID |
-| `register_cooked_meal` | Logs a dish as cooked today and removes its essential ingredients |
+| `remove_inventory_item` | Removes exactly one current structured item by stable ID while retaining its catalog identity |
+| `list_product_catalog` | Lists/searches all products by stock state, including recipe-only ingredients |
+| `replenish_product` | Returns an out-of-stock or recipe-only product to current inventory as a fresh batch |
+| `register_cooked_meal` | Logs a dish as cooked today and removes its essential ingredients from current stock while retaining catalog identities |
 | `delete_history_entry` | Undo for `register_cooked_meal` — removes a dish from history |
 | `list_fridge` | Returns the current fridge contents |
 | `add_dish` | Adds a new recipe to the catalog |
