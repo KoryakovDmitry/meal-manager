@@ -247,6 +247,18 @@
 
 ## 🧭 DISCOVERY
 
+### INV-3 — Web ↔ agent state synchronization and conflict detection 🧭
+
+**Статус:** углублённый research завершён; реализация не начата.
+
+**Рекомендация.** Не создавать cron-задачу на каждое Web-изменение. Plugin-only v1 должен использовать канонический state vector, `pre_llm_call` для тихого next-turn notice в существующей Meal Planning session, отдельный sync tool, `pre_tool_call` freshness fence и Web optimistic concurrency с HTTP `409`. Cron/webhook/direct Telegram годятся только для optional human notification/watchdog: они запускают отдельные sessions и не актуализируют текущий агентный контекст.
+
+**Граница.** Следующий turn и pre-mutation freshness можно сделать внутри `meal_manager`. Настоящий mid-turn steer потребует общего Hermes gateway/session-event API; plugin не должен обращаться к private GatewayRunner/AIAgent state.
+
+**Scope.** Итоговый контракт должен покрыть все mutable Web routes: inventory/catalog, legacy fridge compatibility, dishes и cooking history. Weekly plans пока read-only. Research также обнаружил prerequisite: Web и native сейчас используют несовместимые форматы history, а dish/history locks остаются process-local; до awareness эти домены нужно свести к общим repository/schema и cross-process locking.
+
+Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
+
 ### Receipt ingestion and price history
 
 **Зачем.** Уйти от ручной explicit price map к реальным люксембургским ценам и видеть динамику бюджета.
@@ -268,16 +280,6 @@
 ---
 
 ## 📋 BACKLOG
-
-### INV-3 — Web ↔ agent inventory synchronization and conflict detection 🧊
-
-**Приоритет:** super low / дальний ящик. Автоматическую синхронизацию сейчас не разрабатываем.
-
-**Временный рабочий процесс:** после ручного изменения кухонного запаса через Web Дима или Илиана прямо пишут Hermes, что именно изменилось. Перед важным планированием Hermes может заново прочитать актуальный запас нативным инструментом. Существующие `flock` и dirty-field PATCH продолжают защищать storage и несвязанные поля.
-
-**Когда вернуться:** только если ручное уведомление начнёт регулярно забываться, появятся реальные same-field коллизии или Web станет основным способом ведения запаса.
-
-Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
 
 - [ ] Luxembourg seasonality auto-hints и market availability.
 - [ ] Prep-day workflow и aggregated weekend batch plan.
