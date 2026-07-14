@@ -3,9 +3,10 @@
 import logging
 from pathlib import Path
 
+from .src.awareness import CONFIG_FILENAME, build_pre_llm_hook
 from .src.dii import configure as _configure_dii
 from .src.handlers import iter_tools
-from .src.repositories import configure as _configure_repos
+from .src.repositories import configure as _configure_repos, fridge_repo
 
 # Library convention: install a NullHandler on the package root so callers
 # without logging configured don't see "No handlers could be found" warnings.
@@ -44,6 +45,14 @@ def register(ctx, *, data_dir: Path | str | None = None):
         data_dir = Path(data_dir)
         _configure_repos(data_dir)
         _configure_dii(data_dir / "sessions")
+
+    awareness_root = (
+        Path(data_dir) if data_dir is not None else Path(__file__).parent / "data"
+    )
+    ctx.register_hook(
+        "pre_llm_call",
+        build_pre_llm_hook(fridge_repo, awareness_root / CONFIG_FILENAME),
+    )
 
     for name, schema, handler in iter_tools():
         ctx.register_tool(

@@ -1,9 +1,9 @@
 # INV-3 — Web ↔ agent state synchronization and conflict detection
 
-**Status:** 🧭 Discovery — research updated; implementation not started
+**Status:** 🔨 Doing — stable inventory slice implemented; release verification in progress
 **Requested by:** Dima and Iliana
 **Source:** Meal Planning Development, after INV-2/INV-4 made Web and native tools independent mutation surfaces
-**Last research update:** 2026-07-14
+**Last implementation update:** 2026-07-14
 
 ## Decision snapshot
 
@@ -22,6 +22,65 @@ A true proactive mid-turn steer requires a generic Hermes gateway/session-event 
 
 Cron remains useful only as an optional watchdog or human-notification fallback. It is not the synchronization primitive.
 
+## Stable inventory slice implemented on 2026-07-14
+
+The first production slice deliberately chooses a simpler contract than the full
+cursor/diff design. For the exact configured Meal Planning topic, `pre_llm_call`
+reads the canonical inventory repository under its cross-process lock and injects
+only authoritative token/count metadata on **every** turn. Product names, comments,
+and other free text are excluded from the user-message hook; inventory-dependent
+reasoning must call `sync_meal_manager_state`. This removes cursor durability,
+acknowledgement, debounce, missed-event, and automatic prompt-injection failure modes.
+
+Implemented:
+
+- deterministic SHA-256 token over all persisted inventory identities, including
+  unavailable identities and metadata;
+- metadata-only hook projection with all product names/comments excluded;
+- strict local `(platform, chat_id, thread_id)` allowlist; missing or malformed
+  configuration fails closed and cannot inject into another topic;
+- mandatory getter requirement before every inventory-dependent answer/action,
+  including storage-failure and overflow paths;
+- `sync_meal_manager_state` for an authoritative full structured inventory read;
+- strictly monotonic per-entity `updated_at` plus under-lock Web PATCH/DELETE
+  preconditions, including repeated/backward wall-clock values;
+- HTTP `409 inventory_conflict` responses containing the current record, with Web
+  UX that preserves unsent form values instead of retrying or silently overwriting.
+
+This slice covers current inventory and persisted in-stock/out-of-stock inventory
+identities. It does **not** claim recipe-only product rows derived from dishes,
+dishes, cooking history, proactive/mid-turn notification, or guarded native
+mutations. Those remain explicit later phases; DATA-1 is still the prerequisite for
+dishes/history. The implementation does not use cron, webhook sessions, private
+Gateway state, or internal `AIAgent.steer()`.
+
+The deployment allowlist lives in ignored local state at
+`data/awareness_targets.json`, not in Git:
+
+```json
+{
+  "schema_version": 1,
+  "targets": [
+    {"platform": "telegram", "chat_id": "<chat-id>", "thread_id": "<topic-id>"}
+  ]
+}
+```
+
+This file is read on each turn, so target corrections do not require code changes;
+malformed, oversized, missing, or non-matching configuration produces no injection.
+
+### Pre-release verification
+
+- unit suite: 238 passed;
+- integration suite: 265 passed, including repeated/backward-clock OCC and
+  concurrent real Gateway `ContextVar` topic isolation;
+- Web API/plans and Chromium accessibility/XSS/conflict suites: passed;
+- `compileall`, manifest parity, `git diff --check`, tracked-diff secret scan,
+  and real `PluginManager` exact/off-target smoke: passed;
+- initial independent review blockers were reproduced and corrected: monotonic
+  entity versions, metadata-only hook context, honest inventory-only sync scope,
+  comment omission, concurrent target isolation, and deleted-record conflict UX.
+
 ## User problem
 
 The Web UI and Hermes/native tools mutate the same household state from independent processes. File locking protects JSON integrity, but it does not guarantee that the conversational agent knows that state changed after an earlier read.
@@ -39,7 +98,7 @@ The product must distinguish four guarantees:
 
 INV-3 can provide 1–3 plugin-only. Guarantee 4 is a separate Hermes-core decision.
 
-## Current verified behavior
+## Baseline behavior before this implementation
 
 Already present:
 
@@ -189,8 +248,9 @@ For a good user/agent summary, compute or retain a bounded diff containing only:
 Rules:
 
 - correctness falls back to `full_refresh_required` when the old snapshot/diff is unavailable;
-- comments and other free-text values are not copied into the hook notice;
-- names are bounded, escaped, and explicitly labelled untrusted data, never instructions;
+- comments, names, and all other free-text inventory values are excluded from the
+  hook notice; names are returned only by the explicit sync tool and labelled
+  untrusted data, never instructions;
 - multiple changes to the same entity are coalesced by `(domain, entity_id)` with a union of changed fields;
 - summaries have a hard item/character limit and an overflow count;
 - provenance is advisory: without Web authentication, `source=web` is reliable but household actor identity is not.
@@ -320,22 +380,25 @@ Research was verified against the current installed Hermes source and the live d
 
 The live Hermes docs at `https://hermes-agent.nousresearch.com/docs` were reachable during research; local checked-out docs/source were used for exact line-level verification.
 
-## Implementation sequencing (not started)
+## Implementation sequencing
 
 ### Phase A — synchronization substrate
 
-- canonical state-vector builder and stable snapshot locking;
-- plugin-private bounded snapshot/cursor storage;
-- `pre_llm_call`, `post_llm_call`, `pre_tool_call`, and `post_tool_call` registration;
-- `sync_meal_manager_state` native tool;
-- configured Meal Planning target allowlist;
-- prompt-injection and overflow protections.
+- [x] canonical inventory token and stable snapshot locking;
+- [x] bounded authoritative metadata on every configured turn; no free-text records
+  or cursor storage in the stable first slice;
+- [x] exact-target `pre_llm_call` registration;
+- [x] `sync_meal_manager_state` native tool;
+- [x] configured Meal Planning target allowlist;
+- [x] prompt-injection and overflow protections;
+- [ ] add other lifecycle hooks only when a later phase has a concrete need; do not
+  register speculative `post_llm_call`/`post_tool_call` callbacks.
 
 ### Phase B — inventory/catalog conflict safety
 
-- `expected_updated_at` for Web structured edit/delete;
-- current-record conflict response and accessible HTTP `409` UX;
-- guarded inventory/catalog native mutations;
+- [x] `expected_updated_at` for Web structured edit/delete;
+- [x] current-record conflict response and accessible HTTP `409` UX;
+- [ ] guarded inventory native mutations;
 - legacy fridge routes mapped to the same change model.
 
 ### Phase C — all remaining mutable Web routes
@@ -360,6 +423,23 @@ The live Hermes docs at `https://hermes-agent.nousresearch.com/docs` were reacha
 Only if real use demonstrates that next-turn synchronization and mutation fences are insufficient.
 
 ## Acceptance criteria
+
+### Implemented inventory-slice criteria
+
+- [x] Exact configured Meal Planning topic receives authoritative token/count metadata
+  at every turn boundary; off-target topic gets nothing, including under concurrent
+  real Gateway `ContextVar` contexts.
+- [x] Hook context excludes every free-text inventory field; inventory-dependent
+  reasoning and overflow/storage failures require `sync_meal_manager_state`, whose
+  comments are also omitted.
+- [x] Web structured PATCH/DELETE rejects stale `updated_at` under the repository
+  write lock with byte-for-byte no-write behavior and a current-record `409`.
+- [x] Conflict UI preserves unsent fields, handles a concurrent rename by stable ID,
+  never auto-retries, and passes browser accessibility/XSS/focus checks.
+- [x] Successful Web inventory actions state the exact next-turn guarantee without
+  claiming proactive or mid-turn delivery.
+
+The criteria below remain the completion bar for the full multi-domain INV-3.
 
 ### Awareness
 

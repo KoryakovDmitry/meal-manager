@@ -4,7 +4,7 @@ import fcntl
 import json
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import atomic_write_json
@@ -18,6 +18,16 @@ _MIGRATION_NAMESPACE = uuid.UUID("72c45a1a-73c7-4e07-84dd-e20b6e342f95")
 
 class InventoryDataError(ValueError):
     """Persisted inventory is corrupt or uses an unsupported schema."""
+
+
+class InventoryConflictError(ValueError):
+    """A stale caller tried to mutate a newer inventory record."""
+
+    def __init__(self, current_item: InventoryItem) -> None:
+        self.current_item = current_item
+        super().__init__(
+            f"Inventory item '{current_item.name}' changed after it was loaded"
+        )
 
 
 class _InventoryFileLock:
@@ -78,6 +88,29 @@ class JsonFridgeRepository:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _next_updated_at(self, current: InventoryItem) -> str:
+        """Return a version timestamp strictly newer than ``current``."""
+        candidate = datetime.fromisoformat(self._now())
+        previous = datetime.fromisoformat(current.updated_at)
+        if candidate <= previous:
+            candidate = previous + timedelta(microseconds=1)
+        return candidate.isoformat()
+
+    @staticmethod
+    def _check_expected_updated_at(
+        current: InventoryItem,
+        expected_updated_at: str | None,
+    ) -> None:
+        if expected_updated_at is None:
+            return
+        if (
+            not isinstance(expected_updated_at, str)
+            or not expected_updated_at.strip()
+        ):
+            raise ValueError("expected_updated_at must be a non-empty string")
+        if current.updated_at != expected_updated_at.strip():
+            raise InventoryConflictError(current)
 
     def _legacy_timestamp(self) -> str:
         return self._now()
@@ -220,7 +253,7 @@ class JsonFridgeRepository:
     ) -> InventoryItem:
         values = item.to_dict()
         values["available"] = available
-        values["updated_at"] = self._now()
+        values["updated_at"] = self._next_updated_at(item)
         return InventoryItem.from_dict(values)
 
     def _replenished(self, item: InventoryItem, fields: dict) -> InventoryItem:
@@ -242,7 +275,7 @@ class JsonFridgeRepository:
             "storage": fields.get("storage", item.storage),
             "expires_on": fields.get("expires_on"),
             "comment": fields.get("comment"),
-            "updated_at": self._now(),
+            "updated_at": self._next_updated_at(item),
         })
         return InventoryItem.from_dict(values)
 
@@ -353,7 +386,13 @@ class JsonFridgeRepository:
             self._save_items_unlocked(items)
             return replenished
 
-    def edit_item(self, item_id: str, patch: dict) -> InventoryItem:
+    def edit_item(
+        self,
+        item_id: str,
+        patch: dict,
+        *,
+        expected_updated_at: str | None = None,
+    ) -> InventoryItem:
         if not isinstance(item_id, str) or not item_id.strip():
             raise ValueError("item_id cannot be empty")
         if not isinstance(patch, dict) or not patch:
@@ -372,13 +411,18 @@ class JsonFridgeRepository:
             items = self.load_catalog_items()
             index = next((
                 i for i, item in enumerate(items)
-                if item.id == item_id.strip() and item.available
+                if item.id == item_id.strip()
             ), None)
             if index is None:
                 raise LookupError(
                     f"Inventory item '{item_id.strip()}' not found"
                 )
             current = items[index]
+            self._check_expected_updated_at(current, expected_updated_at)
+            if not current.available:
+                raise LookupError(
+                    f"Inventory item '{item_id.strip()}' not found"
+                )
             values = current.to_dict()
             values.update(patch)
             if patch.get("quantity", object()) is None and "unit" not in patch:
@@ -398,26 +442,37 @@ class JsonFridgeRepository:
                 )
             if candidate.to_dict() == current.to_dict():
                 return current
-            candidate.updated_at = self._now()
+            candidate.updated_at = self._next_updated_at(current)
             candidate = InventoryItem.from_dict(candidate.to_dict())
             items[index] = candidate
             self._save_items_unlocked(items)
             return candidate
 
-    def remove_item(self, item_id: str) -> InventoryItem:
+    def remove_item(
+        self,
+        item_id: str,
+        *,
+        expected_updated_at: str | None = None,
+    ) -> InventoryItem:
         if not isinstance(item_id, str) or not item_id.strip():
             raise ValueError("item_id cannot be empty")
         with self.lock:
             items = self.load_catalog_items()
             index = next((
                 i for i, item in enumerate(items)
-                if item.id == item_id.strip() and item.available
+                if item.id == item_id.strip()
             ), None)
             if index is None:
                 raise LookupError(
                     f"Inventory item '{item_id.strip()}' not found"
                 )
-            removed = self._with_availability(items[index], False)
+            current = items[index]
+            self._check_expected_updated_at(current, expected_updated_at)
+            if not current.available:
+                raise LookupError(
+                    f"Inventory item '{item_id.strip()}' not found"
+                )
+            removed = self._with_availability(current, False)
             items[index] = removed
             self._save_items_unlocked(items)
             return removed

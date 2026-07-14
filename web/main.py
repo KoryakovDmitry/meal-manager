@@ -38,6 +38,7 @@ _product_catalog_module = importlib.import_module(
 )
 JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
 InventoryDataError = _inventory_repository_module.InventoryDataError
+InventoryConflictError = _inventory_repository_module.InventoryConflictError
 Dish = _dish_module.Dish
 build_product_catalog = _product_catalog_module.build_product_catalog
 logger = logging.getLogger(__name__)
@@ -576,6 +577,7 @@ class InventoryItemCreate(BaseModel):
         extra = "forbid"
 
 class InventoryItemPatch(BaseModel):
+    expected_updated_at: str = Field(min_length=1, max_length=100)
     name: str | None = Field(default=None, max_length=200)
     quantity: Any = None
     unit: str | None = None
@@ -656,6 +658,15 @@ def _model_patch(payload: BaseModel) -> dict:
 
 
 def _inventory_error(exc: Exception):
+    if isinstance(exc, InventoryConflictError):
+        current_item = getattr(exc, "current_item")
+        current_payload = current_item.to_public_dict()
+        current_payload["available"] = current_item.available
+        raise HTTPException(409, {
+            "code": "inventory_conflict",
+            "message": str(exc),
+            "current_item": current_payload,
+        }) from exc
     if isinstance(exc, (InventoryDataError, OSError)):
         logger.error("Inventory storage failure", exc_info=exc)
         raise HTTPException(503, "Inventory storage is temporarily unavailable") from exc
@@ -711,16 +722,25 @@ def add_inventory_item(payload: InventoryItemCreate):
 @app.patch("/api/inventory/items/{item_id}")
 def edit_inventory_item(item_id: str, payload: InventoryItemPatch):
     try:
-        item = _fridge_repository().edit_item(item_id, _model_patch(payload))
+        fields = _model_patch(payload)
+        expected_updated_at = fields.pop("expected_updated_at")
+        item = _fridge_repository().edit_item(
+            item_id,
+            fields,
+            expected_updated_at=expected_updated_at,
+        )
         return {"item": item.to_public_dict()}
     except (TypeError, ValueError, LookupError, OSError) as exc:
         _inventory_error(exc)
 
 
 @app.delete("/api/inventory/items/{item_id}")
-def remove_inventory_item(item_id: str):
+def remove_inventory_item(item_id: str, expected_updated_at: str):
     try:
-        item = _fridge_repository().remove_item(item_id)
+        item = _fridge_repository().remove_item(
+            item_id,
+            expected_updated_at=expected_updated_at,
+        )
         return {"item": item.to_public_dict()}
     except (TypeError, ValueError, LookupError, OSError) as exc:
         _inventory_error(exc)

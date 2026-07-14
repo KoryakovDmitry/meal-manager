@@ -351,6 +351,7 @@ def main():
             except AttributeError as exc:
                 raise AssertionError("structured inventory web API is missing") from exc
             structured_id = created_item["item"]["id"]
+            structured_version = created_item["item"]["updated_at"]
             assert created_item["item"]["quantity"] == "2"
             assert any(
                 item["id"] == structured_id
@@ -358,10 +359,33 @@ def main():
             )
             updated_item = web.edit_inventory_item(
                 structured_id,
-                web.InventoryItemPatch(comment=None, quantity="1.5", unit="l"),
+                web.InventoryItemPatch(
+                    comment=None,
+                    quantity="1.5",
+                    unit="l",
+                    expected_updated_at=structured_version,
+                ),
             )
             assert updated_item["item"]["comment"] is None
             assert updated_item["item"]["quantity"] == "1.5"
+            updated_version = updated_item["item"]["updated_at"]
+            bytes_before_stale = web.FRIDGE_PATH.read_bytes()
+            try:
+                web.edit_inventory_item(
+                    structured_id,
+                    web.InventoryItemPatch(
+                        storage="pantry",
+                        expected_updated_at=structured_version,
+                    ),
+                )
+                raise AssertionError("stale Web inventory edit succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                detail: Any = exc.detail
+                assert isinstance(detail, dict)
+                assert detail["code"] == "inventory_conflict"
+                assert detail["current_item"]["updated_at"] == updated_version
+            assert web.FRIDGE_PATH.read_bytes() == bytes_before_stale
             try:
                 web.InventoryItemCreate(name="x" * 201)
                 raise AssertionError("web create accepted an overlong inventory name")
@@ -373,13 +397,47 @@ def main():
             except Exception as exc:
                 assert exc.__class__.__name__ == "ValidationError"
             try:
-                web.edit_inventory_item(structured_id, web.InventoryItemPatch(name=None))
+                web.edit_inventory_item(
+                    structured_id,
+                    web.InventoryItemPatch(
+                        name=None,
+                        expected_updated_at=updated_version,
+                    ),
+                )
                 raise AssertionError("web edit accepted a null inventory name")
             except HTTPException as exc:
                 assert exc.status_code == 400
-            deleted_item = web.remove_inventory_item(structured_id)
+            try:
+                web.remove_inventory_item(
+                    structured_id,
+                    expected_updated_at=structured_version,
+                )
+                raise AssertionError("stale Web inventory delete succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                detail: Any = exc.detail
+                assert isinstance(detail, dict)
+                assert detail["current_item"]["updated_at"] == updated_version
+            assert web.FRIDGE_PATH.read_bytes() == bytes_before_stale
+            deleted_item = web.remove_inventory_item(
+                structured_id,
+                expected_updated_at=updated_version,
+            )
             assert deleted_item["item"]["id"] == structured_id
             assert "молоко qa" not in web.load_fridge()
+            try:
+                web.edit_inventory_item(
+                    structured_id,
+                    web.InventoryItemPatch(
+                        comment="stale after delete",
+                        expected_updated_at=updated_version,
+                    ),
+                )
+                raise AssertionError("stale Web edit after delete succeeded")
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                detail: Any = exc.detail
+                assert detail["current_item"]["available"] is False
 
             catalog_rows = web.list_product_catalog(status="out_of_stock", query="МОЛОКО")["items"]
             assert [row["name"] for row in catalog_rows] == ["молоко qa"]
@@ -407,13 +465,19 @@ def main():
                 raise AssertionError("replenishment accepted an already stocked product")
             except HTTPException as exc:
                 assert exc.status_code == 409
-            web.remove_inventory_item(structured_id)
+            web.remove_inventory_item(
+                structured_id,
+                expected_updated_at=restored_item["item"]["updated_at"],
+            )
 
             promoted_item = web.replenish_product(web.ProductReplenish(
                 name="томаты", storage="pantry",
             ))
             assert promoted_item["item"]["name"] == "томаты"
-            web.remove_inventory_item(promoted_item["item"]["id"])
+            web.remove_inventory_item(
+                promoted_item["item"]["id"],
+                expected_updated_at=promoted_item["item"]["updated_at"],
+            )
 
             inventory_before_history_failure = web._fridge_repository().load_catalog_items()
             history_before_failure = web.load_history()
@@ -543,6 +607,12 @@ def main():
     assert "metadata.push('⚠ Скоро истекает срок')" in html
     assert "'/api/inventory/items', 'POST'" in html
     assert "'PATCH', payload" in html
+    assert "payload.expected_updated_at = record.updated_at" in html
+    assert "expected_updated_at=${encodeURIComponent(record.updated_at)}" in html
+    assert "e.status === 409" in html
+    assert "inventory_conflict" in html
+    assert "current.available === false" in html
+    assert "Hermes увидит актуальный запас на следующем ходе Meal Planning" in html
     assert "function startFridgeItemEdit" in html
     assert "function saveFridgeItemEdit" in html
     assert "function cancelFridgeItemEdit" in html

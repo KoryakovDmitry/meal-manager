@@ -614,7 +614,13 @@ async function api(path, method='GET', body=null) {
   const res = await fetch(API + path, opts);
   if (!res.ok) {
     const err = await res.json().catch(() => ({detail: res.statusText}));
-    throw new Error(err.detail || 'Error');
+    const detail = err.detail;
+    const failure = new Error(
+      typeof detail === 'string' ? detail : (detail?.message || 'Error')
+    );
+    failure.status = res.status;
+    failure.detail = detail;
+    throw failure;
   }
   return res.json();
 }
@@ -625,6 +631,10 @@ function toast(msg, isError=false) {
   el.textContent = msg;
   document.getElementById('toast-container').appendChild(el);
   setTimeout(() => el.remove(), 3000);
+}
+
+function inventoryAwarenessToast() {
+  toast('Сохранено. Hermes увидит актуальный запас на следующем ходе Meal Planning.');
 }
 
 // ─── Navigation shell ───
@@ -1175,8 +1185,8 @@ async function saveReplenishedProduct(index) {
   try {
     await api('/api/products/replenish', 'POST', body);
     closeModal();
-    toast(`${row.name} добавлен в запас`);
     await refreshAll();
+    inventoryAwarenessToast();
   } catch (error) {
     toast(error.message, true);
     saveButton.disabled = false;
@@ -1298,7 +1308,10 @@ async function saveFridgeItemEdit() {
   input.closest('.fridge-item')?.querySelectorAll('button,input,select').forEach(control => { control.disabled = true; });
   try {
     let result;
-    if (record?.id) result = await api(`/api/inventory/items/${encodeURIComponent(record.id)}`, 'PATCH', payload);
+    if (record?.id) {
+      payload.expected_updated_at = record.updated_at;
+      result = await api(`/api/inventory/items/${encodeURIComponent(record.id)}`, 'PATCH', payload);
+    }
     else result = await api('/api/fridge/item', 'PUT', {old_ingredient: sourceItem, new_ingredient: newName});
     if (result.item && record?.id) {
       CACHE.inventory = CACHE.inventory.map(item => item.id === record.id ? result.item : item);
@@ -1307,9 +1320,26 @@ async function saveFridgeItemEdit() {
     editingFridgeItem = null;
     renderFridge();
     await refreshAll();
+    inventoryAwarenessToast();
     document.querySelector(`#fridge-container [data-action="edit"][data-value="${CSS.escape(newName.toLowerCase())}"]`)?.focus();
   } catch (e) {
-    toast(e.message, true);
+    if (e.status === 409 && e.detail?.code === 'inventory_conflict' && e.detail.current_item) {
+      const current = e.detail.current_item;
+      if (current.available === false) {
+        CACHE.inventory = CACHE.inventory.filter(item => item.id !== current.id);
+        CACHE.fridge = CACHE.inventory.map(item => item.name);
+        editingFridgeItem = null;
+        renderFridge();
+        toast('Продукт уже удалён в другом окне. Ваше устаревшее изменение не применено.', true);
+        return;
+      }
+      CACHE.inventory = CACHE.inventory.map(item => item.id === current.id ? current : item);
+      CACHE.fridge = CACHE.inventory.map(item => item.name);
+      editingFridgeItem = current.name;
+      toast('Продукт уже изменён в другом окне. Ваши значения не отправлены повторно; проверьте форму и сохраните ещё раз.', true);
+    } else {
+      toast(e.message, true);
+    }
     input.closest('.fridge-item')?.querySelectorAll('button,input,select').forEach(control => { control.disabled = false; });
     input.focus();
   } finally { fridgeEditSaving = false; }
@@ -1331,6 +1361,7 @@ async function addFridgeItem() {
     await api('/api/inventory/items', 'POST', body);
     ['fridge-add-input','fridge-add-quantity','fridge-add-unit','fridge-add-packages','fridge-add-storage','fridge-add-expiry','fridge-add-comment'].forEach(id => { document.getElementById(id).value = ''; });
     await refreshAll();
+    inventoryAwarenessToast();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1340,9 +1371,10 @@ async function removeFridgeItem(name) {
   const removedIndex = before.findIndex(item => item.name === name);
   if (!confirm(`Удалить продукт «${name}»?`)) return;
   try {
-    if (record?.id) await api(`/api/inventory/items/${encodeURIComponent(record.id)}`, 'DELETE');
+    if (record?.id) await api(`/api/inventory/items/${encodeURIComponent(record.id)}?expected_updated_at=${encodeURIComponent(record.updated_at)}`, 'DELETE');
     else await api('/api/fridge/remove', 'POST', {ingredient: name});
     await refreshAll();
+    inventoryAwarenessToast();
     const remaining = inventoryRecords();
     const focusTarget = remaining[Math.min(Math.max(removedIndex, 0), remaining.length - 1)];
     if (focusTarget) {
@@ -1350,15 +1382,27 @@ async function removeFridgeItem(name) {
     } else {
       document.getElementById('fridge-add-input')?.focus();
     }
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    if (e.status === 409 && e.detail?.code === 'inventory_conflict' && e.detail.current_item) {
+      const current = e.detail.current_item;
+      CACHE.inventory = current.available === false
+        ? CACHE.inventory.filter(item => item.id !== current.id)
+        : CACHE.inventory.map(item => item.id === current.id ? current : item);
+      CACHE.fridge = CACHE.inventory.map(item => item.name);
+      renderFridge();
+      toast('Продукт уже изменён в другом окне и не был удалён. Данные обновлены.', true);
+    } else {
+      toast(e.message, true);
+    }
+  }
 }
 
 async function clearFridge() {
   if (!confirm('Очистить весь холодильник?')) return;
   try {
     await api('/api/fridge', 'DELETE');
-    toast('Холодильник очищен');
     await refreshAll();
+    inventoryAwarenessToast();
   } catch (e) { toast(e.message, true); }
 }
 

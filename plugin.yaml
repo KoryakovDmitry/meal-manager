@@ -1,6 +1,9 @@
 name: meal_manager
 description: Meal planning and fridge inventory manager for Hermes agents.
 
+provides_hooks:
+  - pre_llm_call
+
 provides_tools:
   - get_meal_suggestions
   - get_quick_shopping_list
@@ -8,6 +11,7 @@ provides_tools:
   - update_fridge_inventory
   - rename_fridge_item
   - list_inventory_items
+  - sync_meal_manager_state
   - add_inventory_item
   - edit_inventory_item
   - remove_inventory_item

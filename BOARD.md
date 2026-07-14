@@ -29,7 +29,15 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
-Активных промежуточных issues сейчас нет.
+### INV-3 — Web ↔ agent state synchronization and conflict detection 🔨
+
+**Статус:** стабильный inventory slice реализован; release verification выполняется.
+
+**Реализованный безопасный scope.** Exact-topic `pre_llm_call` инжектирует только authoritative inventory token/count metadata без свободного текста; любой inventory-dependent ответ требует `sync_meal_manager_state`. Добавлены монотонный `updated_at`, under-lock Web precondition, HTTP `409` с current record и conflict UX без silent overwrite.
+
+**Явная граница.** Токен покрывает текущий запас и persisted in-stock/out-of-stock inventory identities, но не recipe-only catalog rows из dishes. Native mutation fence, dishes/history и mid-turn push не объявляются готовыми. DATA-1 остаётся prerequisite для dishes/history.
+
+Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
 
 ## 📐 READY INTERMEDIATE ISSUES
 
@@ -246,18 +254,6 @@
 ---
 
 ## 🧭 DISCOVERY
-
-### INV-3 — Web ↔ agent state synchronization and conflict detection 🧭
-
-**Статус:** углублённый research завершён; реализация не начата.
-
-**Рекомендация.** Не создавать cron-задачу на каждое Web-изменение. Plugin-only v1 должен использовать канонический state vector, `pre_llm_call` для тихого next-turn notice в существующей Meal Planning session, отдельный sync tool, `pre_tool_call` как ранний UX fence, обязательную under-lock проверку expected vector в mutation handler и Web optimistic concurrency с HTTP `409`. Notice гарантирует обнаружение изменения, но сам по себе не может заставить модель обновить read-only reasoning; для жёсткой гарантии нужно либо инжектировать достаточный authoritative snapshot, либо иметь поддержанный turn gate. Cron/webhook/direct Telegram годятся только для optional human notification/watchdog: они запускают отдельные sessions и не актуализируют текущий агентный контекст.
-
-**Граница.** Следующий turn и pre-mutation freshness можно сделать внутри `meal_manager`. Настоящий mid-turn steer потребует общего Hermes gateway/session-event API; plugin не должен обращаться к private GatewayRunner/AIAgent state.
-
-**Scope.** Итоговый контракт должен покрыть все mutable Web routes: inventory/catalog, legacy fridge compatibility, dishes и cooking history. Weekly plans пока read-only. Research также обнаружил prerequisite: Web и native сейчас используют несовместимые форматы history, а dish/history locks остаются process-local; до awareness эти домены нужно свести к общим repository/schema и cross-process locking.
-
-Подробный ticket: [`docs/issues/INV-3-web-agent-inventory-synchronization.md`](docs/issues/INV-3-web-agent-inventory-synchronization.md).
 
 ### Receipt ingestion and price history
 

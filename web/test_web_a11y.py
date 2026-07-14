@@ -174,10 +174,10 @@ setTimeout(async () => {
   const expiredRecord = {
     id: 'inv_expired', name: 'молоко', quantity: '1', unit: 'l',
     package_count: null, storage: 'fridge', expires_on: '2026-07-13',
-    comment: null, expiry_status: 'expired'
+    comment: null, expiry_status: 'expired', updated_at: 'v-expired'
   };
   const expiringSoon = {id:'inv_soon', name:'йогурт', quantity:null, unit:null, package_count:null,
-    storage:'fridge', expires_on:'2026-07-16', comment:null, expiry_status:'expiring_soon'};
+    storage:'fridge', expires_on:'2026-07-16', comment:null, expiry_status:'expiring_soon', updated_at:'v-soon'};
   CACHE.inventory = [expiredRecord, expiringSoon];
   CACHE.fridge = CACHE.inventory.map(item => item.name);
   renderFridge();
@@ -185,7 +185,7 @@ setTimeout(async () => {
   const expiryAccessible = expiryText.includes('Просрочено') && expiryText.includes('Скоро истекает срок');
   CACHE.inventory = [expiredRecord];
   const salt = {id:'inv_salt', name:'соль', quantity:null, unit:null, package_count:null,
-    storage:'pantry', expires_on:null, comment:'старый', expiry_status:'unknown'};
+    storage:'pantry', expires_on:null, comment:'старый', expiry_status:'unknown', updated_at:'v-salt'};
   CACHE.inventory.push(salt);
   CACHE.fridge = CACHE.inventory.map(item => item.name);
   renderFridge();
@@ -203,13 +203,47 @@ setTimeout(async () => {
   };
   refreshAll = async () => renderFridge();
   await removeFridgeItem('молоко');
+  const deleteVersioned = inventoryCall.path.includes('expected_updated_at=v-expired');
   const deleteAccessible = confirmationText.includes('молоко') && document.activeElement ===
     document.querySelector('#fridge-container [data-action="edit"][data-value="соль"]');
   startFridgeItemEdit('соль');
   document.getElementById('fridge-edit-comment').value = 'новый';
   await saveFridgeItemEdit();
   const dirtyPatchOnly = inventoryCall.method === 'PATCH' &&
-    JSON.stringify(Object.keys(inventoryCall.body)) === JSON.stringify(['comment']);
+    JSON.stringify(Object.keys(inventoryCall.body)) === JSON.stringify(['comment','expected_updated_at']) &&
+    inventoryCall.body.expected_updated_at === 'v-salt';
+  startFridgeItemEdit('соль');
+  document.getElementById('fridge-edit-input').value = 'соль локальная';
+  api = async () => {
+    const conflict = new Error('conflict');
+    conflict.status = 409;
+    conflict.detail = {code:'inventory_conflict', current_item:{...salt, name:'соль сервер', updated_at:'v-server'}};
+    throw conflict;
+  };
+  await saveFridgeItemEdit();
+  const conflictRenamePreserved = editingFridgeItem === 'соль сервер' &&
+    document.getElementById('fridge-edit-input').value === 'соль локальная' &&
+    CACHE.inventory.some(item => item.name === 'соль сервер' && item.updated_at === 'v-server') &&
+    !document.getElementById('fridge-edit-input').disabled;
+  cancelFridgeItemEdit();
+  CACHE.inventory = [salt];
+  CACHE.fridge = ['соль'];
+  renderFridge();
+  startFridgeItemEdit('соль');
+  document.getElementById('fridge-edit-comment').value = 'локальный после удаления';
+  api = async () => {
+    const conflict = new Error('deleted conflict');
+    conflict.status = 409;
+    conflict.detail = {code:'inventory_conflict', current_item:{...salt, available:false, updated_at:'v-deleted'}};
+    throw conflict;
+  };
+  await saveFridgeItemEdit();
+  const deletedConflictResolved = editingFridgeItem === null &&
+    !CACHE.inventory.some(item => item.id === 'inv_salt') &&
+    !document.getElementById('fridge-edit-input');
+  CACHE.inventory = [salt];
+  CACHE.fridge = ['соль'];
+  renderFridge();
 
   const dishesPage = document.getElementById('page-dishes');
   document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
@@ -313,7 +347,7 @@ setTimeout(async () => {
     cancelRestore, backdropRestore, escapeRestore, saveRestore, stateOpacityOk,
     fridgeEditFocus, fridgeCancelRestore,
     inFlightEditLocked, fridgeSaveRestore, expiryAccessible,
-    deleteAccessible, dirtyPatchOnly,
+    deleteAccessible, deleteVersioned, dirtyPatchOnly, conflictRenamePreserved, deletedConflictResolved,
     productModalSemantics, replenishFreshBatch, productFocusRestore,
     window.__qaErrors.length
   ].join(';'));
@@ -390,7 +424,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
+            "true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;true;0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"
