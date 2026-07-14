@@ -251,7 +251,7 @@
 
 **Статус:** углублённый research завершён; реализация не начата.
 
-**Рекомендация.** Не создавать cron-задачу на каждое Web-изменение. Plugin-only v1 должен использовать канонический state vector, `pre_llm_call` для тихого next-turn notice в существующей Meal Planning session, отдельный sync tool, `pre_tool_call` freshness fence и Web optimistic concurrency с HTTP `409`. Cron/webhook/direct Telegram годятся только для optional human notification/watchdog: они запускают отдельные sessions и не актуализируют текущий агентный контекст.
+**Рекомендация.** Не создавать cron-задачу на каждое Web-изменение. Plugin-only v1 должен использовать канонический state vector, `pre_llm_call` для тихого next-turn notice в существующей Meal Planning session, отдельный sync tool, `pre_tool_call` как ранний UX fence, обязательную under-lock проверку expected vector в mutation handler и Web optimistic concurrency с HTTP `409`. Notice гарантирует обнаружение изменения, но сам по себе не может заставить модель обновить read-only reasoning; для жёсткой гарантии нужно либо инжектировать достаточный authoritative snapshot, либо иметь поддержанный turn gate. Cron/webhook/direct Telegram годятся только для optional human notification/watchdog: они запускают отдельные sessions и не актуализируют текущий агентный контекст.
 
 **Граница.** Следующий turn и pre-mutation freshness можно сделать внутри `meal_manager`. Настоящий mid-turn steer потребует общего Hermes gateway/session-event API; plugin не должен обращаться к private GatewayRunner/AIAgent state.
 

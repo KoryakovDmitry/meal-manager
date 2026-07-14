@@ -16,7 +16,7 @@ The recommended primary design is **not one cron job per Web edit**. INV-3 shoul
 5. `pre_tool_call` blocks obviously stale state-dependent mutation tools, and every guarded mutation validates the synchronized vector again under its write lock;
 6. Web edit/delete uses optimistic concurrency (`expected_updated_at`/entity version) so a same-field stale write returns `409` rather than silently winning.
 
-This can be implemented inside `meal_manager` without modifying Hermes core and keeps the **same existing Telegram session** current at the beginning of its next turn. It cannot interrupt an answer that is already being generated.
+This can be implemented inside `meal_manager` without modifying Hermes core and notifies the **same existing Telegram session** at the beginning of its next turn. The public hook cannot force the model to call a getter before a read-only answer, so hard fresh-reasoning guarantees require either injecting sufficient authoritative state directly or a future enforceable turn gate. It cannot interrupt an answer that is already being generated.
 
 A true proactive mid-turn steer requires a generic Hermes gateway/session-event API. Hermes already has an internal thread-safe `AIAgent.steer(text)`, but the public plugin context does not expose active agent/session lookup or an external publish API, and the Web process is a separate systemd process.
 
@@ -34,7 +34,7 @@ The product must distinguish four guarantees:
 
 1. **Storage safety** — no malformed JSON, lost unrelated writes, or partial atomic replace.
 2. **Conflict safety** — a stale same-field edit/delete is rejected visibly.
-3. **Next-turn awareness** — the same Meal Planning session sees external changes before its next state-dependent answer.
+3. **Next-turn awareness** — the same Meal Planning session is told that external state changed before its next answer; fresh reasoning still requires authoritative state in the injected block or a getter call.
 4. **Mid-turn awareness** — a Web change interrupts or steers an answer already being generated.
 
 INV-3 can provide 1–3 plugin-only. Guarantee 4 is a separate Hermes-core decision.
@@ -85,7 +85,7 @@ Hermes exposes these public hooks through `ctx.register_hook()`:
 - `pre_llm_call`: runs once per user turn before the tool loop; receives `session_id`, `user_message`, `conversation_history`, `platform`, and other metadata; a returned `{"context": "..."}` block is appended to the current user message;
 - `pre_tool_call`: runs before every tool and can return `{"action": "block", "message": "..."}`;
 - `post_tool_call`: receives tool name, arguments, result, status, and `session_id`, so it can acknowledge an exact synchronization token returned by a successful sync tool;
-- `post_llm_call`: runs only after a successful completed turn and can acknowledge delivery of a notice without acknowledging state synchronization.
+- `post_llm_call`: runs after a non-interrupted turn produces a non-empty response, before gateway delivery; it can mark that a vector was presented to the model, but cannot acknowledge Telegram delivery or state synchronization.
 
 `pre_llm_call` context is deliberately ephemeral: it does not mutate the system prompt or stored conversation history. Therefore the design must not advance a session's **synchronized** cursor merely because a notice was injected. Synchronization is acknowledged only from a successful tool result carrying the exact state vector it read.
 
@@ -95,7 +95,7 @@ Hermes's public `gateway.session_context.get_session_env()` exposes task-local p
 
 ### True mid-turn steer is not a plugin API
 
-Hermes core has `AIAgent.steer(text)`, which safely queues text into the next tool-result iteration. The TUI/gateway busy-input paths can call it because they own the active `AIAgent` object.
+Hermes core has `AIAgent.steer(text)`, which safely queues text into the next tool-result iteration. The TUI/gateway busy-input paths can call it because they own the active `AIAgent` object. `PluginContext.inject_message()` also exists, but its implementation is CLI-only and returns unavailable in gateway mode; it cannot target Telegram.
 
 `PluginContext` does not expose:
 
@@ -119,7 +119,7 @@ Neither path updates the current Meal Planning agent context. Webhooks may be us
 
 Hermes cron:
 
-- checks schedules on a roughly 60-second gateway tick;
+- the built-in scheduler checks schedules on an approximately 60-second gateway tick (external scheduler providers may differ);
 - starts a fresh `AIAgent` session for every run;
 - delivers the result out of band;
 - by default does not write that delivery into the current chat's conversation history.
@@ -133,7 +133,7 @@ Creating a new one-shot cron job for every Web mutation would add scheduler late
 | Option | Same-session next turn | Mid-turn | Noise/cost | Decision |
 |---|---:|---:|---:|---|
 | Skill says “always reread” | Partial | No | Low | Keep as defense in depth, not sufficient alone |
-| `pre_llm_call` state-vector notice + sync tool + mutation fence | **Yes** | No | Low and quiet | **Recommended v1** |
+| `pre_llm_call` state-vector notice + sync tool + mutation fence | **Notice: yes; forced fresh read-only reasoning: no** | No | Low and quiet | **Recommended v1** |
 | One cron per Web edit | No | No | High | Reject as primary mechanism |
 | One recurring polling cron | No | No | Medium | Optional watchdog only |
 | Hermes webhook agent run | No | No | Medium/high | Reject as primary mechanism |
@@ -162,7 +162,7 @@ Requirements:
 - hash canonical validated state, not filenames, mtimes, or Python object identities;
 - include every domain writable from Web;
 - read old-or-new complete JSON only through existing atomic persistence paths;
-- use a global cross-process meal-state transaction/snapshot lock, or an equivalent proven stable-snapshot protocol, for operations that span domains such as cooking history + inventory;
+- require every covered Web/native write—not only compound cooking—to participate in one proven cross-process snapshot/transaction protocol; synchronization computes both vector and returned records/diff inside that same coherent read boundary;
 - no-op writes must not create a semantic state change;
 - a change back to identical canonical state may produce the same token and needs no notification because current state is identical.
 
@@ -199,18 +199,18 @@ A bounded plugin-private snapshot cache keyed by state vector can derive diffs w
 
 Per opted-in session, persist two concepts:
 
-- `last_observed_vector`: the latest change notice successfully delivered to a completed turn;
+- `last_presented_vector`: the latest vector included in a turn that produced a model response; this is not proof that Telegram delivery succeeded;
 - `last_synchronized_vector`: the exact vector returned by the last successful synchronization tool call.
 
 State machine:
 
 1. `pre_llm_call` compares current vector with both cursors.
 2. If changed, inject a compact data-only notice. Do **not** advance `last_synchronized_vector`.
-3. `post_llm_call` may advance only `last_observed_vector` for that turn/vector; interrupted/failed turns do not acknowledge delivery.
+3. `post_llm_call` may advance only `last_presented_vector` for that turn/vector when a non-interrupted turn produced a response. It runs before gateway delivery, so this cursor is never a delivery acknowledgement and is not used for correctness.
 4. `sync_meal_manager_state` reads a stable snapshot and returns its exact vector, changed domains, bounded diffs, and current affected records or `full_refresh_required`.
 5. `post_tool_call` advances `last_synchronized_vector` only when that exact sync result is successful.
 6. Any Web/native change after the sync produces a different current vector and remains pending.
-7. New sessions start without a synchronized baseline and must sync before state-dependent reasoning or mutation.
+7. New sessions start without a synchronized baseline. The notice instructs a sync before state-dependent reasoning, but plugin-only v1 can enforce this only for guarded mutations, not arbitrary read-only prose.
 8. Session cursor files are local, atomic, permission-restricted, bounded, and TTL-cleaned on session end/reset.
 
 ### 4. Pre-mutation freshness fence
@@ -299,6 +299,7 @@ If implemented as recommended:
 - **Guaranteed:** same-entity stale Web edits/deletes return `409` with no write;
 - **Guaranteed:** multiple Web changes before the next turn are coalesced, not posted per click;
 - **Not guaranteed plugin-only:** a Web edit interrupts or changes a final answer already being generated when no further guarded tool call occurs.
+- **Not guaranteed plugin-only:** the model performs a getter before every read-only state-dependent answer; hard enforcement needs authoritative snapshot injection or a supported turn gate.
 
 If mid-turn interruption becomes a product requirement, create a separate Hermes-core proposal for an authenticated `publish_session_event(target, payload, mode=queue|steer)` API with durable session routing, idempotency, ordering, role-alternation safety, prompt-cache safety, and idle-session behavior.
 
@@ -339,6 +340,7 @@ The live Hermes docs at `https://hermes-agent.nousresearch.com/docs` were reacha
 
 - cross-process read-modify-write locks for dishes and history before notification work;
 - one canonical history entity/schema and shared Web/native repository path, with migration rehearsal before enabling history writes;
+- stable dish IDs and stable history-entry IDs with entity revisions, or an explicitly versioned collection ETag as the temporary stale-edit/delete precondition;
 - dishes add/update/delete;
 - cooking history add/delete;
 - compound cook → history + inventory stable-snapshot/transaction behavior;
@@ -366,7 +368,8 @@ Only if real use demonstrates that next-turn synchronization and mutation fences
 - [ ] Comments/free-text values are never promoted into instructions.
 - [ ] Development and unrelated sessions receive no Meal Planning notices.
 - [ ] Concurrent-topic E2E proves hook target metadata cannot leak between Telegram sessions.
-- [ ] Interrupted/failed turns do not falsely acknowledge synchronization.
+- [ ] Interrupted/no-response turns do not advance `last_presented_vector`, and no presentation cursor advances synchronization.
+- [ ] `last_presented_vector` is never described or used as Telegram delivery acknowledgement.
 
 ### Mutation and conflict safety
 
@@ -387,6 +390,7 @@ Only if real use demonstrates that next-turn synchronization and mutation fences
 - [ ] Cross-process deterministic race tests cover Web writes, sync reads, and agent mutations in every mutable domain.
 - [ ] Dish/history repositories cannot lose concurrent Web/native updates before their synchronization notices are enabled.
 - [ ] Web and native cooking history use one canonical schema/repository; neither surface can overwrite the other's representation.
+- [ ] Dish rename/delete and history delete have stable identity/version semantics; mutable names and array indices are not treated as safe identities.
 
 ### Web UX
 
@@ -414,6 +418,7 @@ Only if real use demonstrates that next-turn synchronization and mutation fences
 6. **Actor identity:** keep `web`/`native` only until Web authentication exists.
 7. **Core proposal threshold:** what observed failure would justify Hermes gateway/session API work?
 8. **History semantics:** preserve multiple cooking events as Web currently models, or intentionally keep one latest date per dish as native currently models?
+9. **Read-only freshness:** accept advisory next-turn detection plus required skill guidance, or pay the context cost to inject enough authoritative state for an enforceable fresh answer?
 
 ## Non-goals
 
