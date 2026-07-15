@@ -53,9 +53,9 @@ def HANDLER(args: dict, **kwargs):
         # Consume essential ingredients from the fridge
         removed = []
         with fridge_repo.lock:
-            fridge = fridge_repo.load()
-            removed = [ing for ing in essentials if ing in fridge]
-            missing = [ing for ing in essentials if ing not in fridge]
+            available = fridge_repo.load_set()
+            removed = [ing for ing in essentials if ing in available]
+            missing = [ing for ing in essentials if ing not in available]
 
             if missing:
                 raise ValueError(
@@ -63,9 +63,7 @@ def HANDLER(args: dict, **kwargs):
                     f"{', '.join(missing)}"
                 )
 
-            if removed:
-                fridge = [ing for ing in fridge if ing not in removed]
-                fridge_repo.save(fridge)
+            fridge_repo.remove_items(removed)
 
         # Update remaining quantity
         item.remaining = item.yield_qty

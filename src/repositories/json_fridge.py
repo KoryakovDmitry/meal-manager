@@ -10,8 +10,8 @@ from ..dish import Dish
 from ..inventory import InventoryItem
 from .file_lock import JsonFileLock
 
-SCHEMA_VERSION = 4
-SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
+SCHEMA_VERSION = 5
+SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
 _MIGRATION_NAMESPACE = uuid.UUID("72c45a1a-73c7-4e07-84dd-e20b6e342f95")
 _EXPECTED_VERSION_UNSET = object()
 
@@ -88,6 +88,29 @@ class JsonFridgeRepository:
     def _new_id() -> str:
         return "inv_" + uuid.uuid4().hex
 
+    @staticmethod
+    def _identity_matches(item: InventoryItem, name: str) -> bool:
+        return name == item.name or name in item.aliases
+
+    @classmethod
+    def _resolve_from_items(cls, items, name: str, *, available_only=False):
+        normalized = Dish.normalize_ingredient(name)
+        return next((
+            item for item in items
+            if (not available_only or item.available)
+            and cls._identity_matches(item, normalized)
+        ), None)
+
+    @staticmethod
+    def _validate_identity_names(items, *, error_type=ValueError) -> None:
+        owners: dict[str, str] = {}
+        for item in items:
+            for name in (item.name, *item.aliases):
+                owner = owners.get(name)
+                if owner is not None and owner != item.id:
+                    raise error_type(f"Duplicate inventory name or alias: {name}")
+                owners[name] = item.id
+
     def load_catalog_items(self) -> list[InventoryItem]:
         """Return every known stocked product, including unavailable records."""
         raw = self._read_raw()
@@ -158,10 +181,19 @@ class JsonFridgeRepository:
         if version == 4 and any(
             not isinstance(value, dict)
             or not {"available", "category", "ever_stocked"}.issubset(value)
+            or "aliases" in value
             for value in raw["items"]
         ):
             raise InventoryDataError(
                 "Schema v4 inventory item is missing category lifecycle fields"
+            )
+        if version == 5 and any(
+            not isinstance(value, dict)
+            or not {"available", "category", "ever_stocked", "aliases"}.issubset(value)
+            for value in raw["items"]
+        ):
+            raise InventoryDataError(
+                "Schema v5 inventory item is missing alias lifecycle fields"
             )
 
         try:
@@ -176,18 +208,33 @@ class JsonFridgeRepository:
             raise InventoryDataError("Duplicate inventory item name")
         if len(ids) != len(set(ids)):
             raise InventoryDataError("Duplicate inventory item id")
+        self._validate_identity_names(items, error_type=InventoryDataError)
         return items
 
     def load_items(self) -> list[InventoryItem]:
         """Return only products currently present in kitchen inventory."""
         return [item for item in self.load_catalog_items() if item.available]
 
+    def resolve_ingredient(
+        self,
+        name: str,
+        *,
+        available_only: bool = False,
+    ) -> InventoryItem | None:
+        return self._resolve_from_items(
+            self.load_catalog_items(), name, available_only=available_only
+        )
+
     def load(self) -> list[str]:
         """Backward-compatible current-stock name projection."""
         return [item.name for item in self.load_items()]
 
     def load_set(self) -> set[str]:
-        return set(self.load())
+        return {
+            name
+            for item in self.load_items()
+            for name in (item.name, *item.aliases)
+        }
 
     def save_items(self, items: list[InventoryItem]) -> None:
         """Persist the complete catalog record set exactly as supplied."""
@@ -205,6 +252,7 @@ class JsonFridgeRepository:
             raise ValueError("Duplicate inventory item name")
         if len(ids) != len(set(ids)):
             raise ValueError("Duplicate inventory item id")
+        self._validate_identity_names(items)
         atomic_write_json(self._io_path(), {
             "schema_version": SCHEMA_VERSION,
             "items": [item.to_dict() for item in items],
@@ -266,19 +314,24 @@ class JsonFridgeRepository:
                 seen.add(name)
 
         catalog = self.load_catalog_items()
-        existing = {item.name: item for item in catalog}
-        wanted = set(normalized)
+        resolved = {
+            name: self._resolve_from_items(catalog, name)
+            for name in normalized
+        }
+        wanted_ids = {
+            item.id for item in resolved.values() if item is not None
+        }
         result: list[InventoryItem] = []
         for item in catalog:
-            if item.name in wanted and not item.available:
+            if item.id in wanted_ids and not item.available:
                 item = self._replenished(item, {})
-            elif item.name not in wanted and item.available:
+            elif item.id not in wanted_ids and item.available:
                 item = self._with_availability(item, False)
             result.append(item)
 
         now = self._now()
         for name in normalized:
-            if name not in existing:
+            if resolved[name] is None:
                 result.append(InventoryItem(
                     id=self._new_id(),
                     name=name,
@@ -300,10 +353,7 @@ class JsonFridgeRepository:
                 updated_at=now,
                 **fields,
             )
-            existing = next(
-                (current for current in items if current.name == item.name),
-                None,
-            )
+            existing = self._resolve_from_items(items, item.name)
             if existing is not None:
                 if existing.available:
                     raise ValueError(
@@ -318,6 +368,84 @@ class JsonFridgeRepository:
             items.append(item)
             self._save_items_unlocked(items)
             return item
+
+    def receive_product(
+        self,
+        *,
+        requested_name: str,
+        exact_name: str,
+        **fields,
+    ) -> InventoryItem:
+        requested = Dish.normalize_ingredient(requested_name)
+        exact = Dish.normalize_ingredient(exact_name)
+        if not requested or not exact:
+            raise ValueError("requested_name and exact_name cannot be empty")
+        allowed = {
+            "quantity", "unit", "package_count", "storage",
+            "expires_on", "comment", "category",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown receipt fields: {sorted(unknown)}")
+
+        with self.lock:
+            items = self.load_catalog_items()
+            requested_item = next((
+                item for item in items
+                if requested == item.name or requested in item.aliases
+            ), None)
+            exact_item = next((item for item in items if item.name == exact), None)
+            if (
+                requested_item is not None
+                and exact_item is not None
+                and requested_item.id != exact_item.id
+            ):
+                raise ValueError(
+                    "Requested and exact names belong to different product identities"
+                )
+            current = requested_item or exact_item
+            if current is None:
+                now = self._now()
+                created = InventoryItem(
+                    id=self._new_id(),
+                    name=exact,
+                    aliases=[requested] if requested != exact else [],
+                    available=True,
+                    ever_stocked=True,
+                    created_at=now,
+                    updated_at=now,
+                    **fields,
+                )
+                items.append(created)
+                self._save_items_unlocked(items)
+                return created
+
+            values = current.to_dict()
+            aliases = list(current.aliases)
+            for alias in (current.name, requested):
+                if alias != exact and alias not in aliases:
+                    aliases.append(alias)
+            values.update({
+                "name": exact,
+                "aliases": aliases,
+                "available": True,
+                "ever_stocked": True,
+                "quantity": fields.get("quantity"),
+                "unit": fields.get("unit"),
+                "package_count": fields.get("package_count"),
+                "storage": fields.get("storage", current.storage),
+                "expires_on": fields.get("expires_on"),
+                "comment": fields.get("comment"),
+                "category": fields.get("category", current.category),
+            })
+            candidate = InventoryItem.from_dict(values)
+            if candidate.to_dict() == current.to_dict():
+                return current
+            candidate.updated_at = self._next_updated_at(current)
+            candidate = InventoryItem.from_dict(candidate.to_dict())
+            items[items.index(current)] = candidate
+            self._save_items_unlocked(items)
+            return candidate
 
     def replenish_item(
         self,
@@ -338,10 +466,7 @@ class JsonFridgeRepository:
                     raise LookupError(f"Inventory item '{key}' not found")
             else:
                 normalized = Dish.normalize_ingredient(name)
-                current = next(
-                    (item for item in items if item.name == normalized),
-                    None,
-                )
+                current = self._resolve_from_items(items, normalized)
                 if current is None:
                     if expected_updated_at not in (_EXPECTED_VERSION_UNSET, None):
                         raise LookupError(f"Ingredient '{normalized}' not found")
@@ -455,7 +580,10 @@ class JsonFridgeRepository:
                 if current is None:
                     raise LookupError(f"Inventory item '{key}' not found")
             else:
-                current = next((item for item in items if item.name == normalized), None)
+                current = (
+                    self._resolve_from_items(items, normalized)
+                    if normalized is not None else None
+                )
             if current is None:
                 if not allow_create or normalized is None:
                     raise LookupError(f"Product '{normalized}' not found")
@@ -544,7 +672,9 @@ class JsonFridgeRepository:
             changed = False
             result: list[InventoryItem] = []
             for item in catalog:
-                if item.available and item.name in to_remove:
+                if item.available and any(
+                    name in to_remove for name in (item.name, *item.aliases)
+                ):
                     item = self._with_availability(item, False)
                     changed = True
                 result.append(item)

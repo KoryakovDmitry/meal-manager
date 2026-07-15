@@ -44,10 +44,21 @@ _plan_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.plan")
 _plan_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_plan"
 )
+_prep_repository_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.repositories.json_prep_item"
+)
+_shopping_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.shopping")
+_shopping_request_repository_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.repositories.json_shopping_request"
+)
 JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
 JsonDishRepository = _dish_repository_module.JsonDishRepository
 dish_catalog_version = _dish_repository_module.dish_catalog_version
 JsonPlanRepository = _plan_repository_module.JsonPlanRepository
+JsonPrepItemRepository = _prep_repository_module.JsonPrepItemRepository
+JsonShoppingRequestRepository = _shopping_request_repository_module.JsonShoppingRequestRepository
+project_plan_shopping = _shopping_module.project_plan_shopping
+merge_manual_requests = _shopping_module.merge_manual_requests
 InventoryDataError = _inventory_repository_module.InventoryDataError
 InventoryConflictError = _inventory_repository_module.InventoryConflictError
 Dish = _dish_module.Dish
@@ -60,10 +71,16 @@ DISHES_PATH = DATA_DIR / "dishes.json"
 FRIDGE_PATH = DATA_DIR / "fridge.json"
 HISTORY_PATH = DATA_DIR / "history.json"
 TUNING_PATH = DATA_DIR / "tuning.json"
+PREP_ITEMS_PATH = DATA_DIR / "prep_items.json"
+SHOPPING_REQUESTS_PATH = DATA_DIR / "shopping_requests.json"
 PLANS_DIR = DATA_DIR / "plans"
 _structured_dish_repo = JsonDishRepository(DISHES_PATH)
 _structured_fridge_repo = JsonFridgeRepository(FRIDGE_PATH)
 _structured_plan_repo = JsonPlanRepository(PLANS_DIR)
+_structured_prep_repo = JsonPrepItemRepository(DATA_DIR / "prep_items.json")
+_structured_shopping_request_repo = JsonShoppingRequestRepository(
+    DATA_DIR / "shopping_requests.json"
+)
 
 _WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
 _PLAN_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
@@ -112,8 +129,22 @@ def _fridge_repository():
     return _structured_fridge_repo
 
 
+def _prep_repository():
+    _structured_prep_repo.path = Path(PREP_ITEMS_PATH)
+    return _structured_prep_repo
+
+
+def _shopping_request_repository():
+    _structured_shopping_request_repo.path = Path(SHOPPING_REQUESTS_PATH)
+    return _structured_shopping_request_repo
+
+
 def load_fridge():
     return _fridge_repository().load()
+
+
+def load_available_ingredient_keys():
+    return _fridge_repository().load_set()
 
 def save_fridge(items):
     _fridge_repository().save(items)
@@ -207,7 +238,7 @@ def _valid_shopping_item(item, *, allow_zero=False, require_price=False) -> bool
         if (
             not isinstance(source, dict)
             or set(source) != {"kind", "name", "uses"}
-            or source.get("kind") not in {"dish", "prep"}
+            or source.get("kind") not in {"dish", "prep", "manual"}
             or not _valid_canonical_name(source.get("name"))
         ):
             return False
@@ -477,11 +508,14 @@ def _read_valid_week_plan(week_id: str):
 def load_week_plan(week_id: str):
     if not _valid_iso_week(week_id):
         raise HTTPException(400, "Invalid ISO week; expected a real YYYY-Www week")
-    plan = _read_valid_week_plan(week_id)
-    if plan is None:
-        raise HTTPException(404, f"Plan '{week_id}' not found or malformed")
+    raw_plan = _read_valid_week_plan(week_id)
+    if raw_plan is None:
+        plan_path = Path(PLANS_DIR) / f"{week_id}.json"
+        if plan_path.exists():
+            raise HTTPException(503, "Weekly plan data is malformed")
+        raise HTTPException(404, f"Plan '{week_id}' not found")
     try:
-        return WeekPlan.from_dict(plan).to_dict()
+        return WeekPlan.from_dict(raw_plan).to_dict()
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(404, f"Plan '{week_id}' not found or malformed") from exc
 
@@ -1097,7 +1131,7 @@ def clear_fridge():
 @_inventory_api_errors
 def get_suggestions():
     dishes = load_dishes()
-    fridge = load_fridge()
+    fridge = load_available_ingredient_keys()
     history = load_history()
     recent = _recent_dishes(history)
     suggestions = []
@@ -1118,12 +1152,58 @@ def get_suggestions():
     suggestions.sort(key=lambda x: x["score"], reverse=True)
     return {"suggestions": suggestions}
 
+def _current_week_id() -> str:
+    year, week, _ = date.today().isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _project_shopping_safe(plan: WeekPlan, catalog) -> tuple[dict, bool, str | None]:
+    try:
+        projected, stale = project_plan_shopping(
+            plan=plan,
+            dishes=_dish_repository().load_strict(),
+            prep_items=_prep_repository().load_strict(),
+            catalog_items=catalog,
+            manual_requests=_shopping_request_repository().load(week=plan.week_id),
+        )
+        return projected, stale, None
+    except (LookupError, ValueError) as exc:
+        return {"items": []}, True, str(exc)
+
+
+def _weekly_plan_shopping_view(week_id: str, catalog=None) -> dict:
+    plan = WeekPlan.from_dict(load_week_plan(week_id))
+    if catalog is None:
+        catalog = _fridge_repository().load_catalog_items()
+    projected, persisted_stale, projection_error = _project_shopping_safe(plan, catalog)
+    return {
+        "week": week_id,
+        "source": "weekly_plan",
+        "items": projected.get("items", []),
+        "persisted_stale": persisted_stale,
+        "projection_error": projection_error,
+    }
+
+
 @app.get("/api/shopping")
 @_inventory_api_errors
 def get_shopping():
-    dishes = load_dishes()
-    fridge = load_fridge()
-    return {"items": _shopping_list(dishes, fridge)}
+    week_id = _current_week_id()
+    catalog = _fridge_repository().load_catalog_items()
+    try:
+        return _weekly_plan_shopping_view(week_id, catalog)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return {
+                "week": week_id,
+                "source": "weekly_plan",
+                "items": merge_manual_requests(
+                    [], _shopping_request_repository().load(week=week_id)
+                ),
+                "persisted_stale": False,
+                "projection_error": None,
+            }
+        raise
 
 # ─── API: History ───────────────────────────────────────────────────────
 @app.get("/api/history")
@@ -1176,9 +1256,21 @@ def get_week_plans():
 
 
 @app.get("/api/plans/{week_id}")
+@_inventory_api_errors
 def get_week_plan_view(week_id: str):
-    plan = load_week_plan(week_id)
-    return {"plan": plan, "version": _plan_version(plan)}
+    persisted = load_week_plan(week_id)
+    plan = WeekPlan.from_dict(persisted)
+    projected, shopping_stale, projection_error = _project_shopping_safe(
+        plan, _fridge_repository().load_catalog_items()
+    )
+    response_plan = plan.to_dict()
+    response_plan["shopping"] = projected
+    return {
+        "plan": response_plan,
+        "version": _plan_version(persisted),
+        "shopping_stale": shopping_stale,
+        "shopping_projection_error": projection_error,
+    }
 
 
 @app.post("/api/plans/{week_id}/days/{day}/meals")
@@ -1268,7 +1360,10 @@ def delete_week_plan(week_id: str, expected_version: str):
 @_inventory_api_errors
 def get_stats():
     dishes = load_dishes()
-    fridge = load_fridge()
+    inventory_items = _fridge_repository().load_items()
+    fridge = list({
+        name for item in inventory_items for name in (item.name, *item.aliases)
+    })
     history = load_history()
     recent = _recent_dishes(history)
 
@@ -1279,14 +1374,18 @@ def get_stats():
             total_ingredients_used[ing] += 1
 
     fridge_utility = {}
-    for item in fridge:
+    for item in inventory_items:
+        identity_names = (item.name, *item.aliases)
         uses = sum(
-            1 for d in dishes
-            if item in d.get("ingredients", {})
+            1 for dish in dishes
+            if any(name in dish.get("ingredients", {}) for name in identity_names)
         )
-        fridge_utility[item] = uses
+        fridge_utility[item.name] = uses
 
-    unused_fridge = [i for i in fridge if fridge_utility.get(i, 0) == 0]
+    unused_fridge = [
+        item.name for item in inventory_items
+        if fridge_utility.get(item.name, 0) == 0
+    ]
 
     # History stats
     cook_counts = Counter(h.get("dish", "") for h in history)
@@ -1305,7 +1404,7 @@ def get_stats():
 
     return {
         "total_dishes": len(dishes),
-        "total_fridge_items": len(fridge),
+        "total_fridge_items": len(inventory_items),
         "cookable_now": cookable,
         "recently_cooked": len(recent),
         "unused_fridge_items": unused_fridge,

@@ -48,5 +48,7 @@ provides_tools:
   - set_plan_status
   - repeat_week_plan
   - generate_shopping_list
+  - add_manual_shopping_item
+  - receive_shopping_item
   - estimate_plan_cost
   - split_shopping_list

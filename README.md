@@ -2,7 +2,7 @@
 
 An intelligent meal planning and fridge inventory management system structured as an official Hermes plugin. It helps users decide what to cook for dinner and what to buy at the grocery store by analyzing their current fridge contents, recipe catalog, and cooking history.
 
-An AI assistant invokes the 39 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
+An AI assistant invokes the 47 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
 
 ---
 
@@ -29,6 +29,7 @@ The result is a system that offers the user the freedom of conversation while gu
 - **Smart Meal Suggestions** — Ranks every dish in the catalog using a weighted scoring algorithm that combines ingredient availability with cooking recency (starting at a 60/40 blend). Dishes cooked fewer than 2 days ago are automatically excluded.
 - **Adaptive Suggestion Weights** — The availability/recency blend self-adjusts with use. Each cooked meal feeds a bounded, deterministic online learner (no background job, no randomness) that nudges the weighting toward whatever has been ranking your actual choices best. The current blend and learning status are inspectable at any time via `get_tuning_state`, and a fresh install behaves exactly like the classic 60/40 blend until enough meals accumulate.
 - **One-Ingredient Shopping List** — Identifies single ingredients that, once purchased, unlock entirely new dishes. Prioritized by the projected score of the unlocked meal.
+- **Live Weekly Shopping & Receipts** — Projects current-week recipe/prep/manual needs from live inventory, keeps browser checkmarks local-only, and lets the agent reconcile a generic request to one exact product identity. A durable exact-name reservation precedes inventory mutation; completion then records the generic alias and replay tombstone, so conflicting concurrent or post-crash retries fail closed.
 - **Fridge Inventory Management** — Add or remove ingredients as you shop or cook. Ingredient and dish names are normalized to lowercase for consistent matching.
 - **Cooking History Tracking** — Logs cooked meals with ISO dates. History keys are normalized to lowercase on load, so comparisons are case-insensitive.
 - **Auto-Cleanup on Cook** — When a meal is registered as cooked, its essential ingredients are automatically removed from the fridge inventory.
@@ -80,13 +81,13 @@ The result is a system that offers the user the freedom of conversation while gu
 
 No build step, dependency installation, or configuration is needed. Data files under `data/` are created lazily by the tools when first needed.
 
-### Upgrading a live inventory to schema v4
+### Upgrading a live inventory to schema v5
 
-The first inventory mutation after this release converts a legacy string array or a `schema_version: 2`/`schema_version: 3` inventory to the `schema_version: 4` envelope. Version 4 preserves the v3 soft-availability lifecycle and adds required `category` (`product`, `prep`, or `ready_meal`) plus `ever_stocked`. Existing records migrate deterministically to `category: "product"` and `ever_stocked: true`; assigning a category to a recipe-only ingredient may create an unavailable identity with `ever_stocked: false`, so it remains `recipe_only` rather than falsely becoming `out_of_stock`. Current-stock projections still expose only `available: true` records.
+The first inventory mutation after this release converts legacy strings or a `schema_version: 2`/`3`/`4` envelope to `schema_version: 5`. Version 5 preserves stable IDs, categories, availability, and `ever_stocked`, and adds normalized `aliases` so a generic recipe ingredient can resolve to one exact purchased product without rewriting recipes. Canonical names and aliases share one global identity namespace; collisions fail closed.
 
-This is a **coordinated deployment**, not a rolling upgrade: back up `fridge.json`, stop every old agent/Web writer, deploy and restart both Hermes and `meal-web`, verify the current-stock projection, stable IDs, catalog states, and categories, and only then resume mutations. An old process must never write after the first v4 mutation because it does not understand the category lifecycle fields. The repository targets the Linux/POSIX deployment used by this plugin and continues to use one cross-process lock plus atomic replacement for all inventory mutations.
+This is a **coordinated deployment**, not a rolling upgrade: back up `fridge.json`, plans, and shopping requests; stop every old agent/Web writer; deploy and restart Hermes and `meal-web`; verify current stock, aliases, live shopping, and receipt replay; only then resume mutations. An old process must never write after the first v5 mutation. The repository uses cross-process locking plus atomic replacement for inventory and shopping-request mutations.
 
-Schema v4 enforces `available => ever_stocked`; `ever_stocked` is not accepted by public APIs and never transitions back to `false`. Web mutations of persisted products use `product_id + expected_updated_at`; `name + null` is accepted only as an expected-absent precondition for a non-materialized recipe-only identity. Stale or name-reuse/ABA requests cannot target another identity and return `409`/`400` without writing. Native tools use the same cross-process lock and atomic write path but intentionally express the agent's latest serialized intent without a Web version token.
+Schema v5 enforces `available => ever_stocked`; `ever_stocked` is not accepted by public APIs and never transitions back to `false`. Web mutations of persisted products use `product_id + expected_updated_at`; `name + null` is accepted only as an expected-absent precondition for a non-materialized recipe-only identity. Stale or name-reuse/ABA requests cannot target another identity and return `409`/`400` without writing. Native tools use the same cross-process lock and atomic write path but intentionally express the agent's latest serialized intent without a Web version token.
 
 ---
 
@@ -105,8 +106,10 @@ Example phrases and what the agent will do behind the scenes:
 
 **Shopping**
 
-- *"I'm heading to the grocery store, what should I buy?"* — lists single ingredients that, once purchased, unlock the best dishes.
-- *"I bought onions, peppers, and chicken."* — updates the fridge and proposes new meal ideas with what you have now.
+- *"What do we need for this week's plan?"* — returns the live plan/recipe/prep/manual shopping projection rather than a stale saved list.
+- *"Add something for breakfast to shopping."* — creates a persistent manual abstract request without changing inventory.
+- *"I bought Alpro Natural 400 g for the plant yogurt request."* — refines that request to one exact inventory identity, preserves the generic alias, and completes the reminder only after inventory is durable.
+- *"I'm heading to the grocery store, what single item unlocks another dish?"* — uses the separate quick-shopping optimizer.
 - *"We ran out of milk."* — removes it from the fridge inventory.
 
 **Managing the fridge**
@@ -141,7 +144,7 @@ Reply naturally — *"yes"*, *"skip"*, *"remove X"*, *"also add Y"*, or *"done"*
 
 ### As a Hermes Plugin
 
-The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 39 tools:
+The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 47 tools:
 
 | Tool | Purpose |
 |---|---|
@@ -186,7 +189,9 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `remove_meal_from_plan` | Remove an indexed meal from a day |
 | `set_plan_status` | Advance draft → approved → active → archived |
 | `repeat_week_plan` | Copy a past week into a new adaptable draft |
-| `generate_shopping_list` | Aggregate whole-week essential needs and prep sources |
+| `generate_shopping_list` | Persist the live whole-week recipe, prep, inventory-alias, and manual-request snapshot |
+| `add_manual_shopping_item` | Add an abstract request without changing inventory |
+| `receive_shopping_item` | Reconcile a stable shopping item to one exact aliased inventory product, replay-safely |
 | `estimate_plan_cost` | Apply optional unit prices and soft weekly budget status |
 | `split_shopping_list` | Split priced items into soft €100 trips |
 

@@ -142,6 +142,8 @@ python3 -c "import sys, importlib, pathlib; sys.path.insert(0, str(pathlib.Path(
 - Dishes cooked fewer than 2 days ago are excluded from suggestions.
 - `register_cooked_meal` removes essential ingredients from the fridge after recording the meal.
 - Quick shopping suggestions only surface dishes missing exactly one essential ingredient.
+- Inventory schema v5 aliases map generic recipe ingredients to one exact product identity; availability checks, legacy add/remove, prep, and cooking must resolve and mutate that exact identity rather than create a generic duplicate.
+- Weekly shopping is a live projection over plan, recipes, prep, inventory aliases, and active manual requests. Browser checkboxes are local notes only. Receipt reconciliation is serialized under the shopping-request lock: reserve the exact-name winner, then write inventory, then persist the completion tombstone.
 - DII sessions reveal suggestions one at a time through the probability funnel.
 - Removing an essential ingredient in a DII session should signal that recalculation is needed.
 
@@ -166,10 +168,11 @@ catalog/fridge/history/tuning core. The full specification lives in
 
 Phases 1–3 are implemented. Weekly-plan tools use the same auto-discovery
 pattern and persist one validated ISO-week file under `data/plans/`. Shopping
-state is a persisted snapshot inside the plan: essential occurrence counts,
-prep-source expansion, optional unit-price estimates, and deterministic trip
-splits. The web UI exposes read-only plan/shopping/budget views; mutations
-remain in plugin handlers. Phases 4–5 remain planned. Keep `ARCHITECTURE.md`,
+has a validated persisted budget snapshot, but Web/native list readers recompute
+the current projection from live dependencies and never label a stale/corrupt
+snapshot as current. Cost and trip operations reject stale snapshots. The Web UI
+is read-only for domain shopping state; its checkbox notes remain browser-local.
+Mutations remain in plugin handlers. Phases 4–5 remain planned. Keep `ARCHITECTURE.md`,
 `BOARD.md`, `plugin.yaml`, `skill.md`, and web views synchronized.
 
 ## Editing Rules

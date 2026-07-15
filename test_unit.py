@@ -1151,6 +1151,7 @@ def test_inventory_item_roundtrip():
         available=False,
         category="prep",
         ever_stocked=False,
+        aliases=[" Молоко ", "молочный продукт", "молоко"],
         quantity="2.000",
         unit="kg",
         package_count=1,
@@ -1169,6 +1170,7 @@ def test_inventory_item_roundtrip():
     check("availability roundtrips", restored.available is False)
     check("category roundtrips", restored.category == "prep")
     check("catalog origin roundtrips", restored.ever_stocked is False)
+    check("inventory aliases normalize and deduplicate", restored.aliases == ["молоко", "молочный продукт"])
     positional = inventory_mod.InventoryItem(
         "inv_positional", "рис", "2", "kg", None, None, None, None,
         "2026-07-14T01:15:00+00:00", "2026-07-14T01:15:00+00:00",
@@ -1180,7 +1182,7 @@ def test_inventory_item_roundtrip():
     check("inventory roundtrip exact", restored == item)
     check("serialized fields are complete", set(payload) == {
         "id", "name", "available", "quantity", "unit", "package_count", "storage",
-        "expires_on", "comment", "created_at", "updated_at", "category", "ever_stocked",
+        "expires_on", "comment", "created_at", "updated_at", "category", "ever_stocked", "aliases",
     })
 
 
@@ -1202,6 +1204,9 @@ def test_inventory_item_validation():
         ({"category": "leftovers"}, "unknown category"),
         ({"ever_stocked": "yes"}, "non-boolean stocked history"),
         ({"available": True, "ever_stocked": False}, "available never-stocked state"),
+        ({"aliases": "молоко"}, "non-list aliases"),
+        ({"aliases": [""]}, "blank alias"),
+        ({"aliases": ["x" * 201]}, "overlong alias"),
         ({"quantity": "2"}, "quantity without unit"),
         ({"unit": "kg"}, "unit without quantity"),
         ({"quantity": True, "unit": "kg"}, "boolean quantity"),
@@ -1273,7 +1278,7 @@ def test_product_catalog_statuses_and_filters():
             created_at=stamp, updated_at=stamp,
         ),
         inventory_mod.InventoryItem(
-            id="inv_milk", name="молоко", available=False,
+            id="inv_milk", name="luxlait цельное 3,5% 1 л", aliases=["молоко"], available=False,
             category="ready_meal", storage="fridge", created_at=stamp, updated_at=stamp,
         ),
         inventory_mod.InventoryItem(
@@ -1295,7 +1300,9 @@ def test_product_catalog_statuses_and_filters():
     rows = catalog_mod.build_product_catalog(items, dishes)
     by_name = {row["name"]: row for row in rows}
     check("current product is in_stock", by_name["рис"]["status"] == "in_stock")
-    check("removed product is out_of_stock", by_name["молоко"]["status"] == "out_of_stock")
+    check("aliased exact product is out_of_stock", by_name["luxlait цельное 3,5% 1 л"]["status"] == "out_of_stock")
+    check("generic alias does not create duplicate catalog row", "молоко" not in by_name)
+    check("recipe usage resolves through alias", by_name["luxlait цельное 3,5% 1 л"]["recipe_count"] == 1)
     check("recipe-only product is distinguished", by_name["томаты"]["status"] == "recipe_only")
     check("persisted recipe-only category is projected", by_name["томаты"]["category"] == "prep")
     check("unstocked non-recipe metadata stays hidden", "старый metadata" not in by_name)

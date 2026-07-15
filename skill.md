@@ -155,16 +155,16 @@ Weekly plans are stored one file per ISO week under `data/plans/`. Days contain
 flexible meal lists; there are no breakfast/lunch/dinner slots.
 
 - `create_week_plan` — create a `draft` plan, optionally with prep references.
-- `get_week_plan` — read one plan; defaults to the current ISO week.
+- `get_week_plan` — read one plan plus a live shopping projection; defaults to the current ISO week.
 - `list_week_plans` — browse plan history, newest first.
 - `add_meal_to_plan` — append a catalog dish and portion count to a day.
 - `remove_meal_from_plan` — remove one day entry by zero-based `meal_index`.
 - `set_plan_status` — advance strictly through `draft → approved → active → archived`.
 - `repeat_week_plan` — copy a past week into a new draft; reports missing
   ingredients and skips references that no longer exist in the catalogs.
-- `generate_shopping_list` — aggregate essential ingredient uses for the whole
-  week, include source ingredients for planned/depleted prep, subtract current
-  fridge presence, and persist the result in the plan.
+- `generate_shopping_list` — persist the live essential-needs projection for the whole week, including planned/depleted prep and active manual requests, after subtracting exact inventory identities and aliases.
+- `add_manual_shopping_item` — add a stable abstract request without mutating inventory. Same normalized week/name is idempotent while active.
+- `receive_shopping_item` — use only after receipt/photo evidence identifies a purchased item. Pass the stable shopping ID and exact product details; it durably reserves the normalized exact-name winner before inventory mutation, preserves the generic request as an alias, then completes the request. Matching retries resume safely; conflicting concurrent or post-crash receipts fail closed.
 - `estimate_plan_cost` — apply an optional ingredient→EUR price map. Partial
   coverage returns budget status `unknown`; complete estimates use the soft
   €150/week warning and never block.

@@ -22,6 +22,21 @@ class JsonPrepItemRepository:
         self.path = Path(path)
         self.lock = threading.Lock()
 
+    def load_strict(self) -> list[PrepItem]:
+        if not self.path.exists():
+            return []
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(f"invalid prep catalog: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("prep_items", []), list):
+            raise ValueError("invalid prep catalog envelope")
+        try:
+            return [PrepItem.from_dict(entry) for entry in data.get("prep_items", [])]
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid prep catalog entry: {exc}") from exc
+
     def load(self) -> list[PrepItem]:
         if not self.path.exists():
             return []

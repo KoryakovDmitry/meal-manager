@@ -3,7 +3,7 @@
 from ..plan_shopping import split_shopping_trips, validate_shopping_snapshot
 from ..repositories import plan_repo
 from ._common import require_arg, tool_handler
-from ._plan_common import normalize_week_id, require_plan
+from ._plan_common import normalize_week_id, require_current_shopping_snapshot, require_plan
 
 NAME = "split_shopping_list"
 SCHEMA = {
@@ -38,6 +38,7 @@ def HANDLER(args: dict, **kwargs):
             plan.shopping.get("items"), list
         ):
             raise ValueError("generate the shopping list before splitting trips")
+        require_current_shopping_snapshot(plan)
         if "complete" not in plan.shopping:
             raise ValueError("estimate plan cost before splitting shopping trips")
         split = split_shopping_trips(plan.shopping, trip_limit=trip_limit)

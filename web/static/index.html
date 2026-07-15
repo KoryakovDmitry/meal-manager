@@ -327,6 +327,10 @@ textarea { resize: vertical; min-height: 60px; }
 .shopping-item:last-child { border-bottom: none; }
 .shopping-item .ing-name { font-weight: 600; }
 .shopping-item .unlocks { font-size: 0.8rem; color: var(--text-dim); }
+.shopping-check { min-width:44px; min-height:44px; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+.shopping-check input { width:22px; height:22px; accent-color:var(--success); }
+.shopping-item.checked .ing-name { text-decoration:line-through; color:var(--text-dim); }
+.shopping-kind { display:inline-block; margin-top:4px; padding:2px 7px; border-radius:999px; font-size:.72rem; background:rgba(108,92,231,.12); color:var(--accent); }
 
 /* ─── History ─── */
 .history-item {
@@ -605,7 +609,7 @@ textarea { resize: vertical; min-height: 60px; }
     <div class="card">
       <div class="section-title">🛒 Что докупить</div>
       <p style="color:var(--text-dim);font-size:0.85rem;margin-bottom:12px">
-        Ингредиенты, которых не хватает ровно для одного рецепта. Купить один — разблокировать новое блюдо.
+        Список текущей недели из запланированных рецептов. Галочка — только ваша заметка в магазине и не добавляет товар в кухонный запас.
       </p>
       <div id="shopping-container"></div>
     </div>
@@ -641,7 +645,7 @@ textarea { resize: vertical; min-height: 60px; }
 
 <script>
 const API = '';
-let CACHE = { dishes: [], dishesVersion: null, fridge: [], inventory: [], products: [], suggestions: [], shopping: [], history: [], plans: [], selectedPlan: null, selectedPlanVersion: null, stats: {} };
+let CACHE = { dishes: [], dishesVersion: null, fridge: [], inventory: [], products: [], suggestions: [], shopping: [], shoppingWeek: null, shoppingProjectionError: null, history: [], plans: [], selectedPlan: null, selectedPlanVersion: null, selectedPlanProjectionError: null, stats: {} };
 let editingFridgeItem = null;
 let fridgeEditSaving = false;
 
@@ -848,7 +852,11 @@ async function refreshAll() {
     }
     if (index === 2) CACHE.products = value.items || [];
     if (index === 3) CACHE.suggestions = value.suggestions || [];
-    if (index === 4) CACHE.shopping = value.items || [];
+    if (index === 4) {
+      CACHE.shopping = value.items || [];
+      CACHE.shoppingWeek = value.week || null;
+      CACHE.shoppingProjectionError = value.projection_error || null;
+    }
     if (index === 5) CACHE.history = value.history || [];
     if (index === 6) {
       CACHE.plans = value.plans || [];
@@ -1636,35 +1644,55 @@ function renderSuggestions() {
 }
 
 // ─── Shopping ───
+const SHOPPING_CHECKED_KEY = 'meal-shopping-checked';
+function shoppingCheckedState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SHOPPING_CHECKED_KEY) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) { return {}; }
+}
+function saveShoppingCheckedState(state) {
+  try { localStorage.setItem(SHOPPING_CHECKED_KEY, JSON.stringify(state)); } catch (_) {}
+}
 function renderShopping() {
   const c = document.getElementById('shopping-container');
-  if (CACHE.shopping.length === 0) {
-    c.innerHTML = '<p style="color:var(--text-dim)">Все базовые ингредиенты для ваших рецептов в наличии, либо не хватает больше одного.</p>';
+  if (CACHE.shoppingProjectionError) {
+    c.innerHTML = `<div class="error-card" role="alert">Список не удалось проверить по актуальным рецептам: ${escapeHtml(CACHE.shoppingProjectionError)}. Позиции скрыты до восстановления источников данных.</div><p style="color:var(--text-dim)">Актуальный список временно недоступен.</p>`;
     return;
   }
+  if (CACHE.shopping.length === 0) {
+    const emptyText = CACHE.shoppingWeek ? `На ${escapeHtml(CACHE.shoppingWeek)} актуальный список пуст.` : 'Для текущей недели ещё нет сохранённого списка покупок.';
+    c.innerHTML = `<p style="color:var(--text-dim)">${emptyText}</p>`;
+    return;
+  }
+  const checkedState = shoppingCheckedState();
   c.innerHTML = CACHE.shopping.map(item => {
     const ingredient = escapeHtml(item.ingredient);
-    const unlocks = (item.unlocks || []).map(escapeHtml).join(', ');
+    const itemId = escapeHtml(item.id);
+    const checked = checkedState[item.id] === true;
+    const requiredBy = (item.required_by || []).map(source => escapeHtml(source.name)).join(', ');
+    const kindLabel = item.kind === 'known_missing' ? 'Знакомый продукт · закончился' : 'Абстрактный продукт · уточнить после покупки';
     return `
-    <div class="shopping-item">
-      <div>
-        <div class="ing-name">${ingredient}</div>
-        <div class="unlocks">Разблокирует: ${unlocks}</div>
-      </div>
-      <div>
-        <button class="btn btn-success btn-sm" data-action="buy" data-value="${ingredient}">Куплено ✓</button>
+    <div class="shopping-item ${checked?'checked':''}" data-shopping-id="${itemId}">
+      <label class="shopping-check" aria-label="Отметить как взято: ${ingredient}">
+        <input type="checkbox" data-shopping-check="${itemId}" ${checked?'checked':''}>
+      </label>
+      <div style="flex:1">
+        <div class="ing-name">${ingredient}${Number(item.to_buy)>1 ? ` · ${Number(item.to_buy)} использования` : ''}</div>
+        <div class="unlocks">Нужно для: ${requiredBy || 'ручная покупка'}</div>
+        <span class="shopping-kind">${kindLabel}</span>
       </div>
     </div>`;
   }).join('');
-  bindDataActions(c, {buy: buyShoppingItem});
-}
-
-async function buyShoppingItem(ing) {
-  try {
-    await api('/api/fridge/add', 'POST', { ingredient: ing });
-    toast(`Добавлено в холодильник: ${ing}`);
-    await refreshAll();
-  } catch (e) { toast(e.message, true); }
+  c.querySelectorAll('[data-shopping-check]').forEach(control => {
+    control.addEventListener('change', () => {
+      const state = shoppingCheckedState();
+      if (control.checked) state[control.dataset.shoppingCheck] = true;
+      else delete state[control.dataset.shoppingCheck];
+      saveShoppingCheckedState(state);
+      control.closest('.shopping-item')?.classList.toggle('checked', control.checked);
+    });
+  });
 }
 
 // ─── Weekly plans ───
@@ -1672,6 +1700,7 @@ function syncSelectedPlanWithList() {
   if (CACHE.selectedPlan && !CACHE.plans.some(plan => plan.week === CACHE.selectedPlan.week)) {
     CACHE.selectedPlan = null;
     CACHE.selectedPlanVersion = null;
+    CACHE.selectedPlanProjectionError = null;
   }
 }
 
@@ -1698,6 +1727,7 @@ async function loadPlan(week) {
     const response = await api('/api/plans/' + encodeURIComponent(week));
     CACHE.selectedPlan = response.plan;
     CACHE.selectedPlanVersion = response.version;
+    CACHE.selectedPlanProjectionError = response.shopping_projection_error || null;
     renderPlans();
     renderPlanDetail();
   } catch (e) { toast(e.message, true); }
@@ -1706,6 +1736,7 @@ async function loadPlan(week) {
 function updateSelectedPlan(response) {
   CACHE.selectedPlan = response.plan;
   CACHE.selectedPlanVersion = response.version;
+  CACHE.selectedPlanProjectionError = response.shopping_projection_error || null;
   renderPlans();
   renderPlanDetail();
   document.getElementById('plan-detail-title')?.focus();
@@ -1716,6 +1747,7 @@ function applyPlanConflict(error) {
   if (document.getElementById('plan-meal-modal-title')) closeModal();
   CACHE.selectedPlan = error.detail.current_plan;
   CACHE.selectedPlanVersion = error.detail.current_version;
+  CACHE.selectedPlanProjectionError = null;
   renderPlans();
   renderPlanDetail();
   document.getElementById('plan-detail-title')?.focus();
@@ -1723,7 +1755,10 @@ function applyPlanConflict(error) {
   return true;
 }
 
-function renderPlanShopping(shopping) {
+function renderPlanShopping(shopping, projectionError=null) {
+  if (projectionError) {
+    return `<div class="section-title">🛒 Покупки и бюджет</div><div class="error-card" role="alert">Актуальный список недоступен: ${escapeHtml(projectionError)}. Позиции скрыты до восстановления источников данных.</div>`;
+  }
   if (!shopping || !Array.isArray(shopping.items)) {
     return '<div class="empty">Список покупок для недели ещё не сформирован</div>';
   }
@@ -1789,7 +1824,7 @@ function renderPlanDetail() {
     ${editable ? '' : '<div class="plan-note" style="margin-bottom:12px">Редактирование блюд доступно только для draft-плана.</div>'}
     ${prep ? `<div style="margin-bottom:12px"><strong>Заготовки:</strong> ${prep}</div>` : ''}
     <div class="plan-days">${days}</div>
-    <div class="plan-shopping">${renderPlanShopping(plan.shopping)}</div>`;
+    <div class="plan-shopping">${renderPlanShopping(plan.shopping, CACHE.selectedPlanProjectionError)}</div>`;
   bindDataActions(detail, {
     'add-meal': day => showPlanMealModal(day),
     'edit-meal': target => showPlanMealModal(...target.split(':')),
@@ -1892,6 +1927,7 @@ async function deleteWeekPlan() {
     await api(path, 'DELETE');
     CACHE.selectedPlan = null;
     CACHE.selectedPlanVersion = null;
+    CACHE.selectedPlanProjectionError = null;
     renderPlans();
     renderPlanDetail();
     toast(`План ${plan.week} удалён`);

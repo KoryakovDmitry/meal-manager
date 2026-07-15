@@ -52,14 +52,13 @@ def HANDLER(args: dict, **kwargs):
     names = ", ".join(items)
 
     with fridge_repo.lock:
-        fridge = fridge_repo.load()
+        available_keys = fridge_repo.load_set()
 
         if action == "add":
-            added = [ing for ing in items if ing not in fridge]
-            already = [ing for ing in items if ing in fridge]
+            added = [ing for ing in items if ing not in available_keys]
+            already = [ing for ing in items if ing in available_keys]
             if added:
-                fridge.extend(added)
-                fridge_repo.save(fridge)
+                fridge_repo.save(fridge_repo.load() + added)
                 if already:
                     return (
                         f"Added {', '.join(added)} to the fridge. "
@@ -69,12 +68,10 @@ def HANDLER(args: dict, **kwargs):
             return f"No changes — {names} already in the fridge."
 
         # action == "remove"
-        to_remove = set(items)
-        removed = [ing for ing in items if ing in fridge]
-        not_found = [ing for ing in items if ing not in fridge]
+        removed = [ing for ing in items if ing in available_keys]
+        not_found = [ing for ing in items if ing not in available_keys]
         if removed:
-            fridge = [ing for ing in fridge if ing not in to_remove]
-            fridge_repo.save(fridge)
+            fridge_repo.remove_items(removed)
             if not_found:
                 return (
                     f"Removed {', '.join(removed)} from the fridge. "

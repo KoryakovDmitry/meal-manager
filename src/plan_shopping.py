@@ -77,7 +77,7 @@ def _validate_persisted_item(item, *, covered=False):
         if (
             not isinstance(source, dict)
             or set(source) != {"kind", "name", "uses"}
-            or source.get("kind") not in {"dish", "prep"}
+            or source.get("kind") not in {"dish", "prep", "manual"}
         ):
             raise ValueError(f"required_by source for '{ingredient}' is invalid")
         _canonical_name(source.get("name"), label="required_by name")

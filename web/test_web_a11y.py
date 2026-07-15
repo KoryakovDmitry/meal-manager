@@ -128,7 +128,12 @@ setTimeout(async () => {
     {name: 'суп', score: 1, can_cook: true, recently_cooked: false, missing_essentials: [], missing_optional: []},
     {name: attack, score: 0, can_cook: false, recently_cooked: true, missing_essentials: [attack], missing_optional: [attack]}
   ];
-  CACHE.shopping = [{ingredient: attack, unlocks: [attack]}];
+  CACHE.shopping = [{
+    id:'shop_xss', ingredient:attack, kind:'abstract_request', product_id:null,
+    required_uses:1, available_uses:0, to_buy:1,
+    required_by:[{kind:'dish',name:attack,uses:1}]
+  }];
+  const shoppingBefore = CACHE.shopping;
   CACHE.history = [{dish: attack, date: '2026-07-13T12:00:00'}];
   CACHE.plans = [{week: attack, status: attack, meals_count: 1, prep_count: 0}];
   const attackedPlanDays = Object.fromEntries(['mon','tue','wed','thu','fri','sat','sun'].map(day => [day, {meals: []}]));
@@ -148,6 +153,30 @@ setTimeout(async () => {
   renderFridge();
   renderSuggestions();
   renderShopping();
+  localStorage.removeItem('meal-shopping-checked');
+  let shoppingApiCalls = 0;
+  api = async () => { shoppingApiCalls += 1; return {}; };
+  const shoppingCheckbox = document.querySelector('#shopping-container input[type="checkbox"]');
+  shoppingCheckbox?.click();
+  const shoppingChecklistLocal = shoppingCheckbox?.checked === true &&
+    JSON.parse(localStorage.getItem('meal-shopping-checked') || '{}').shop_xss === true;
+  renderShopping();
+  const shoppingChecklistSurvivesRender =
+    document.querySelector('[data-shopping-check="shop_xss"]')?.checked === true;
+  CACHE.shoppingProjectionError = 'corrupt recipe';
+  renderShopping();
+  const shoppingProjectionFailsClosed =
+    document.getElementById('shopping-container').textContent.includes('временно недоступен') &&
+    document.querySelectorAll('#shopping-container [data-shopping-id]').length === 0 &&
+    !document.getElementById('shopping-container').textContent.includes('покупать ничего не нужно');
+  const planShoppingProjectionFailsClosed =
+    renderPlanShopping({items: []}, 'corrupt recipe').includes('Позиции скрыты') &&
+    !renderPlanShopping({items: []}, 'corrupt recipe').includes('Ничего');
+  CACHE.shoppingProjectionError = null;
+  CACHE.shopping = shoppingBefore;
+  renderShopping();
+  const shoppingCheckboxDoesNotMutateInventory = shoppingApiCalls === 0 &&
+    !document.getElementById('shopping-container').textContent.includes('Добавлено в холодильник');
   renderHistory();
   renderPlans();
   renderPlanDetail();
@@ -499,6 +528,9 @@ setTimeout(async () => {
     planDeleteVersioned, planDeleted, planDetailCleared, planListFocus, externallyDeletedPlanCleared,
     productModalSemantics, replenishFreshBatch, replenishCategoryPrefill, productFocusRestore,
     categoryModalSemantics, categoryVersioned, categoryFocusRestore, categoryBadge, categoryFilter,
+    shoppingChecklistLocal, shoppingChecklistSurvivesRender,
+    shoppingProjectionFailsClosed, planShoppingProjectionFailsClosed,
+    shoppingCheckboxDoesNotMutateInventory,
     dishInstructionsVisible, dishInstructionsPrefilled, dishInstructionsSaved,
     window.__qaErrors.length
   ].join(';'));
@@ -575,7 +607,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            + ";".join(["true"] * 43) + ";0"
+            + ";".join(["true"] * 48) + ";0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"

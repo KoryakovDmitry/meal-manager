@@ -36,8 +36,10 @@ def build_product_catalog(
     stocked_names: set[str] = set()
 
     for item in items:
-        stocked_names.add(item.name)
-        if not item.available and not item.ever_stocked and item.name not in recipe_counts:
+        identity_names = (item.name, *item.aliases)
+        stocked_names.update(identity_names)
+        recipe_count = sum(recipe_counts.get(name, 0) for name in identity_names)
+        if not item.available and not item.ever_stocked and recipe_count == 0:
             continue
         item_status = (
             "in_stock"
@@ -49,8 +51,8 @@ def build_product_catalog(
         rows.append(item.to_public_dict() | {
             "available": item.available,
             "status": item_status,
-            "recipe_count": recipe_counts.get(item.name, 0),
-            "in_recipes": recipe_counts.get(item.name, 0) > 0,
+            "recipe_count": recipe_count,
+            "in_recipes": recipe_count > 0,
         })
 
     for name, recipe_count in recipe_counts.items():
@@ -80,7 +82,11 @@ def build_product_catalog(
             row for row in rows
             if (status == "all" or row["status"] == status)
             and (category == "all" or row["category"] == category)
-            and (not normalized_query or normalized_query in row["name"])
+            and (
+                not normalized_query
+                or normalized_query in row["name"]
+                or any(normalized_query in alias for alias in row.get("aliases", []))
+            )
         ),
         key=lambda row: row["name"],
     )

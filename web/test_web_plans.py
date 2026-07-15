@@ -96,6 +96,87 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         web.PLANS_DIR = Path(tmp)
         write_plan(web.PLANS_DIR, "2026-W30", valid_plan())
+        original_current_week = getattr(web, "_current_week_id", None)
+        original_fridge_path = web.FRIDGE_PATH
+        original_dishes_path = web.DISHES_PATH
+        original_prep_path = web.PREP_ITEMS_PATH
+        original_shopping_requests_path = web.SHOPPING_REQUESTS_PATH
+        web.FRIDGE_PATH = Path(tmp) / "fridge.json"
+        web.DISHES_PATH = Path(tmp) / "dishes.json"
+        web.PREP_ITEMS_PATH = Path(tmp) / "prep_items.json"
+        web.SHOPPING_REQUESTS_PATH = Path(tmp) / "shopping_requests.json"
+        web.FRIDGE_PATH.write_text(
+            json.dumps({"schema_version": 4, "items": []}), encoding="utf-8"
+        )
+        web.DISHES_PATH.write_text(json.dumps({"dishes": [{
+            "name": "soup <script>",
+            "ingredients": {"carrot <b>": True},
+        }]}), encoding="utf-8")
+        (Path(tmp) / "prep_items.json").write_text(json.dumps({"prep_items": [{
+            "name": "stock", "ingredients": {}, "yield": 1,
+            "yield_unit": "portion", "storage": "freezer", "remaining": 1,
+        }]}), encoding="utf-8")
+        web._current_week_id = lambda: "2026-W30"
+        try:
+            shopping_view = web.get_shopping()
+            web.FRIDGE_PATH.write_text(json.dumps({
+                "schema_version": 5,
+                "items": [{
+                    "id": "inv_carrot", "name": "exact carrot product",
+                    "aliases": ["carrot <b>"], "available": False,
+                    "category": "product", "ever_stocked": True,
+                    "quantity": None, "unit": None, "package_count": None,
+                    "storage": None, "expires_on": None, "comment": None,
+                    "created_at": "2026-07-15T00:00:00+00:00",
+                    "updated_at": "2026-07-15T00:00:00+00:00",
+                }],
+            }), encoding="utf-8")
+            known_missing_view = web.get_shopping()
+            web.DISHES_PATH.write_text(json.dumps({"dishes": [{
+                "name": "soup <script>",
+                "ingredients": {"cabbage": True},
+            }]}), encoding="utf-8")
+            recipe_changed_view = web.get_shopping()
+            web.FRIDGE_PATH.write_text(json.dumps({
+                "schema_version": 5,
+                "items": [{
+                    "id": "inv_cabbage", "name": "exact cabbage product",
+                    "aliases": ["cabbage"], "available": True,
+                    "category": "product", "ever_stocked": True,
+                    "quantity": None, "unit": None, "package_count": None,
+                    "storage": None, "expires_on": None, "comment": None,
+                    "created_at": "2026-07-15T00:00:00+00:00",
+                    "updated_at": "2026-07-15T00:00:00+00:00",
+                }],
+            }), encoding="utf-8")
+            inventory_changed_view = web.get_shopping()
+            web.DISHES_PATH.write_text("{broken", encoding="utf-8")
+            failed_projection = web.get_shopping()
+        finally:
+            if original_current_week is None:
+                del web._current_week_id
+            else:
+                web._current_week_id = original_current_week
+            web.FRIDGE_PATH = original_fridge_path
+            web.DISHES_PATH = original_dishes_path
+            web.PREP_ITEMS_PATH = original_prep_path
+            web.SHOPPING_REQUESTS_PATH = original_shopping_requests_path
+        assert shopping_view["week"] == "2026-W30"
+        assert shopping_view["source"] == "weekly_plan"
+        assert [item["ingredient"] for item in shopping_view["items"]] == ["carrot <b>"]
+        assert shopping_view["items"][0]["kind"] == "abstract_request"
+        assert known_missing_view["items"][0]["kind"] == "known_missing"
+        assert known_missing_view["items"][0]["product_id"] == "inv_carrot"
+        assert shopping_view["items"][0]["id"].startswith("shop_")
+        assert "unlocks" not in shopping_view["items"][0]
+        assert shopping_view["persisted_stale"] is True
+        assert [item["ingredient"] for item in recipe_changed_view["items"]] == ["cabbage"]
+        assert recipe_changed_view["persisted_stale"] is True
+        assert inventory_changed_view["items"] == []
+        assert inventory_changed_view["persisted_stale"] is True
+        assert failed_projection["persisted_stale"] is True
+        assert failed_projection["items"] == []
+        assert "invalid dish catalog" in failed_projection["projection_error"]
         rows = web.list_week_plans()
         assert rows == [{
             "week": "2026-W30",
@@ -267,6 +348,13 @@ def main():
             shopping_unresolved_wrong_schema,
             valid_plan("2026-W32"),
         ]
+        manual_snapshot = valid_plan("2026-W31")
+        manual_snapshot["shopping"]["items"][0]["required_by"] = [
+            {"kind": "manual", "name": "carrot", "uses": 2}
+        ]
+        write_plan(web.PLANS_DIR, "2026-W31", manual_snapshot)
+        assert web.load_week_plan("2026-W31")["shopping"]["items"][0]["required_by"][0]["kind"] == "manual"
+
         for payload in malformed:
             write_plan(web.PLANS_DIR, "2026-W31", payload)
             assert all(row["week"] != "2026-W31" for row in web.list_week_plans())
@@ -274,7 +362,7 @@ def main():
                 web.load_week_plan("2026-W31")
                 raise AssertionError(f"malformed plan accepted: {payload!r}")
             except HTTPException as exc:
-                assert exc.status_code == 404
+                assert exc.status_code == 503
 
         (web.PLANS_DIR / "2026-W31.json").write_bytes(b"\xff\xfeinvalid-json")
         assert all(row["week"] != "2026-W31" for row in web.list_week_plans())
@@ -282,7 +370,7 @@ def main():
             web.load_week_plan("2026-W31")
             raise AssertionError("invalid UTF-8 plan accepted")
         except HTTPException as exc:
-            assert exc.status_code == 404
+            assert exc.status_code == 503
 
         try:
             web.load_week_plan("2026-W99")

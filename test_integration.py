@@ -14,6 +14,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -474,8 +475,8 @@ def test_structured_fridge_repository_migrates_legacy_atomically():
 
         repo.save(["куриные голени", "паста", "масло"])
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("first mutation writes v4 envelope", persisted.get("schema_version") == 4)
-        check("v4 envelope contains all names", [x["name"] for x in persisted["items"]] == [
+        check("first mutation writes v5 envelope", persisted.get("schema_version") == 5)
+        check("v5 envelope contains all names", [x["name"] for x in persisted["items"]] == [
             "куриные голени", "паста", "масло",
         ])
         check("migrated ids survive first write", [x["id"] for x in persisted["items"][:2]] == [x.id for x in first])
@@ -914,7 +915,7 @@ def test_inventory_catalog_availability_lifecycle():
         check("replenish does not copy old expiry", replenished.expires_on is None)
         check("replenish does not copy old comment", replenished.comment is None)
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("catalog lifecycle writes schema v4", persisted.get("schema_version") == 4)
+        check("catalog lifecycle writes schema v5", persisted.get("schema_version") == 5)
 
 
 def test_inventory_category_schema_v4_and_recipe_identity():
@@ -961,9 +962,10 @@ def test_inventory_category_schema_v4_and_recipe_identity():
             expected_updated_at=stamp,
         )
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("category mutation writes schema v4", persisted["schema_version"] == 4)
-        check("schema v4 persists category", persisted["items"][0]["category"] == "ready_meal")
-        check("schema v4 persists stocked history", persisted["items"][0]["ever_stocked"] is True)
+        check("category mutation writes schema v5", persisted["schema_version"] == 5)
+        check("schema v5 persists category", persisted["items"][0]["category"] == "ready_meal")
+        check("schema v5 persists stocked history", persisted["items"][0]["ever_stocked"] is True)
+        check("v4 migration initializes aliases", persisted["items"][0]["aliases"] == [])
 
         bytes_before_stale = path.read_bytes()
         try:
@@ -1009,6 +1011,55 @@ def test_inventory_category_schema_v4_and_recipe_identity():
         check("replenish preserves recipe-only identity", replenished.id == recipe_only.id)
         check("replenish preserves category", replenished.category == "prep")
         check("replenish marks identity stocked", replenished.ever_stocked is True)
+
+        aliased = repo.add_item(
+            name="luxlait цельное 3,5% 1 л",
+            aliases=["молоко", "молочный продукт"],
+        )
+        check("available aliases satisfy generic inventory lookup", {
+            "luxlait цельное 3,5% 1 л", "молоко", "молочный продукт",
+        }.issubset(repo.load_set()))
+        alias_bytes = path.read_bytes()
+        try:
+            repo.add_item(name="другое молоко", aliases=["молоко"])
+            check("cross-identity alias collision is rejected", False)
+        except ValueError:
+            check("cross-identity alias collision is rejected", True)
+        check("alias collision writes no bytes", path.read_bytes() == alias_bytes)
+        check("alias identity remains stable", aliased.id.startswith("inv_"))
+
+        generic = repo.add_item(name="йогурт")
+        repo.remove_item(generic.id)
+        received = repo.receive_product(
+            requested_name="йогурт",
+            exact_name="fage total 5% 500 г",
+            quantity="500",
+            unit="g",
+            storage="fridge",
+        )
+        check("receipt refines known identity in place", received.id == generic.id)
+        check("receipt stores exact product name", received.name == "fage total 5% 500 г")
+        check("receipt preserves generic alias", "йогурт" in received.aliases)
+        check("receipt makes product available", received.available is True)
+        retry = repo.receive_product(
+            requested_name="йогурт",
+            exact_name="fage total 5% 500 г",
+            quantity="500",
+            unit="g",
+            storage="fridge",
+        )
+        check("receipt retry is identity-idempotent", retry.id == received.id)
+        abstract = repo.receive_product(
+            requested_name="растительное молоко",
+            exact_name="alpro oat no sugars 1 l",
+            quantity="1",
+            unit="l",
+            storage="pantry",
+        )
+        check("abstract receipt creates one exact identity", (
+            abstract.name == "alpro oat no sugars 1 l"
+            and abstract.aliases == ["растительное молоко"]
+        ))
 
         impossible = replenished.to_dict()
         impossible["ever_stocked"] = False
@@ -2196,6 +2247,11 @@ def test_phase3_shopping_budget_flow():
 
     stored = parse(get_week_plan({"week": "2026-W31"}))
     check("generated shopping persists in plan", stored.get("shopping", {}).get("items") == generated.get("items"))
+    check("native read exposes synchronized shopping projection", (
+        [item["ingredient"] for item in stored.get("current_shopping", {}).get("items", [])]
+        == [item["ingredient"] for item in generated.get("items", [])]
+        and stored.get("shopping_stale") is False
+    ))
 
     premature_split = parse(split_shopping_list({"week": "2026-W31"}))
     check("trip split requires prior cost estimate", "error" in premature_split)
@@ -2224,6 +2280,240 @@ def test_phase3_shopping_budget_flow():
     })
     changed = parse(get_week_plan({"week": "2026-W31"}))
     check("meal edit invalidates stale shopping calculation", changed.get("shopping") == {})
+    check("meal edit immediately refreshes native shopping projection", (
+        bool(changed.get("current_shopping", {}).get("items"))
+        and changed.get("shopping_stale") is False
+    ))
+
+    repositories = importlib.import_module(".src.repositories", _PLUGIN_DIR.name)
+    fridge_repo_local = repositories.fridge_repo
+    dish_repo_local = repositories.dish_repo
+    shopping_request_repo_local = repositories.shopping_request_repo
+    legacy_request_path = fridge_repo_local.path.parent / "legacy-shopping-requests.json"
+    legacy_request_path.write_text(json.dumps({
+        "schema_version": 1,
+        "requests": [{
+            "id": "shopreq_legacy",
+            "week": "2026-W31",
+            "requested_name": "legacy milk",
+            "created_at": "2026-07-15T00:00:00+00:00",
+            "updated_at": "2026-07-15T00:00:00+00:00",
+        }],
+    }), encoding="utf-8")
+    legacy_request_repo = repositories.JsonShoppingRequestRepository(legacy_request_path)
+    legacy_request_repo.reserve_receipt(
+        "shopreq_legacy", week="2026-W31",
+        requested_name="legacy milk", exact_name="legacy exact milk",
+    )
+    legacy_request_raw = json.loads(legacy_request_path.read_text(encoding="utf-8"))
+    check("shopping request schema v1 migrates to reserved schema v2", (
+        legacy_request_raw["schema_version"] == 2
+        and legacy_request_raw["requests"][0]["pending_exact_name"] == "legacy exact milk"
+    ))
+    add_manual_shopping_item = _load_handler("add_manual_shopping_item")
+    receive_shopping_item = _load_handler("receive_shopping_item")
+
+    derived_target = next(
+        item for item in changed["current_shopping"]["items"]
+        if item["id"].startswith("shop_")
+    )
+    derived_exact = f"точный товар {derived_target['ingredient']}"
+    derived_received = parse(receive_shopping_item({
+        "week": "2026-W31", "shopping_item_id": derived_target["id"],
+        "exact_name": derived_exact,
+    }))
+    derived_inventory_bytes = fridge_repo_local.path.read_bytes()
+    derived_replay = parse(receive_shopping_item({
+        "week": "2026-W31", "shopping_item_id": derived_target["id"],
+        "exact_name": derived_exact.upper(),
+    }))
+    check("derived shopping receipt has durable replay tombstone", (
+        derived_received.get("status") == "received"
+        and derived_replay.get("status") == "already_received"
+        and fridge_repo_local.path.read_bytes() == derived_inventory_bytes
+    ))
+
+    manual = parse(add_manual_shopping_item({
+        "week": "2026-W31", "ingredient": "растительный йогурт",
+    }))
+    manual_id = manual.get("id")
+    check("manual shopping request does not mutate inventory", (
+        manual.get("inventory_changed") is False
+        and "растительный йогурт" not in fridge_repo_local.load_set()
+    ))
+    with_manual = parse(get_week_plan({"week": "2026-W31"}))
+    check("manual abstract request joins current shopping", any(
+        item.get("id") == manual_id
+        and item.get("kind") == "abstract_request"
+        for item in with_manual.get("current_shopping", {}).get("items", [])
+    ))
+    regenerated_with_manual = parse(generate_shopping_list({"week": "2026-W31"}))
+    check("manual request joins persisted budget snapshot", any(
+        item.get("ingredient") == "растительный йогурт"
+        for item in regenerated_with_manual.get("items", [])
+    ))
+    rejected_receipt = parse(receive_shopping_item({
+        "week": "2026-W31", "shopping_item_id": manual_id,
+        "exact_name": "alpro plant protein blueberry 400 g",
+        "quantity": "400",
+    }))
+    check("failed receipt leaves shopping request intact", (
+        "error" in rejected_receipt
+        and shopping_request_repo_local.get(manual_id) is not None
+    ))
+    received = parse(receive_shopping_item({
+        "week": "2026-W31", "shopping_item_id": manual_id,
+        "exact_name": "alpro plant protein blueberry 400 g",
+        "quantity": "400", "unit": "g", "storage": "fridge",
+    }))
+    received_product = received.get("product", {})
+    check("receipt refines request to exact product with generic alias", (
+        received.get("status") == "received"
+        and received.get("generic_alias_preserved") is True
+        and received_product.get("name") == "alpro plant protein blueberry 400 g"
+        and "растительный йогурт" in received_product.get("aliases", [])
+    ))
+    check("successful receipt removes only then shopping request", (
+        received.get("shopping_item_removed") is True
+        and shopping_request_repo_local.get(manual_id) is None
+        and "растительный йогурт" in fridge_repo_local.load_set()
+    ))
+    replay_inventory = fridge_repo_local.path.read_bytes()
+    replay = parse(receive_shopping_item({
+        "week": "2026-W31",
+        "shopping_item_id": manual_id,
+        "exact_name": "alpro plant protein blueberry 400 g",
+        "quantity": 400,
+        "unit": "g",
+        "storage": "fridge",
+    }))
+    check("receipt replay returns completed result", replay.get("status") == "already_received", replay)
+    check("receipt replay performs no inventory write", fridge_repo_local.path.read_bytes() == replay_inventory)
+    legacy_remove = parse(update_fridge_inventory({
+        "action": "remove", "ingredients": ["растительный йогурт"],
+    }))
+    exact_after_legacy_remove = next(
+        item for item in fridge_repo_local.load_catalog_items()
+        if item.id == received_product.get("id")
+    )
+    check("legacy generic remove consumes exact aliased identity", (
+        "removed" in legacy_remove.lower() and not exact_after_legacy_remove.available
+    ))
+    legacy_add = parse(update_fridge_inventory({
+        "action": "add", "ingredients": ["растительный йогурт"],
+    }))
+    catalog_after_legacy_add = fridge_repo_local.load_catalog_items()
+    check("legacy generic add replenishes exact identity without duplicate", (
+        "added" in legacy_add.lower()
+        and sum(
+            1 for item in catalog_after_legacy_add
+            if item.id == received_product.get("id") and item.available
+        ) == 1
+        and all(item.name != "растительный йогурт" for item in catalog_after_legacy_add)
+    ))
+    after_receipt = parse(get_week_plan({"week": "2026-W31"}))
+    check("received manual item disappears from synchronized shopping", all(
+        item.get("id") != manual_id
+        for item in after_receipt.get("current_shopping", {}).get("items", [])
+    ))
+    fridge_repo_local.remove_items(["растительный йогурт"])
+    exact_after_alias_consumption = next(
+        item for item in fridge_repo_local.load_catalog_items()
+        if item.id == received_product.get("id")
+    )
+    check("generic recipe alias consumes exact inventory identity", (
+        exact_after_alias_consumption.available is False
+        and "растительный йогурт" not in fridge_repo_local.load_set()
+    ))
+
+    concurrent_request = parse(add_manual_shopping_item({
+        "week": "2026-W31", "ingredient": "конкурентное молоко",
+    }))
+    concurrent_id = concurrent_request["id"]
+    receipt_barrier = threading.Barrier(2)
+    concurrent_results = []
+
+    def receive_concurrently(exact_name):
+        receipt_barrier.wait()
+        concurrent_results.append(parse(receive_shopping_item({
+            "week": "2026-W31",
+            "shopping_item_id": concurrent_id,
+            "exact_name": exact_name,
+        })))
+
+    receipt_threads = [
+        threading.Thread(target=receive_concurrently, args=("brand a milk",)),
+        threading.Thread(target=receive_concurrently, args=("brand b milk",)),
+    ]
+    for thread in receipt_threads:
+        thread.start()
+    for thread in receipt_threads:
+        thread.join(timeout=5)
+    completion = shopping_request_repo_local.get_completion(concurrent_id)
+    completed_product = next((
+        item for item in fridge_repo_local.load_catalog_items()
+        if completion is not None and item.id == completion.product_id
+    ), None)
+    check("concurrent receipt has one durable winner", (
+        sum(result.get("status") == "received" for result in concurrent_results) == 1
+        and sum("error" in result for result in concurrent_results) == 1
+        and completion is not None
+        and completed_product is not None
+        and completed_product.name == completion.exact_name
+        and "конкурентное молоко" in completed_product.aliases
+    ), str(concurrent_results))
+
+    crash_request = parse(add_manual_shopping_item({
+        "week": "2026-W31", "ingredient": "аварийное молоко",
+    }))
+    crash_id = crash_request["id"]
+    original_complete = shopping_request_repo_local.complete
+    def fail_after_inventory(*args, **kwargs):
+        raise RuntimeError("simulated completion outage")
+    shopping_request_repo_local.complete = fail_after_inventory
+    try:
+        first_crash_receipt = parse(receive_shopping_item({
+            "week": "2026-W31", "shopping_item_id": crash_id,
+            "exact_name": "brand a crash milk", "quantity": "1", "unit": "l",
+        }))
+    finally:
+        shopping_request_repo_local.complete = original_complete
+    reserved = shopping_request_repo_local.get(crash_id)
+    crash_inventory_before_conflict = fridge_repo_local.path.read_bytes()
+    conflicting_crash_retry = parse(receive_shopping_item({
+        "week": "2026-W31", "shopping_item_id": crash_id,
+        "exact_name": "brand b crash milk", "quantity": "1", "unit": "l",
+    }))
+    check("durable receipt reservation rejects post-crash conflicting retry", (
+        "error" in first_crash_receipt
+        and reserved is not None
+        and reserved.pending_exact_name == "brand a crash milk"
+        and "error" in conflicting_crash_retry
+        and fridge_repo_local.path.read_bytes() == crash_inventory_before_conflict
+    ), str(conflicting_crash_retry))
+    resumed_crash_receipt = parse(receive_shopping_item({
+        "week": "2026-W31", "shopping_item_id": crash_id,
+        "exact_name": " brand A crash milk ", "quantity": "1", "unit": "l",
+    }))
+    resumed_completion = shopping_request_repo_local.get_completion(crash_id)
+    check("matching post-crash retry resumes and completes reserved receipt", (
+        resumed_crash_receipt.get("status") == "received"
+        and shopping_request_repo_local.get(crash_id) is None
+        and resumed_completion is not None
+        and resumed_completion.exact_name == "brand a crash milk"
+    ))
+
+    dish_bytes_before_corruption = dish_repo_local.path.read_bytes()
+    try:
+        dish_repo_local.path.write_text("{broken", encoding="utf-8")
+        corrupt_projection = parse(get_week_plan({"week": "2026-W31"}))
+        check("corrupt shopping dependency exposes no stale current items", (
+            corrupt_projection.get("current_shopping", {}).get("items") == []
+            and corrupt_projection.get("shopping_stale") is True
+            and "invalid dish catalog" in corrupt_projection.get("shopping_projection_error", "")
+        ))
+    finally:
+        dish_repo_local.path.write_bytes(dish_bytes_before_corruption)
 
 
 def main():

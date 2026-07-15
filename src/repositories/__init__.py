@@ -26,12 +26,14 @@ from .base import (
     HistoryRepository,
     PlanRepository,
     PrepItemRepository,
+    ShoppingRequestRepository,
     TuningRepository,
 )
 from .json_dish import JsonDishRepository
 from .json_fridge import JsonFridgeRepository
 from .json_history import JsonHistoryRepository
 from .json_plan import JsonPlanRepository
+from .json_shopping_request import JsonShoppingRequestRepository
 from .json_prep_item import JsonPrepItemRepository
 from .json_tuning import JsonTuningRepository
 
@@ -50,6 +52,9 @@ history_repo: HistoryRepository = JsonHistoryRepository(_DEFAULT_DATA_DIR / "his
 tuning_repo: TuningRepository = JsonTuningRepository(_DEFAULT_DATA_DIR / "tuning.json")
 prep_repo: PrepItemRepository = JsonPrepItemRepository(_DEFAULT_DATA_DIR / "prep_items.json")
 plan_repo: PlanRepository = JsonPlanRepository(_DEFAULT_DATA_DIR / "plans")
+shopping_request_repo: ShoppingRequestRepository = JsonShoppingRequestRepository(
+    _DEFAULT_DATA_DIR / "shopping_requests.json"
+)
 
 
 def configure(data_dir) -> None:
@@ -71,6 +76,7 @@ def configure(data_dir) -> None:
     tuning_repo.path = data_dir / "tuning.json"
     prep_repo.path = data_dir / "prep_items.json"
     plan_repo.plans_dir = data_dir / "plans"
+    shopping_request_repo.path = data_dir / "shopping_requests.json"
 
 
 __all__ = [
@@ -79,12 +85,14 @@ __all__ = [
     "HistoryRepository",
     "PlanRepository",
     "PrepItemRepository",
+    "ShoppingRequestRepository",
     "TuningRepository",
     "JsonDishRepository",
     "JsonFridgeRepository",
     "JsonHistoryRepository",
     "JsonPlanRepository",
     "JsonPrepItemRepository",
+    "JsonShoppingRequestRepository",
     "JsonTuningRepository",
     "configure",
     "dish_repo",
@@ -92,5 +100,6 @@ __all__ = [
     "history_repo",
     "plan_repo",
     "prep_repo",
+    "shopping_request_repo",
     "tuning_repo",
 ]

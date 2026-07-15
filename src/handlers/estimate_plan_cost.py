@@ -3,7 +3,7 @@
 from ..plan_shopping import estimate_shopping_cost, validate_shopping_snapshot
 from ..repositories import plan_repo
 from ._common import maybe_parse_json_arg, require_arg, tool_handler
-from ._plan_common import normalize_week_id, require_plan
+from ._plan_common import normalize_week_id, require_current_shopping_snapshot, require_plan
 
 NAME = "estimate_plan_cost"
 SCHEMA = {
@@ -44,6 +44,7 @@ def HANDLER(args: dict, **kwargs):
             plan.shopping.get("items"), list
         ):
             raise ValueError("generate the shopping list before estimating cost")
+        require_current_shopping_snapshot(plan)
         estimate = estimate_shopping_cost(
             plan.shopping,
             prices,

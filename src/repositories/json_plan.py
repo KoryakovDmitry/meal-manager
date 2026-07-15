@@ -73,6 +73,24 @@ class JsonPlanRepository:
         safe_week_id = WeekPlan.normalize_week_id(week_id)
         return self.plans_dir / f"{safe_week_id}.json"
 
+    def load_strict(self, week_id: str) -> WeekPlan | None:
+        path = self._path_for(week_id)
+        if not path.exists():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            plan = WeekPlan.from_dict(data)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError,
+                KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid weekly plan '{week_id}': {exc}") from exc
+        expected_week = WeekPlan.normalize_week_id(week_id)
+        if plan.week_id != expected_week:
+            raise ValueError(
+                f"weekly plan filename '{expected_week}' conflicts with '{plan.week_id}'"
+            )
+        return plan
+
     def load(self, week_id: str) -> WeekPlan | None:
         """Load a single week plan. Returns ``None`` if it doesn't exist."""
         path = self._path_for(week_id)

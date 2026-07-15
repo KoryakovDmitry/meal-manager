@@ -32,6 +32,22 @@ class JsonDishRepository:
     def _io_path(self) -> Path:
         return self.lock.active_path or self.path
 
+    def load_strict(self) -> list[Dish]:
+        path = self._io_path()
+        if not path.exists():
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(f"invalid dish catalog: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("dishes", []), list):
+            raise ValueError("invalid dish catalog envelope")
+        try:
+            return [Dish.from_dict(entry) for entry in data.get("dishes", [])]
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid dish catalog entry: {exc}") from exc
+
     def load(self) -> list[Dish]:
         path = self._io_path()
         if not path.exists():

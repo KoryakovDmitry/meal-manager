@@ -1,7 +1,7 @@
 """Structured kitchen inventory item domain model."""
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -71,6 +71,7 @@ class InventoryItem:
     available: bool = True
     category: str = "product"
     ever_stocked: bool = True
+    aliases: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -98,6 +99,23 @@ class InventoryItem:
             raise ValueError("ever_stocked must be a boolean")
         if self.available and not self.ever_stocked:
             raise ValueError("available inventory must have been stocked")
+
+        if not isinstance(self.aliases, list):
+            raise ValueError("aliases must be a list")
+        normalized_aliases: list[str] = []
+        seen_aliases: set[str] = set()
+        for raw_alias in self.aliases:
+            if not isinstance(raw_alias, str):
+                raise ValueError("aliases must contain strings")
+            alias = Dish.normalize_ingredient(raw_alias)
+            if not alias:
+                raise ValueError("alias cannot be empty")
+            if len(alias) > MAX_NAME_LEN:
+                raise ValueError(f"alias too long (max {MAX_NAME_LEN} chars)")
+            if alias != self.name and alias not in seen_aliases:
+                normalized_aliases.append(alias)
+                seen_aliases.add(alias)
+        self.aliases = normalized_aliases
 
         if self.quantity is None:
             if self.unit is not None:
