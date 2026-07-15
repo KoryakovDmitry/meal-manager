@@ -227,7 +227,7 @@
 - [x] Invalid UTF-8, huge integers, `NaN`/Infinity, stale state и contradictory payload guards.
 - [x] Verification gate: **185 unit + 150 integration**, focused web tests, JS/Python syntax и independent review.
 
-### SHOP-1 — Live plan-backed shopping and receipt reconciliation 🚧
+### SHOP-1 — Live plan-backed shopping and receipt reconciliation ✅
 
 **Цель.** Сделать вкладку «Покупки» актуальной проекцией текущего недельного плана и безопасно связывать абстрактный запрос с точным купленным товаром. Детальный контракт: [`docs/issues/SHOP-1-live-shopping-and-receipt-reconciliation.md`](docs/issues/SHOP-1-live-shopping-and-receipt-reconciliation.md).
 
@@ -238,7 +238,7 @@
 - [x] Agent receipt flow сохраняет durable exact-name reservation до inventory write, затем generic → exact alias и completion tombstone; post-crash conflicting retry отклоняется.
 - [x] Manual requests входят в live и persisted budget snapshot; estimate/split отвергают stale snapshot.
 - [x] Malformed shopping dependencies дают explicit stale/error либо fail closed, а не пустой «актуальный» список.
-- [ ] Финальный independent GO, production backup, commit/push, coordinated restart и live QA.
+- [x] Финальный independent GO, production backup, commit/push, coordinated Gateway/Web restart и live QA: 15 live needs, no projection error/stale snapshot, inventory v5 semantic integrity.
 
 ---
 
