@@ -239,7 +239,7 @@
 - [x] Manual requests входят в live и persisted budget snapshot; estimate/split отвергают stale snapshot.
 - [x] Malformed shopping dependencies дают explicit stale/error либо fail closed, а не пустой «актуальный» список.
 - [x] Финальный independent GO, production backup, commit/push, coordinated Gateway/Web restart и live QA: 15 live needs, no projection error/stale snapshot, inventory v5 semantic integrity.
-- [ ] HOTFIX — повторная потребность после `купил → съел → снова нужно` получает новый occurrence-scoped `shop_*` ID и не конфликтует с tombstone прошлой покупки; RED/GREEN regression готов, release gate ожидается.
+- [x] HOTFIX — повторная потребность после `купил → съел → снова нужно` получает новый occurrence-scoped `shop_*` ID и не конфликтует с tombstone прошлой покупки; выпущено в `2619df8` с inventory schema v6/`stock_cycle`, strict migration, alias-aware native cooking, locked backup, coordinated restart и live Web/native QA (6 needs, no stale/projection error).
 
 ---
 
