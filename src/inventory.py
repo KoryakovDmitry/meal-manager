@@ -72,6 +72,7 @@ class InventoryItem:
     category: str = "product"
     ever_stocked: bool = True
     aliases: list[str] = field(default_factory=list)
+    stock_cycle: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -99,6 +100,12 @@ class InventoryItem:
             raise ValueError("ever_stocked must be a boolean")
         if self.available and not self.ever_stocked:
             raise ValueError("available inventory must have been stocked")
+        if (
+            isinstance(self.stock_cycle, bool)
+            or not isinstance(self.stock_cycle, int)
+            or self.stock_cycle < 0
+        ):
+            raise ValueError("stock_cycle must be a non-negative integer")
 
         if not isinstance(self.aliases, list):
             raise ValueError("aliases must be a list")
@@ -186,6 +193,7 @@ class InventoryItem:
         payload = self.to_dict()
         payload.pop("available")
         payload.pop("ever_stocked")
+        payload.pop("stock_cycle")
         return payload | {"expiry_status": self.expiry_status(today=today)}
 
     @classmethod

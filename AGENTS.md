@@ -142,8 +142,8 @@ python3 -c "import sys, importlib, pathlib; sys.path.insert(0, str(pathlib.Path(
 - Dishes cooked fewer than 2 days ago are excluded from suggestions.
 - `register_cooked_meal` removes essential ingredients from the fridge after recording the meal.
 - Quick shopping suggestions only surface dishes missing exactly one essential ingredient.
-- Inventory schema v5 aliases map generic recipe ingredients to one exact product identity; availability checks, legacy add/remove, prep, and cooking must resolve and mutate that exact identity rather than create a generic duplicate.
-- Weekly shopping is a live projection over plan, recipes, prep, inventory aliases, and active manual requests. Browser checkboxes are local notes only. Receipt reconciliation is serialized under the shopping-request lock: reserve the exact-name winner, then write inventory, then persist the completion tombstone.
+- Inventory schema v6 aliases map generic recipe ingredients to one exact product identity; its internal `stock_cycle` increments only on available→unavailable. Availability checks, legacy add/remove, prep, and cooking must resolve and mutate that exact identity rather than create a generic duplicate.
+- Weekly shopping is a live projection over plan, recipes, prep, inventory aliases, and active manual requests. Derived `shop_*` IDs are stable per missing-stock occurrence and must rotate after an item is replenished, consumed, and needed again; old completion tombstones apply only to their occurrence. Browser checkboxes are local notes only. Receipt reconciliation is serialized under the shopping-request lock: reserve the exact-name winner, then write inventory, then persist the completion tombstone.
 - DII sessions reveal suggestions one at a time through the probability funnel.
 - Removing an essential ingredient in a DII session should signal that recalculation is needed.
 

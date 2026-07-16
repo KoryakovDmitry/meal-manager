@@ -234,11 +234,12 @@
 - [x] Web/native readers строят live projection из plan, recipes, prep, inventory aliases и manual requests; stale persisted snapshot явно маркируется.
 - [x] Stable `shop_*`/`shopreq_*` IDs и категории `known_missing` / `abstract_request`.
 - [x] Browser checkbox хранится только в `localStorage`, переживает повторный render и не вызывает inventory API.
-- [x] Inventory schema v5 сохраняет aliases; generic recipe ingredient удовлетворяется и списывает exact product identity.
+- [x] Inventory schema v6 сохраняет aliases и отдельный stock cycle; generic recipe ingredient удовлетворяется и списывает exact product identity.
 - [x] Agent receipt flow сохраняет durable exact-name reservation до inventory write, затем generic → exact alias и completion tombstone; post-crash conflicting retry отклоняется.
 - [x] Manual requests входят в live и persisted budget snapshot; estimate/split отвергают stale snapshot.
 - [x] Malformed shopping dependencies дают explicit stale/error либо fail closed, а не пустой «актуальный» список.
 - [x] Финальный independent GO, production backup, commit/push, coordinated Gateway/Web restart и live QA: 15 live needs, no projection error/stale snapshot, inventory v5 semantic integrity.
+- [ ] HOTFIX — повторная потребность после `купил → съел → снова нужно` получает новый occurrence-scoped `shop_*` ID и не конфликтует с tombstone прошлой покупки; RED/GREEN regression готов, release gate ожидается.
 
 ---
 
@@ -328,7 +329,7 @@
 
 **Подтверждённый blocker.** Web/native history сейчас используют несовместимые представления (`{"history": [...]}` против `{dish: latest_date}`), dishes/history имеют только process-local locks, а Web частично читает и пишет domain JSON напрямую. Production history сейчас пустой, поэтому экстренного восстановления данных не требуется.
 
-**Результат задачи.** Stable identity/versioning для mutable entities, единая history semantics, Web без прямого domain JSON persistence, cross-process locking, общие cross-domain command services, fail-closed migrations и проверенный coordinated rollout. Существующий inventory schema v5 с aliases остаётся reference implementation и не переписывается без явно отрепетированной миграции.
+**Результат задачи.** Stable identity/versioning для mutable entities, единая history semantics, Web без прямого domain JSON persistence, cross-process locking, общие cross-domain command services, fail-closed migrations и проверенный coordinated rollout. Существующий inventory schema v6 с aliases и stock-cycle occurrence semantics остаётся reference implementation и не переписывается без явно отрепетированной миграции.
 
 **Связь с INV-3.** DATA-1 блокирует all-domain synchronization для dishes/history; inventory/catalog slice INV-3 может проектироваться отдельно.
 

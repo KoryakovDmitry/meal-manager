@@ -268,7 +268,7 @@ Internal paths, parser internals, raw malformed payloads, and comments must not 
 
 ## Migration and rollout constraints
 
-- inventory schema v5, aliases, and stable IDs must be preserved exactly;
+- inventory schema v6, aliases, stock cycles, and stable IDs must be preserved exactly;
 - create verified pre-migration backups for every touched production file;
 - rehearse each migration against a temporary production copy;
 - verify names, IDs, metadata, references, counts, and compatibility projections;
@@ -333,7 +333,7 @@ Only after authoritative models and coherent snapshots exist for every mutable W
 
 ### Identity and versioning
 
-- [x] SHOP-1 explicitly supersedes schema v4 with rehearsed schema v5 aliases while preserving stable IDs.
+- [x] SHOP-1 explicitly supersedes schema v4/v5 with rehearsed schema v6 aliases and occurrence cycles while preserving inventory IDs.
 - [ ] Dish rename/delete does not depend on mutable name identity without an explicit collection precondition.
 - [ ] History entries are deleted by stable identity, not array index.
 - [ ] Entity/collection versions make stale edits/deletes deterministic and non-destructive.

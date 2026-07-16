@@ -95,7 +95,7 @@ The flat fridge list has evolved into one versioned inventory/catalog envelope. 
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "items": [
     {
       "id": "inv_01J...",
@@ -111,7 +111,8 @@ The flat fridge list has evolved into one versioned inventory/catalog envelope. 
       "updated_at": "2026-07-14T01:15:00+02:00",
       "available": true,
       "category": "ready_meal",
-      "ever_stocked": true
+      "ever_stocked": true,
+      "stock_cycle": 0
     }
   ]
 }
@@ -123,11 +124,11 @@ Storage values are `fridge`, `freezer`, `pantry`, and `counter`. Quantity is per
 
 Aliases form one global ingredient-identity namespace with canonical names. A generic recipe ingredient may resolve to an exact stocked product through an alias; availability, shopping subtraction, prep/cooking consumption, legacy add/remove, and product-catalog usage all resolve back to that exact stable identity.
 
-**Compatibility:** Legacy flat arrays and schema v2/v3/v4 envelopes remain readable and migrate atomically to schema v5 on first mutation. Existing recipes, suggestions, cooking, and weekly shopping consume available canonical names plus aliases. Structured quantity is persisted and displayed but does not drive recipe sufficiency or shopping arithmetic until recipes gain quantity requirements.
+**Compatibility:** Legacy flat arrays and schema v2/v3/v4/v5 envelopes remain readable and migrate atomically to schema v6 on first mutation. Schema v6 adds an internal monotonic `stock_cycle` that advances only on an available→unavailable transition; aliases and all prior lifecycle metadata are preserved. Existing recipes, suggestions, cooking, and weekly shopping consume available canonical names plus aliases. Structured quantity is persisted and displayed but does not drive recipe sufficiency or shopping arithmetic until recipes gain quantity requirements.
 
 **Detailed contracts:** [`docs/issues/INV-2-structured-inventory-item-model.md`](docs/issues/INV-2-structured-inventory-item-model.md), [`docs/issues/INV-4-product-catalog-and-replenishment.md`](docs/issues/INV-4-product-catalog-and-replenishment.md), and INV-5 in [`BOARD.md`](BOARD.md).
 
-**File:** `data/fridge.json` (schema v5 envelope after migration)
+**File:** `data/fridge.json` (schema v6 envelope after migration)
 
 ### 4. Extended Dish — Prep Dependencies and Cooking Instructions
 
@@ -246,8 +247,8 @@ See `BOARD.md` for the live kanban board.
 
 ### Phase 3: Shopping & Budget ✅
 - Aggregated essential shopping snapshot persisted in each week plan
-- Live Web/native projection recomputed from plan, recipes, prep, schema-v5 inventory aliases, and active manual requests
-- Stable derived `shop_*` and persisted `shopreq_*` identities with `known_missing` / `abstract_request` classification
+- Live Web/native projection recomputed from plan, recipes, prep, schema-v6 inventory aliases/stock cycles, and active manual requests
+- Stable occurrence-scoped derived `shop_*` and persisted `shopreq_*` identities with `known_missing` / `abstract_request` classification; a new missing cycle after consumption gets a fresh receipt identity
 - Browser checklist state is local-only and cannot mutate inventory
 - Agent receipt reconciliation durably reserves the exact-name winner before inventory mutation, preserves generic aliases on exact products, and persists replay tombstones after inventory success
 - Estimate/trip operations reject snapshots that no longer match live dependencies

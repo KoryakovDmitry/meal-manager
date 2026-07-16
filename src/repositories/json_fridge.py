@@ -10,8 +10,8 @@ from ..dish import Dish
 from ..inventory import InventoryItem
 from .file_lock import JsonFileLock
 
-SCHEMA_VERSION = 5
-SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
+SCHEMA_VERSION = 6
+SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6})
 _MIGRATION_NAMESPACE = uuid.UUID("72c45a1a-73c7-4e07-84dd-e20b6e342f95")
 _EXPECTED_VERSION_UNSET = object()
 
@@ -153,13 +153,24 @@ class JsonFridgeRepository:
             raise InventoryDataError(
                 "Inventory envelope contains unknown or missing fields"
             )
-        version = raw["schema_version"]
+        version = raw.get("schema_version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise InventoryDataError(
+                "Inventory schema_version must be a JSON integer"
+            )
         if version not in SUPPORTED_SCHEMA_VERSIONS:
             raise InventoryDataError(
-                f"Unsupported inventory schema_version: {version}"
+                f"Unsupported inventory schema version: {version}"
             )
         if not isinstance(raw["items"], list):
             raise InventoryDataError("Inventory items must be an array")
+        if version < 6 and any(
+            isinstance(value, dict) and "stock_cycle" in value
+            for value in raw["items"]
+        ):
+            raise InventoryDataError(
+                f"Schema v{version} inventory item contains v6 stock cycle"
+            )
         if version == 2 and any(
             isinstance(value, dict)
             and ({"available", "category", "ever_stocked"} & set(value))
@@ -194,6 +205,16 @@ class JsonFridgeRepository:
         ):
             raise InventoryDataError(
                 "Schema v5 inventory item is missing alias lifecycle fields"
+            )
+        if version == 6 and any(
+            not isinstance(value, dict)
+            or not {
+                "available", "category", "ever_stocked", "aliases", "stock_cycle"
+            }.issubset(value)
+            for value in raw["items"]
+        ):
+            raise InventoryDataError(
+                "Schema v6 inventory item is missing stock-cycle lifecycle fields"
             )
 
         try:
@@ -265,6 +286,8 @@ class JsonFridgeRepository:
     ) -> InventoryItem:
         values = item.to_dict()
         values["available"] = available
+        if item.available and not available:
+            values["stock_cycle"] = item.stock_cycle + 1
         values["updated_at"] = self._next_updated_at(item)
         return InventoryItem.from_dict(values)
 

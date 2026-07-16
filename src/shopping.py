@@ -1,6 +1,7 @@
 """Current shopping projections shared by native and Web readers."""
 
 import hashlib
+import json
 
 from .plan_shopping import build_plan_shopping_list
 from .suggestion import (
@@ -27,10 +28,18 @@ def _base_item(item: dict) -> dict:
     return {key: item[key] for key in _ITEM_BASE_KEYS if key in item}
 
 
-def shopping_item_id(week_id: str, ingredient: str) -> str:
-    digest = hashlib.sha256(
-        f"{week_id}\0{ingredient}".encode("utf-8")
-    ).hexdigest()[:24]
+def shopping_item_id(
+    week_id: str, ingredient: str, *, inventory_occurrence: str | None = None
+) -> str:
+    if inventory_occurrence is None:
+        identity = f"{week_id}\0{ingredient}"
+    else:
+        identity = json.dumps(
+            [week_id, ingredient, inventory_occurrence],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     return "shop_" + digest
 
 
@@ -48,7 +57,14 @@ def classify_shopping_items(*, week_id: str, items: list, catalog_items) -> list
         identity = inventory_identity_for(catalog_items, ingredient)
         known = identity is not None and identity.ever_stocked
         classified.append(dict(raw) | {
-            "id": shopping_item_id(week_id, ingredient),
+            "id": shopping_item_id(
+                week_id,
+                ingredient,
+                inventory_occurrence=(
+                    f"{identity.id}\0{identity.stock_cycle}"
+                    if identity is not None and identity.ever_stocked else None
+                ),
+            ),
             "kind": "known_missing" if known else "abstract_request",
             "product_id": identity.id if identity is not None else None,
         })

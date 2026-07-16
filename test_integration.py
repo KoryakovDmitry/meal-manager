@@ -475,8 +475,8 @@ def test_structured_fridge_repository_migrates_legacy_atomically():
 
         repo.save(["куриные голени", "паста", "масло"])
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("first mutation writes v5 envelope", persisted.get("schema_version") == 5)
-        check("v5 envelope contains all names", [x["name"] for x in persisted["items"]] == [
+        check("first mutation writes v6 envelope", persisted.get("schema_version") == 6)
+        check("v6 envelope contains all names", [x["name"] for x in persisted["items"]] == [
             "куриные голени", "паста", "масло",
         ])
         check("migrated ids survive first write", [x["id"] for x in persisted["items"][:2]] == [x.id for x in first])
@@ -721,6 +721,21 @@ def test_structured_repository_integrity_and_compatibility():
         except ValueError:
             check("unsupported schema version rejected", True)
 
+        invalid_schema_versions = (6.0, "6", True, None)
+        invalid_schema_results = []
+        for invalid_version in invalid_schema_versions:
+            path.write_text(json.dumps({
+                "schema_version": invalid_version, "items": [],
+            }), encoding="utf-8")
+            try:
+                repo.load_items()
+                invalid_schema_results.append(False)
+            except ValueError:
+                invalid_schema_results.append(True)
+        check("schema version requires a non-boolean JSON integer", (
+            all(invalid_schema_results)
+        ), str(list(zip(invalid_schema_versions, invalid_schema_results))))
+
         invalid_v2 = json.dumps({
             "schema_version": 2,
             "items": [{
@@ -915,7 +930,7 @@ def test_inventory_catalog_availability_lifecycle():
         check("replenish does not copy old expiry", replenished.expires_on is None)
         check("replenish does not copy old comment", replenished.comment is None)
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("catalog lifecycle writes schema v5", persisted.get("schema_version") == 5)
+        check("catalog lifecycle writes schema v6", persisted.get("schema_version") == 6)
 
 
 def test_inventory_category_schema_v4_and_recipe_identity():
@@ -962,10 +977,35 @@ def test_inventory_category_schema_v4_and_recipe_identity():
             expected_updated_at=stamp,
         )
         persisted = json.loads(path.read_text(encoding="utf-8"))
-        check("category mutation writes schema v5", persisted["schema_version"] == 5)
-        check("schema v5 persists category", persisted["items"][0]["category"] == "ready_meal")
-        check("schema v5 persists stocked history", persisted["items"][0]["ever_stocked"] is True)
+        check("category mutation writes schema v6", persisted["schema_version"] == 6)
+        check("schema v6 persists category", persisted["items"][0]["category"] == "ready_meal")
+        check("schema v6 persists stocked history", persisted["items"][0]["ever_stocked"] is True)
         check("v4 migration initializes aliases", persisted["items"][0]["aliases"] == [])
+        check("v4 migration initializes stock cycle", persisted["items"][0]["stock_cycle"] == 0)
+
+        v5_path = Path(tmp) / "fridge-v5.json"
+        v5_payload = json.loads(json.dumps(persisted))
+        v5_payload["schema_version"] = 5
+        v5_path.write_text(json.dumps(v5_payload), encoding="utf-8")
+        try:
+            JsonFridgeRepository(v5_path).load_catalog_items()
+            legacy_stock_cycle_rejected = False
+        except inventory_repo_module.InventoryDataError:
+            legacy_stock_cycle_rejected = True
+        check("schema v5 rejects a v6 stock cycle field", legacy_stock_cycle_rejected)
+        for value in v5_payload["items"]:
+            value.pop("stock_cycle")
+        v5_payload["items"][0]["aliases"] = ["generic rice"]
+        v5_path.write_text(json.dumps(v5_payload), encoding="utf-8")
+        v5_repo = JsonFridgeRepository(v5_path)
+        v5_items = v5_repo.load_catalog_items()
+        v5_repo.save_items(v5_items)
+        migrated_v6 = json.loads(v5_path.read_text(encoding="utf-8"))
+        check("schema v5 migrates to v6 with aliases intact", (
+            migrated_v6["schema_version"] == 6
+            and migrated_v6["items"][0]["aliases"] == ["generic rice"]
+            and migrated_v6["items"][0]["stock_cycle"] == 0
+        ))
 
         bytes_before_stale = path.read_bytes()
         try:
@@ -1350,6 +1390,24 @@ def test_register_cooked_meal():
     check("cooking preserves consumed catalog identities",
           all(name in catalog and not catalog[name].available for name in ("arroz", "pollo")))
 
+    alias_dish = "alias-cycle soup"
+    generic = "alias-cycle milk"
+    exact = "exact alias-cycle milk 1l"
+    parse(add_dish({"name": alias_dish, "ingredients": [generic]}))
+    received = _repos_mod.fridge_repo.receive_product(
+        requested_name=generic,
+        exact_name=exact,
+    )
+    alias_result = parse(register_cooked_meal({"dish_name": alias_dish}))
+    consumed_exact = next(
+        item for item in _repos_mod.fridge_repo.load_catalog_items() if item.id == received.id
+    )
+    check("native cooking consumes exact identity through generic alias", (
+        isinstance(alias_result, str)
+        and consumed_exact.available is False
+        and consumed_exact.stock_cycle == received.stock_cycle + 1
+    ), alias_result)
+
 
 def test_register_cooked_meal_bogus():
     print("\n-- register_cooked_meal (nonexistent dish) --")
@@ -1361,17 +1419,17 @@ def test_register_cooked_meal_rollback():
     print("\n-- register_cooked_meal (rollback) --")
     before = _repos_mod.history_repo.load()
 
-    original_save = _repos_mod.fridge_repo.save
+    original_save = _repos_mod.fridge_repo._save_items_unlocked
     try:
-        def fail_save(_fridge):
+        def fail_save(_items):
             raise RuntimeError("boom")
 
-        _repos_mod.fridge_repo.save = fail_save
+        _repos_mod.fridge_repo._save_items_unlocked = fail_save
         result = parse(register_cooked_meal({"dish_name": "tortilla de patatas"}))
         check("returns error on fridge failure", isinstance(result, dict) and "error" in result)
         check("history restored after failure", _repos_mod.history_repo.load() == before)
     finally:
-        _repos_mod.fridge_repo.save = original_save
+        _repos_mod.fridge_repo._save_items_unlocked = original_save
 
 
 def test_delete_history_entry():
@@ -2332,6 +2390,57 @@ def test_phase3_shopping_budget_flow():
         and derived_replay.get("status") == "already_received"
         and fridge_repo_local.path.read_bytes() == derived_inventory_bytes
     ))
+
+    consumed_for_repurchase = parse(update_fridge_inventory({
+        "action": "remove", "ingredients": [derived_target["ingredient"]],
+    }))
+    repurchase_plan = parse(get_week_plan({"week": "2026-W31"}))
+    repurchase_target = next(
+        item for item in repurchase_plan["current_shopping"]["items"]
+        if item["ingredient"] == derived_target["ingredient"]
+    )
+    repurchase_cycle = next(
+        item.stock_cycle for item in fridge_repo_local.load_catalog_items()
+        if item.id == repurchase_target["product_id"]
+    )
+    repurchase_exact = f"новый товар {derived_target['ingredient']}"
+    shopping_request_repo_local.reserve_receipt(
+        repurchase_target["id"],
+        week="2026-W31",
+        requested_name=repurchase_target["ingredient"],
+        exact_name=repurchase_exact,
+    )
+    fridge_repo_local.set_product_category(
+        None, "prep", item_id=repurchase_target["product_id"]
+    )
+    after_metadata_plan = parse(get_week_plan({"week": "2026-W31"}))
+    after_metadata_rows = [
+        item for item in after_metadata_plan["current_shopping"]["items"]
+        if item["ingredient"] == derived_target["ingredient"]
+    ]
+    cycle_after_metadata = next(
+        item.stock_cycle for item in fridge_repo_local.load_catalog_items()
+        if item.id == repurchase_target["product_id"]
+    )
+    repurchased = parse(receive_shopping_item({
+        "week": "2026-W31", "shopping_item_id": repurchase_target["id"],
+        "exact_name": repurchase_exact,
+    }))
+    check("consumed product reappears as a new shopping occurrence", (
+        isinstance(consumed_for_repurchase, str)
+        and "removed" in consumed_for_repurchase.lower()
+        and repurchase_target["id"] != derived_target["id"]
+        and repurchase_cycle == 1
+    ), repurchase_target)
+    check("metadata edit preserves one pending missing occurrence", (
+        len(after_metadata_rows) == 1
+        and after_metadata_rows[0]["id"] == repurchase_target["id"]
+        and cycle_after_metadata == repurchase_cycle
+    ), str(after_metadata_rows))
+    check("new shopping occurrence accepts a physical repurchase", (
+        repurchased.get("status") == "received"
+        and repurchased.get("product", {}).get("name") == repurchase_exact
+    ), repurchased)
 
     manual = parse(add_manual_shopping_item({
         "week": "2026-W31", "ingredient": "растительный йогурт",

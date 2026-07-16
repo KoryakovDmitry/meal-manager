@@ -32,6 +32,7 @@ Dish = _dish_mod.Dish
 calculate_score = _suggestion_mod.calculate_score
 suggest_dishes = _suggestion_mod.suggest_dishes
 suggest_quick_shopping = _shopping_mod.suggest_quick_shopping
+shopping_item_id = _shopping_mod.shopping_item_id
 tuning = _tuning_mod
 build_inventory_snapshot = _state_sync_mod.build_inventory_snapshot
 format_inventory_notice = _state_sync_mod.format_inventory_notice
@@ -302,6 +303,32 @@ def test_suggest_quick_shopping_groups_by_ingredient():
     result = suggest_quick_shopping([d1, d2], fridge, {})
     check("eggs unlocks both", len(result) == 1)
     check("ingredient is eggs", result[0][0] == "eggs")
+
+
+def test_shopping_item_id_versions_inventory_occurrences():
+    print("\n-- shopping_item_id (inventory occurrence) --")
+    legacy = shopping_item_id("2026-W29", "broccoli")
+    first = shopping_item_id(
+        "2026-W29", "broccoli", inventory_occurrence="inv_1\0first-missing"
+    )
+    same = shopping_item_id(
+        "2026-W29", "broccoli", inventory_occurrence="inv_1\0first-missing"
+    )
+    repurchase = shopping_item_id(
+        "2026-W29", "broccoli", inventory_occurrence="inv_1\0second-missing"
+    )
+    check("same missing occurrence keeps stable id", first == same)
+    check("new missing occurrence gets a fresh id", first != repurchase)
+    check("untracked abstract request keeps stable id shape", legacy.startswith("shop_"))
+    collision_left = shopping_item_id(
+        "2026-W29", "x", inventory_occurrence="inv_a\0inv_b\00"
+    )
+    collision_right = shopping_item_id(
+        "2026-W29", "x\0inv_a", inventory_occurrence="inv_b\00"
+    )
+    check("occurrence serialization is structurally unambiguous", (
+        collision_left != collision_right
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -1178,11 +1205,13 @@ def test_inventory_item_roundtrip():
     check("positional inventory constructor remains compatible", positional.quantity == "2" and positional.available is True)
     public = item.to_public_dict()
     check("public inventory exposes category", public["category"] == "prep")
-    check("public inventory hides lifecycle internals", "available" not in public and "ever_stocked" not in public)
+    check("public inventory hides lifecycle internals", all(
+        key not in public for key in ("available", "ever_stocked", "stock_cycle")
+    ))
     check("inventory roundtrip exact", restored == item)
     check("serialized fields are complete", set(payload) == {
         "id", "name", "available", "quantity", "unit", "package_count", "storage",
-        "expires_on", "comment", "created_at", "updated_at", "category", "ever_stocked", "aliases",
+        "expires_on", "comment", "created_at", "updated_at", "category", "ever_stocked", "aliases", "stock_cycle",
     })
 
 
@@ -1204,6 +1233,9 @@ def test_inventory_item_validation():
         ({"category": "leftovers"}, "unknown category"),
         ({"ever_stocked": "yes"}, "non-boolean stocked history"),
         ({"available": True, "ever_stocked": False}, "available never-stocked state"),
+        ({"stock_cycle": True}, "boolean stock cycle"),
+        ({"stock_cycle": -1}, "negative stock cycle"),
+        ({"stock_cycle": "1"}, "non-integer stock cycle"),
         ({"aliases": "молоко"}, "non-list aliases"),
         ({"aliases": [""]}, "blank alias"),
         ({"aliases": ["x" * 201]}, "overlong alias"),
@@ -1406,6 +1438,7 @@ def main():
     test_suggest_quick_shopping_basic()
     test_suggest_quick_shopping_two_missing()
     test_suggest_quick_shopping_groups_by_ingredient()
+    test_shopping_item_id_versions_inventory_occurrences()
 
     test_normalize_ingredients_dict()
     test_normalize_ingredients_list()

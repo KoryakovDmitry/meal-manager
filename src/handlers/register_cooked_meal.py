@@ -59,11 +59,16 @@ def HANDLER(args: dict, **kwargs):
 
     try:
         with fridge_repo.lock:
-            fridge = fridge_repo.load()
-            removed = [ing for ing in essentials if ing in fridge]
+            catalog = fridge_repo.load_catalog_items()
+            removed = [
+                ing for ing in essentials
+                if any(
+                    item.available and ing in (item.name, *item.aliases)
+                    for item in catalog
+                )
+            ]
             if removed:
-                fridge = [ing for ing in fridge if ing not in removed]
-                fridge_repo.save(fridge)
+                fridge_repo.remove_items(removed)
     except Exception:
         try:
             history_repo.revert_entry(name, today_iso, previous_history)
