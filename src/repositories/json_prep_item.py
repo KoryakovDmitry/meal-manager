@@ -6,11 +6,11 @@ dishes.json. Each entry is a PrepItem.to_dict() serialization.
 
 import json
 import logging
-import threading
 from pathlib import Path
 
 from .. import atomic_write_json
 from ..prep_item import PrepItem
+from .file_lock import JsonFileLock
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class JsonPrepItemRepository:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self.lock = threading.Lock()
+        self.lock = JsonFileLock(lambda: self.path)
 
     def load_strict(self) -> list[PrepItem]:
         if not self.path.exists():

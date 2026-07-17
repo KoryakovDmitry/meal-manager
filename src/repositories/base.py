@@ -59,13 +59,12 @@ class FridgeRepository(Protocol):
 
 
 class HistoryRepository(Protocol):
-    """Persistence boundary for cooking history.
+    """Persistence boundary for canonical cooking occurrences."""
 
-    History is keyed by normalized dish name and value is an ISO date string.
-    The repository owns its own locking — callers do not hold it.
-    """
+    lock: threading.Lock
 
     def load(self) -> dict[str, str]: ...
+    def load_events(self, *, strict: bool = False) -> list: ...
     def set_entry(self, dish_name: str, date_str: str) -> str | None: ...
     def remove_entry(self, dish_name: str) -> bool: ...
     def revert_entry(

@@ -814,6 +814,49 @@ def test_week_plan_roundtrip():
     check("plan shopping retained", restored.shopping["items"][0]["ingredient"] == "carrot")
 
 
+def test_week_plan_migrates_legacy_meal_to_stable_occurrence():
+    legacy = WeekPlan(
+        week_id="2026-W29",
+        status="active",
+        days={"mon": DayPlan(meals=[MealEntry("Soup", 4)])},
+    ).to_dict()
+    legacy.pop("schema_version", None)
+    legacy_meal = legacy["days"]["mon"]["meals"][0]
+    legacy_meal.pop("occurrence_id", None)
+    legacy_meal.pop("root_occurrence_id", None)
+    legacy_meal.pop("predecessor_occurrence_id", None)
+    legacy_meal.pop("status", None)
+    legacy_meal.pop("planned_for", None)
+    legacy_meal.pop("revision", None)
+    legacy_meal.pop("created_at", None)
+    legacy_meal.pop("updated_at", None)
+    legacy_meal.pop("status_changed_at", None)
+    legacy_meal.pop("cooked_at", None)
+    legacy_meal.pop("cooked_on", None)
+    legacy_meal.pop("cooked_time_precision", None)
+    legacy_meal.pop("actual_portions", None)
+    legacy_meal.pop("actual_yield_portions", None)
+    legacy_meal.pop("replacement_occurrence_id", None)
+    legacy_meal.pop("cook_event_id", None)
+    legacy_meal.pop("leftover_lot_ids", None)
+    legacy_meal.pop("provenance", None)
+
+    first = WeekPlan.from_dict(legacy)
+    second = WeekPlan.from_dict(legacy)
+    meal = first.days["mon"].meals[0]
+
+    check("legacy plan becomes schema v2", first.to_dict()["schema_version"] == 2)
+    check("legacy meal receives stable ID", meal.occurrence_id.startswith("mealocc_"))
+    check(
+        "legacy migration ID deterministic",
+        meal.occurrence_id == second.days["mon"].meals[0].occurrence_id,
+    )
+    check("legacy meal starts planned", meal.status == "planned")
+    check("legacy planned date derives from ISO week", meal.planned_for == "2026-07-13")
+    check("legacy portions become planned portions", meal.portions_planned == 4)
+    check("legacy migration provenance retained", meal.provenance["source"] == "legacy_plan_migration")
+
+
 def test_week_plan_invalid_status():
     try:
         WeekPlan(week_id="2026-W30", status="finished")
@@ -1021,6 +1064,30 @@ def test_build_plan_shopping_list_aggregates_occurrences_and_prep():
     check("shopping excludes optional dish ingredient", "salt" not in items)
     check("shopping excludes optional prep ingredient", "pepper" not in items)
     check("shopping declares occurrence basis", result["basis"] == "cooking_occurrences")
+
+
+def test_build_plan_shopping_list_ignores_closed_occurrences():
+    plan = WeekPlan(
+        week_id="2026-W30",
+        days={
+            "mon": DayPlan(meals=[MealEntry("soup", status="cooked")]),
+            "tue": DayPlan(meals=[MealEntry("soup", status="planned")]),
+            "wed": DayPlan(meals=[MealEntry("soup", status="cancelled")]),
+        },
+    )
+    dishes = [Dish(name="soup", ingredients={"carrot": True})]
+
+    result = build_plan_shopping_list(
+        plan=plan,
+        dishes=dishes,
+        prep_items=[],
+        fridge=set(),
+    )
+
+    check(
+        "shopping counts only planned occurrences",
+        result["items"][0]["required_uses"] == 1,
+    )
 
 
 def test_build_plan_shopping_list_adds_sources_for_depleted_dependencies():
@@ -1486,6 +1553,7 @@ def main():
     test_meal_entry_validation()
     test_week_plan_defaults_all_days()
     test_week_plan_roundtrip()
+    test_week_plan_migrates_legacy_meal_to_stable_occurrence()
     test_week_plan_invalid_status()
     test_week_plan_rejects_noncanonical_days()
     test_week_plan_rejects_malformed_shopping()
@@ -1499,6 +1567,7 @@ def main():
 
     print("\n-- Phase 3 shopping/budget --")
     test_build_plan_shopping_list_aggregates_occurrences_and_prep()
+    test_build_plan_shopping_list_ignores_closed_occurrences()
     test_build_plan_shopping_list_adds_sources_for_depleted_dependencies()
     test_explicit_prep_uses_replacement_yield_semantics()
     test_estimate_shopping_cost_is_soft_and_partial_safe()

@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .. import atomic_write_json
+from .. import atomic_delete_json, atomic_write_json
 from .session import DIISession, from_dict, parse_iso_to_aware, to_dict
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class IngredientSessionStore:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, ValueError):
-            path.unlink(missing_ok=True)  # genuinely corrupt backup
+            atomic_delete_json(path, fsync_dir=False)  # genuinely corrupt backup
             return None
         except OSError:
             # Transient read error (EINTR/EACCES/…) — never destroy a file we
@@ -157,7 +157,7 @@ class IngredientSessionStore:
         try:
             session = from_dict(data)
         except (KeyError, TypeError, ValueError):
-            path.unlink(missing_ok=True)  # malformed session backup
+            atomic_delete_json(path, fsync_dir=False)  # malformed session backup
             return None
         if session.session_id != session_id:
             # Content doesn't match the requested id — don't trust or delete it.
@@ -165,12 +165,12 @@ class IngredientSessionStore:
 
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=self.ttl_minutes)
         if parse_iso_to_aware(session.last_activity) < cutoff:
-            path.unlink(missing_ok=True)
+            atomic_delete_json(path, fsync_dir=False)
             return None
         return session
 
     def _delete_file(self, session_id: str) -> None:
-        self._session_path(session_id).unlink(missing_ok=True)
+        atomic_delete_json(self._session_path(session_id), fsync_dir=False)
 
     # -----------------------------------------------------------------
     # GC
@@ -214,10 +214,10 @@ class IngredientSessionStore:
                 try:
                     data = json.loads(fpath.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, ValueError):
-                    fpath.unlink(missing_ok=True)  # corrupt file
+                    atomic_delete_json(fpath, fsync_dir=False)  # corrupt file
                     continue
                 except OSError:
                     continue  # transient read error — leave the file intact
                 last = parse_iso_to_aware(data.get("last_activity"))
                 if last < cutoff:
-                    fpath.unlink(missing_ok=True)
+                    atomic_delete_json(fpath, fsync_dir=False)

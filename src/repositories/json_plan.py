@@ -10,7 +10,7 @@ import logging
 import threading
 from pathlib import Path
 
-from .. import atomic_write_json
+from .. import atomic_delete_json, atomic_write_json
 from ..plan import WeekPlan
 
 logger = logging.getLogger(__name__)
@@ -127,10 +127,7 @@ class JsonPlanRepository:
         """Delete a week plan file. Returns whether it existed."""
         with self.lock:
             path = self._path_for(week_id)
-            if path.exists():
-                path.unlink()
-                return True
-            return False
+            return atomic_delete_json(path)
 
     def list_weeks(self) -> list[dict]:
         """List all week plans with their status, sorted by week_id descending."""

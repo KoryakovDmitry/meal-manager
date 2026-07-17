@@ -21,6 +21,8 @@ provides_tools:
   - replenish_product
   - register_cooked_meal
   - delete_history_entry
+  - list_cooking_history
+  - list_audit_events
   - list_fridge
   - add_dish
   - add_dishes_batch

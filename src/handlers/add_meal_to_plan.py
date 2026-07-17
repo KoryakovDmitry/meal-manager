@@ -46,6 +46,7 @@ def HANDLER(args: dict, **kwargs):
         plan = require_plan(week_id)
         if plan.status == "archived":
             raise ValueError("archived plans cannot be edited")
+        entry.bind_to_plan(week_id, day)
         plan.days[day].meals.append(entry)
         plan.shopping = {}
         plan_repo.save(plan)

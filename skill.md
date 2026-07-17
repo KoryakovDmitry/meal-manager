@@ -70,7 +70,7 @@ Use `merge_product_identity` only as a destructive maintenance operation for a c
 
 ### `register_cooked_meal`
 
-Registers that a dish was cooked today so the suggestion engine doesn't recommend it again too soon.
+Registers one canonical cooking occurrence. When `occurrence_id` identifies a planned meal, that row remains in its original plan slot and transitions to `cooked`; it is never removed. Optional actual portions/yield and a timezone-aware `cooked_at` can be recorded. History, plan, inventory, prep, and audit proof are committed by one recovery-safe command.
 
 - **When to use:**
   - The user says they cooked or are cooking a specific dish.
@@ -80,11 +80,15 @@ Registers that a dish was cooked today so the suggestion engine doesn't recommen
 
 ### `delete_history_entry`
 
-Removes an entry from the cooking history. This is the "undo" for `register_cooked_meal`.
+Retracts the latest active cooking occurrence for the dish. This is the correction path for `register_cooked_meal`: the original occurrence and audit evidence remain, recency ignores the retracted event, and a linked cooked plan row is reopened.
 
 - **When to use:**
   - The user says they registered a dish by mistake.
   - The user wants a dish to appear in suggestions again without waiting for the cooldown period.
+
+### `list_cooking_history` and `list_audit_events`
+
+Use `list_cooking_history` for occurrence-level cooking history, including corrected rows and plan links. Use `list_audit_events` when the user asks who/what changed a domain entity, for a timeline, or for analytics over committed mutations.
 
 ### `list_fridge`
 

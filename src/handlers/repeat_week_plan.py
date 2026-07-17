@@ -49,6 +49,8 @@ def HANDLER(args: dict, **kwargs):
     for day_code, source_day in source.days.items():
         meals = []
         for meal in source_day.meals:
+            if meal.status not in {"planned", "cooked"}:
+                continue
             if meal.dish not in dishes:
                 skipped_dishes.append(meal.dish)
                 continue

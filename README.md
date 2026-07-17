@@ -161,8 +161,10 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `list_product_catalog` | Lists/searches all products by stock state and category, including recipe-only ingredients |
 | `set_product_category` | Assigns `product`, `prep`, or `ready_meal` without changing stock availability |
 | `replenish_product` | Returns an out-of-stock or recipe-only product to current inventory as a fresh categorized batch |
-| `register_cooked_meal` | Logs a dish as cooked today and removes its essential ingredients from current stock while retaining catalog identities |
-| `delete_history_entry` | Undo for `register_cooked_meal` — removes a dish from history |
+| `register_cooked_meal` | Atomically records a stable cooking occurrence, completes a linked planned occurrence without deleting it, consumes stock/prep, and emits audit proof |
+| `delete_history_entry` | Retracts the latest active cooking occurrence while retaining immutable history and reopening a linked plan row |
+| `list_cooking_history` | Lists canonical cooking occurrences, stable IDs, plan links, yield, and corrections |
+| `list_audit_events` | Queries committed audit events by stable entity, event type, or time |
 | `list_fridge` | Returns the current fridge contents |
 | `add_dish` | Adds a new recipe to the catalog |
 | `add_dishes_batch` | Adds multiple recipes in a single call |

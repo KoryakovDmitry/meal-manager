@@ -1163,6 +1163,16 @@ def test_structured_inventory_native_crud():
     check("structured add returns record", isinstance(created, dict) and created.get("name") == "leche qa")
     check("structured add persists category", created.get("category") == "prep")
     check("structured add canonicalizes quantity", created.get("quantity") == "2")
+    audited_inventory_writes = importlib.import_module(
+        ".src.audit", _PLUGIN_DIR.name
+    ).audit_manager.list_events(
+        entity_type="domain_document", entity_id="fridge.json", limit=1000
+    )
+    check("native repository mutation emits correlated audit event", any(
+        event.get("operation") == "add_inventory_item"
+        and event.get("surface", {}).get("kind") == "native_tool"
+        for event in audited_inventory_writes
+    ))
     item_id = created.get("id") if isinstance(created, dict) else None
 
     detailed = parse(list_items({}))
@@ -1830,25 +1840,41 @@ def test_register_cooked_meal_bogus():
 
 def test_register_cooked_meal_rollback():
     print("\n-- register_cooked_meal (rollback) --")
-    before = _repos_mod.history_repo.load()
+    before_history = _repos_mod.history_repo.path.read_bytes()
+    before_fridge = _repos_mod.fridge_repo.path.read_bytes()
+    audit_mod = importlib.import_module(".src.audit", _PLUGIN_DIR.name)
 
-    original_save = _repos_mod.fridge_repo._save_items_unlocked
-    try:
-        def fail_save(_items):
+    def fail_after_first_target(stage):
+        if stage == "after_target:0":
             raise RuntimeError("boom")
 
-        _repos_mod.fridge_repo._save_items_unlocked = fail_save
+    try:
+        audit_mod.audit_manager._fault_injector = fail_after_first_target
         result = parse(register_cooked_meal({"dish_name": "tortilla de patatas"}))
-        check("returns error on fridge failure", isinstance(result, dict) and "error" in result)
-        check("history restored after failure", _repos_mod.history_repo.load() == before)
+        check("returns error on transaction failure", (
+            isinstance(result, dict) and "error" in result
+        ))
+        check("history restored after transaction failure", (
+            _repos_mod.history_repo.path.read_bytes() == before_history
+        ))
+        check("inventory restored after transaction failure", (
+            _repos_mod.fridge_repo.path.read_bytes() == before_fridge
+        ))
     finally:
-        _repos_mod.fridge_repo._save_items_unlocked = original_save
+        audit_mod.audit_manager._fault_injector = None
 
 
 def test_delete_history_entry():
     print("\n-- delete_history_entry --")
+    before = _repos_mod.history_repo.load_events(strict=True)
     result = parse(delete_history_entry({"dish_name": "arroz con pollo"}))
-    check("success message", isinstance(result, str) and "removed" in result.lower())
+    check("success message", isinstance(result, str) and "retracted" in result.lower())
+    after = _repos_mod.history_repo.load_events(strict=True)
+    check("history correction preserves occurrence row", len(after) == len(before))
+    corrected = [event for event in after if event.dish_name_snapshot == "arroz con pollo"]
+    check("history correction retracts latest active occurrence", (
+        bool(corrected) and corrected[-1].retracted_at is not None
+    ))
 
 
 def test_delete_history_entry_bogus():
@@ -2644,17 +2670,43 @@ def test_week_plan_lifecycle_and_repeat():
     check("unknown dish reference rejected", "error" in bad_dish)
 
     fetched = parse(get_week_plan({"week": "2026-W30"}))
-    check("get returns planned portions", fetched["days"]["mon"]["meals"][0]["portions"] == 4)
+    added_row = fetched["days"]["mon"]["meals"][0]
+    added_occurrence_id = added_row["occurrence_id"]
+    check(
+        "get returns planned portions",
+        fetched["days"]["mon"]["meals"][0]["portions_planned"] == 4,
+    )
+    check("get returns stable meal occurrence ID", added_occurrence_id.startswith("mealocc_"))
 
     history = parse(list_week_plans({}))
     row = next((item for item in history if item["week"] == "2026-W30"), None)
     check("week appears in history", row is not None)
     check("history counts meals", row is not None and row["meals_count"] == 1)
 
-    removed = parse(remove_meal_from_plan({
-        "week": "2026-W30", "day": "mon", "meal_index": 0,
+    cancelled = parse(remove_meal_from_plan({
+        "week": "2026-W30",
+        "occurrence_id": added_occurrence_id,
+        "expected_revision": added_row["revision"],
     }))
-    check("indexed meal removed", removed.get("removed", {}).get("dish") == "weekly soup")
+    check(
+        "stable remove command cancels rather than deletes",
+        cancelled.get("cancelled", {}).get("occurrence_id") == added_occurrence_id,
+    )
+    after_cancel = parse(get_week_plan({"week": "2026-W30"}))
+    cancelled_row = after_cancel["days"]["mon"]["meals"][0]
+    check("cancelled occurrence remains in plan", cancelled_row["status"] == "cancelled")
+    check("cancelled occurrence keeps stable ID", cancelled_row["occurrence_id"] == added_occurrence_id)
+    audit_events = [
+        json.loads(line)
+        for path in _TMP_DATA_DIR.joinpath("audit/events").glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    check("plan cancellation has committed audit event", any(
+        event.get("event_type") == "plan.meal.cancelled.v1"
+        and event.get("entity", {}).get("id") == added_occurrence_id
+        for event in audit_events
+    ))
 
     add_meal_to_plan({
         "week": "2026-W30", "day": "wed", "dish": "weekly soup", "portions": 3,
@@ -2681,7 +2733,10 @@ def test_week_plan_lifecycle_and_repeat():
     }))
     target = repeated.get("target_plan", {})
     check("repeat creates target draft", target.get("status") == "draft")
-    check("repeat copies meal structure", target["days"]["wed"]["meals"][0]["portions"] == 3)
+    check(
+        "repeat copies meal structure",
+        target["days"]["wed"]["meals"][0]["portions_planned"] == 3,
+    )
     check("repeat clears leftovers", target.get("leftovers") == {})
     adaptation = repeated.get("adaptation", {})
     check("repeat returns adaptation report", bool(adaptation))
@@ -3038,9 +3093,776 @@ def test_phase3_shopping_budget_flow():
         dish_repo_local.path.write_bytes(dish_bytes_before_corruption)
 
 
+def test_audit_transaction_commits_state_and_proof():
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(data_dir)
+        after = b'{"schema_version":2,"week":"2026-W30"}\n'
+        result = manager.commit(
+            operation="test_plan_write",
+            targets={"plans/2026-W30.json": after},
+            events=[{
+                "event_type": "plan.tested.v1",
+                "entity": {"type": "weekly_plan", "id": "2026-W30"},
+                "payload": {"status": "draft"},
+            }],
+            context={"actor": {"type": "system"}, "surface": {"kind": "test"}},
+        )
+
+        tx_dir = Path(result["transaction_dir"])
+        check("audit transaction writes canonical target", (
+            data_dir.joinpath("plans/2026-W30.json").read_bytes() == after
+        ))
+        check("audit transaction keeps durable prepare proof", (tx_dir / "prepare.json").is_file())
+        check("audit transaction keeps durable commit proof", (tx_dir / "commit.json").is_file())
+        check("audit commit marker returned", result["status"] == "committed")
+        event_files = list(data_dir.joinpath("audit/events").glob("*.jsonl"))
+        exported = [
+            json.loads(line)
+            for path in event_files
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        check("audit JSONL projection exports committed event", (
+            len(exported) == 1
+            and exported[0]["event_type"] == "plan.tested.v1"
+            and exported[0]["transaction_id"] == result["transaction_id"]
+        ))
+        queried = manager.list_events(
+            entity_type="weekly_plan",
+            entity_id="2026-W30",
+            limit=10,
+        )
+        check("audit events are queryable by stable entity", (
+            len(queried) == 1
+            and queried[0]["event_id"] == exported[0]["event_id"]
+        ))
+
+
+def test_audit_transaction_recovers_mixed_state_to_before_images():
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        first = data_dir / "fridge.json"
+        second = data_dir / "history.json"
+        first.write_bytes(b'{"before":"fridge"}\n')
+        second.write_bytes(b'{"before":"history"}\n')
+
+        def crash(stage):
+            if stage == "after_target:0":
+                raise RuntimeError("simulated process death")
+
+        manager = audit_mod.AuditTransactionManager(data_dir, fault_injector=crash)
+        try:
+            manager.commit(
+                operation="test_mixed_crash",
+                targets={
+                    "fridge.json": b'{"after":"fridge"}\n',
+                    "history.json": b'{"after":"history"}\n',
+                },
+                events=[{
+                    "event_type": "meal.test_crash.v1",
+                    "entity": {"type": "cook_occurrence", "id": "cook_test"},
+                    "payload": {"test": True},
+                }],
+                context={"actor": {"type": "system"}, "surface": {"kind": "test"}},
+            )
+            crashed = False
+        except RuntimeError as exc:
+            crashed = "simulated process death" in str(exc)
+        check("fault injection interrupts prepared transaction", crashed)
+
+        recovered = audit_mod.AuditTransactionManager(data_dir).recover()
+        check("mixed-state recovery restores first before-image", (
+            first.read_bytes() == b'{"before":"fridge"}\n'
+        ))
+        check("mixed-state recovery preserves second before-image", (
+            second.read_bytes() == b'{"before":"history"}\n'
+        ))
+        check("mixed-state recovery records abort", (
+            len(recovered) == 1 and recovered[0][1] == "rolled_back"
+        ))
+        check("aborted transaction exports no business event", (
+            not list(data_dir.joinpath("audit/events").glob("*.jsonl"))
+        ))
+
+
+def test_audit_transaction_recovers_all_after_as_committed():
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+
+        def crash(stage):
+            if stage == "after_all_targets":
+                raise RuntimeError("simulated pre-marker death")
+
+        manager = audit_mod.AuditTransactionManager(data_dir, fault_injector=crash)
+        try:
+            manager.commit(
+                operation="test_all_after_crash",
+                targets={"plans/2026-W30.json": b'{"state":"after"}\n'},
+                events=[{
+                    "event_type": "plan.recovered.v1",
+                    "entity": {"type": "weekly_plan", "id": "2026-W30"},
+                    "payload": {"test": True},
+                }],
+                context={"actor": {"type": "system"}, "surface": {"kind": "test"}},
+            )
+            crashed = False
+        except RuntimeError:
+            crashed = True
+        check("all-after fault occurs before commit marker", crashed)
+
+        recovered = audit_mod.AuditTransactionManager(data_dir).recover()
+        check("all-after recovery records commit", (
+            len(recovered) == 1 and recovered[0][1] == "committed"
+        ))
+        event_files = list(data_dir.joinpath("audit/events").glob("*.jsonl"))
+        events = [
+            json.loads(line)
+            for path in event_files
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        check("all-after recovery exports event once", (
+            len(events) == 1 and events[0]["event_type"] == "plan.recovered.v1"
+        ))
+        check("repeated recovery is idempotent", (
+            audit_mod.AuditTransactionManager(data_dir).recover() == []
+            and len([
+                line
+                for path in event_files
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]) == 1
+        ))
+
+
+def test_audit_recovery_exports_committed_event_after_export_crash():
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+
+        def crash(stage):
+            if stage == "after_commit":
+                raise RuntimeError("simulated export outage")
+
+        manager = audit_mod.AuditTransactionManager(data_dir, fault_injector=crash)
+        try:
+            manager.commit(
+                operation="test_post_commit_crash",
+                targets={"history.json": b'{"schema_version":2,"entries":[]}\n'},
+                events=[{
+                    "event_type": "history.recovered.v1",
+                    "entity": {"type": "cooking_history", "id": "history"},
+                    "payload": {"test": True},
+                }],
+                context={"actor": {"type": "system"}, "surface": {"kind": "test"}},
+            )
+            crashed = False
+        except RuntimeError:
+            crashed = True
+        check("post-commit export fault occurs", crashed)
+        check("post-commit fault leaves no JSONL projection", (
+            not list(data_dir.joinpath("audit/events").glob("*.jsonl"))
+        ))
+
+        audit_mod.AuditTransactionManager(data_dir).recover()
+        event_files = list(data_dir.joinpath("audit/events").glob("*.jsonl"))
+        events = [
+            json.loads(line)
+            for path in event_files
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        check("recovery re-exports committed event", (
+            len(events) == 1 and events[0]["event_type"] == "history.recovered.v1"
+        ))
+
+
+def test_history_migrates_to_stable_cooking_occurrences():
+    history_mod = importlib.import_module(
+        ".src.repositories.json_history", _PLUGIN_DIR.name
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "history.json"
+        path.write_text(json.dumps({"Soup": "2026-07-15"}), encoding="utf-8")
+        repo = history_mod.JsonHistoryRepository(path)
+
+        first_load = repo.load_events()
+        second_load = repo.load_events()
+        check("legacy history becomes one cooking occurrence", len(first_load) == 1)
+        legacy_event = first_load[0]
+        check("legacy cook receives stable ID", legacy_event.id.startswith("cook_"))
+        check("legacy cook ID migration is deterministic", (
+            legacy_event.id == second_load[0].id
+        ))
+        check("legacy cook preserves date precision", (
+            legacy_event.cooked_on == "2026-07-15"
+            and legacy_event.cooked_at is None
+            and legacy_event.time_precision == "date"
+        ))
+
+        repeated = repo.append_event(
+            dish_name="soup",
+            cooked_on="2026-07-17",
+            plan_occurrence_id="mealocc_test",
+        )
+        events = repo.load_events()
+        check("repeated cook appends a distinct occurrence", (
+            len(events) == 2 and repeated.id != legacy_event.id
+        ))
+        check("latest-date compatibility projection derives from occurrences", (
+            repo.load() == {"soup": "2026-07-17"}
+        ))
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        check("history persists canonical schema v2", (
+            persisted["schema_version"] == 2 and len(persisted["entries"]) == 2
+        ))
+
+
+def test_native_history_and_audit_corruption_is_sanitized():
+    assert _TMP_DATA_DIR is not None
+    history_path = _TMP_DATA_DIR / "history.json"
+    valid_history = history_path.read_bytes()
+    history_path.write_text(json.dumps({
+        "schema_version": 2,
+        "entries": "not-a-list",
+    }), encoding="utf-8")
+    history_result = parse(_load_handler("list_cooking_history")({}))
+    check("native history corruption is sanitized", (
+        history_result == {"error": "Storage is temporarily unavailable"}
+    ))
+    history_path.write_bytes(valid_history)
+
+    corrupt_dir = _TMP_DATA_DIR / "audit" / "transactions" / "9999-12" / "tx_corrupt"
+    corrupt_dir.mkdir(parents=True)
+    (corrupt_dir / "prepare.json").write_text("{broken", encoding="utf-8")
+    audit_result = parse(_load_handler("list_audit_events")({}))
+    check("native audit corruption is sanitized", (
+        audit_result == {"error": "Storage is temporarily unavailable"}
+    ))
+    shutil.rmtree(corrupt_dir.parent)
+
+
+def test_register_cooked_meal_completes_planned_occurrence():
+    assert _TMP_DATA_DIR is not None
+    add_inventory = _load_handler("add_inventory_item")
+    add_dish({
+        "name": "audit soup",
+        "ingredients": {"audit carrot": True},
+    })
+    add_inventory({"name": "audit carrot", "quantity": 1, "unit": "pcs"})
+    create_week_plan({"week": "2026-W32"})
+    added = parse(add_meal_to_plan({
+        "week": "2026-W32",
+        "day": "mon",
+        "dish": "audit soup",
+        "portions": 4,
+    }))
+    occurrence_id = added["meal"]["occurrence_id"]
+    occurrence_revision = added["meal"]["revision"]
+    set_plan_status({"week": "2026-W32", "status": "approved"})
+    set_plan_status({"week": "2026-W32", "status": "active"})
+
+    before_stale = {
+        path: path.read_bytes()
+        for path in (
+            _TMP_DATA_DIR / "history.json",
+            _TMP_DATA_DIR / "fridge.json",
+            _TMP_DATA_DIR / "plans" / "2026-W32.json",
+        )
+    }
+    stale = parse(register_cooked_meal({
+        "dish_name": "audit soup",
+        "occurrence_id": occurrence_id,
+        "expected_revision": occurrence_revision + 1,
+    }))
+    check("stale cook revision is rejected", "error" in stale)
+    check("stale cook performs no domain writes", all(
+        path.read_bytes() == payload for path, payload in before_stale.items()
+    ))
+
+    result = parse(register_cooked_meal({
+        "dish_name": "audit soup",
+        "occurrence_id": occurrence_id,
+        "expected_revision": occurrence_revision,
+        "actual_portions": 2,
+        "actual_yield_portions": 4,
+    }))
+    check("planned cook command succeeds", "error" not in result, str(result))
+
+    plan = parse(get_week_plan({"week": "2026-W32"}))
+    occurrence = plan["days"]["mon"]["meals"][0]
+    check("cooking leaves occurrence on original day", (
+        occurrence["occurrence_id"] == occurrence_id
+    ))
+    check("cooking marks planned occurrence cooked", occurrence["status"] == "cooked")
+    check("cooking records actual portions and yield", (
+        occurrence["actual_portions"] == 2
+        and occurrence["actual_yield_portions"] == 4
+    ))
+
+    events = _repos_mod.history_repo.load_events(strict=True)
+    linked = [event for event in events if event.plan_occurrence_id == occurrence_id]
+    check("cooking appends canonical linked history occurrence", (
+        len(linked) == 1
+        and linked[0].actual_portions == 2
+        and linked[0].actual_yield_portions == 4
+        and occurrence["cook_event_id"] == linked[0].id
+    ))
+    carrot = _repos_mod.fridge_repo.resolve_ingredient("audit carrot")
+    check("planned cooking consumes inventory in same workflow", (
+        carrot is not None and carrot.available is False
+    ))
+    audit_events = [
+        json.loads(line)
+        for path in _TMP_DATA_DIR.joinpath("audit/events").glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    check("planned cooking emits committed audit event", any(
+        event.get("event_type") == "meal.cooked.v1"
+        and event.get("entity", {}).get("id") == linked[0].id
+        for event in audit_events
+    ))
+
+    deleted = parse(delete_dish({"dish_name": "audit soup"}))
+    after_delete_event = next(
+        event for event in _repos_mod.history_repo.load_events(strict=True)
+        if event.id == linked[0].id
+    )
+    after_delete_plan = parse(get_week_plan({"week": "2026-W32"}))
+    check("recipe deletion preserves cooking history", (
+        isinstance(deleted, str) and after_delete_event.active
+    ))
+    check("recipe deletion preserves linked cooked occurrence", (
+        after_delete_plan["days"]["mon"]["meals"][0]["status"] == "cooked"
+        and after_delete_plan["days"]["mon"]["meals"][0]["cook_event_id"] == linked[0].id
+    ))
+
+
+def test_audit_hardening_rejects_symlinks_and_repairs_projection():
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "plans").mkdir()
+        victim = root / "fridge.json"
+        victim.write_text('{"safe": true}', encoding="utf-8")
+        (root / "plans" / "2026-W30.json").symlink_to(victim)
+        manager = audit_mod.AuditTransactionManager(root)
+        try:
+            manager.commit(
+                operation="symlink_probe",
+                targets={"plans/2026-W30.json": b"{}"},
+                events=[{
+                    "event_type": "probe.v1",
+                    "entity": {"type": "probe", "id": "symlink"},
+                    "payload": {},
+                }],
+                context={"actor": {"type": "test"}, "surface": {"kind": "test"}},
+            )
+            check("audit rejects symlink target", False)
+        except ValueError:
+            check("audit rejects symlink target", True)
+        check("symlink victim remains unchanged", victim.read_text() == '{"safe": true}')
+
+        (root / "plans" / "2026-W30.json").unlink()
+        result = manager.commit(
+            operation="projection_probe",
+            targets={"plans/2026-W30.json": b"{}"},
+            events=[{
+                "event_type": "probe.v1",
+                "entity": {"type": "probe", "id": "projection"},
+                "payload": {},
+            }],
+            context={"actor": {"type": "test"}, "surface": {"kind": "test"}},
+        )
+        projection = next((root / "audit" / "events").glob("*.jsonl"))
+        projection.write_bytes(b'{"partial":')
+        manager.recover()
+        events = manager.list_events(entity_id="projection")
+        check("partial JSONL projection is rebuilt", len(events) == 1)
+        check("rebuilt projection keeps canonical event", events[0]["transaction_id"] == result["transaction_id"])
+
+
+def test_audit_hardening_blocks_parent_swap_and_corrupt_proof():
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        root = Path(tmp)
+        plans = root / "plans"
+        plans.mkdir()
+        outside = Path(outside_tmp)
+        victim = outside / "2026-W30.json"
+        victim.write_bytes(b'{"victim":true}')
+
+        def swap_parent(stage):
+            if stage == "after_prepare":
+                plans.rename(root / "plans-original")
+                plans.symlink_to(outside, target_is_directory=True)
+
+        manager = audit_mod.AuditTransactionManager(root, fault_injector=swap_parent)
+        try:
+            manager.commit(
+                operation="parent_swap_probe",
+                targets={"plans/2026-W30.json": b'{"escaped":true}'},
+                events=[{
+                    "event_type": "probe.v1",
+                    "entity": {"type": "probe", "id": "parent-swap"},
+                    "payload": {},
+                }],
+                context={"actor": {"type": "test"}, "surface": {"kind": "test"}},
+            )
+            blocked = False
+        except (OSError, ValueError, audit_mod.AuditConflictError):
+            blocked = True
+        check("descriptor-relative audit blocks parent-directory swap", blocked)
+        check("parent-directory swap cannot modify external victim", (
+            victim.read_bytes() == b'{"victim":true}'
+        ))
+        plans.unlink()
+        (root / "plans-original").rename(plans)
+        manager._fault_injector = None
+        manager.recover()
+
+        def stop_after_prepare(stage):
+            if stage == "after_prepare":
+                raise RuntimeError("prepared")
+
+        corrupt = audit_mod.AuditTransactionManager(root, fault_injector=stop_after_prepare)
+        try:
+            corrupt.commit(
+                operation="manifest_probe",
+                targets={"plans/2026-W31.json": b'{}'},
+                events=[{
+                    "event_type": "probe.v1",
+                    "entity": {"type": "probe", "id": "manifest"},
+                    "payload": {},
+                }],
+                context={"actor": {"type": "test"}, "surface": {"kind": "test"}},
+            )
+        except RuntimeError:
+            pass
+        prepare_path = next(
+            (root / "audit" / "transactions").glob(
+                f"*/{corrupt.last_transaction_id}/prepare.json"
+            )
+        )
+        prepared = json.loads(prepare_path.read_text(encoding="utf-8"))
+        prepared["targets"][0]["after_blob"] = "/etc/passwd"
+        prepare_path.write_text(json.dumps(prepared), encoding="utf-8")
+        try:
+            audit_mod.AuditTransactionManager(root).recover()
+            corrupt_rejected = False
+        except audit_mod.AuditConflictError:
+            corrupt_rejected = True
+        check("recovery rejects non-canonical blob references", corrupt_rejected)
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        root = Path(tmp)
+        (root / "audit").symlink_to(Path(outside_tmp), target_is_directory=True)
+        try:
+            audit_mod.AuditTransactionManager(root)
+            audit_symlink_rejected = False
+        except OSError:
+            audit_symlink_rejected = True
+        check("audit root symlink is rejected", audit_symlink_rejected)
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+        root = Path(tmp)
+        (root / "audit").mkdir()
+        (root / "audit" / "transactions").symlink_to(
+            Path(outside_tmp), target_is_directory=True
+        )
+        try:
+            audit_mod.AuditTransactionManager(root)
+            transaction_symlink_rejected = False
+        except OSError:
+            transaction_symlink_rejected = True
+        check("audit transaction-tree symlink is rejected", transaction_symlink_rejected)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        def stop_for_terminal(stage):
+            if stage == "after_prepare":
+                raise RuntimeError("prepared")
+
+        manager = audit_mod.AuditTransactionManager(root, fault_injector=stop_for_terminal)
+        try:
+            manager.commit(
+                operation="terminal_probe",
+                targets={"history.json": b'{}'},
+                events=[{
+                    "event_type": "probe.v1",
+                    "entity": {"type": "probe", "id": "terminal"},
+                    "payload": {},
+                }],
+                context={"actor": {"type": "test"}, "surface": {"kind": "test"}},
+            )
+        except RuntimeError:
+            pass
+        transaction_dir = next(
+            (root / "audit" / "transactions").glob(
+                f"*/{manager.last_transaction_id}"
+            )
+        )
+        (transaction_dir / "commit.json").write_text("{", encoding="utf-8")
+        try:
+            audit_mod.AuditTransactionManager(root).recover()
+            partial_terminal_rejected = False
+        except audit_mod.AuditConflictError:
+            partial_terminal_rejected = True
+        check("partial terminal marker fails closed", partial_terminal_rejected)
+
+
+def test_audit_attempt_identity_metadata_and_fd_cleanup():
+    audit_mod = importlib.import_module(
+        ".src.audit.transaction", _PLUGIN_DIR.name
+    )
+    src_mod = importlib.import_module(".src", _PLUGIN_DIR.name)
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "reliability"},
+        "payload": {},
+    }
+    context = {
+        "actor": {"type": "test"},
+        "surface": {"kind": "test"},
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        first = manager.commit(
+            operation="first",
+            targets={"history.json": b"{}"},
+            events=[event],
+            context=context,
+        )
+        try:
+            src_mod._audited_commit(
+                manager,
+                operation="invalid",
+                targets={"unsupported.json": b"{}"},
+                events=[event],
+                context=context,
+            )
+            stale_success_rejected = False
+        except ValueError:
+            stale_success_rejected = True
+        check("failed attempt cannot resolve a previous commit", (
+            stale_success_rejected
+            and manager.last_transaction_id is None
+            and first["transaction_id"]
+        ))
+        check("failed attempt creates no unsupported target", (
+            not (root / "unsupported.json").exists()
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        result = manager.commit(
+            operation="metadata",
+            targets={"history.json": b"{}"},
+            events=[event],
+            context=context,
+        )
+        prepare_path = next(
+            (root / "audit" / "transactions").glob(
+                f"*/{result['transaction_id']}/prepare.json"
+            )
+        )
+        prepare = json.loads(prepare_path.read_text(encoding="utf-8"))
+        prepare["events"][0]["occurred_at"] = "foo/bar"
+        prepare_path.write_text(json.dumps(prepare), encoding="utf-8")
+        try:
+            audit_mod.AuditTransactionManager(root).recover()
+            bad_metadata_rejected = False
+        except audit_mod.AuditConflictError:
+            bad_metadata_rejected = True
+        check("noncanonical audit event metadata fails closed", bad_metadata_rejected)
+        check("noncanonical event cannot create nested projection paths", (
+            not (root / "audit" / "events" / "foo").exists()
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "state.json"
+        original_replace = audit_mod.os.replace
+        original_close = audit_mod.os.close
+        close_calls = []
+        audit_mod.os.replace = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("replace failure")
+        )
+        audit_mod.os.close = lambda descriptor: close_calls.append(descriptor)
+        try:
+            try:
+                audit_mod._atomic_write_bytes(target, b"{}")
+            except OSError:
+                pass
+        finally:
+            audit_mod.os.replace = original_replace
+            audit_mod.os.close = original_close
+        check("atomic writer does not double-close fdopen descriptor", close_calls == [])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "audit" / "transactions").mkdir(parents=True)
+        (root / "audit" / "events").write_text("not a directory", encoding="utf-8")
+        before_count = len(list(Path("/proc/self/fd").iterdir()))
+        for _ in range(20):
+            try:
+                audit_mod.AuditTransactionManager(root)
+            except OSError:
+                pass
+        after_count = len(list(Path("/proc/self/fd").iterdir()))
+        check("failed audit configuration releases descriptors", after_count == before_count)
+
+
+def test_audit1a_migration_reconstructs_w29_idempotently():
+    migration = importlib.import_module(".src.migrations.audit1a", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        plans_dir = data_dir / "plans"
+        plans_dir.mkdir()
+        legacy_plan = {
+            "week": "2026-W29",
+            "status": "active",
+            "prep": [],
+            "days": {
+                day: {"meals": []}
+                for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+            },
+            "leftovers": {},
+            "shopping": {},
+        }
+        (plans_dir / "2026-W29.json").write_text(
+            json.dumps(legacy_plan, ensure_ascii=False), encoding="utf-8"
+        )
+        (data_dir / "history.json").write_text(json.dumps({
+            "рамен tanoshi soja caramel с тофу и овощами": "2026-07-15",
+            "паста с томатным соусом, чечевицей и кабачком": "2026-07-17",
+        }, ensure_ascii=False), encoding="utf-8")
+
+        targets, report = migration.build_migration(data_dir)
+        check("AUDIT-1A migration targets plan and history", (
+            sorted(targets) == ["history.json", "plans/2026-W29.json"]
+        ))
+        for relative, payload in targets.items():
+            target = data_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        migrated = json.loads((plans_dir / "2026-W29.json").read_text(encoding="utf-8"))
+        wed = migrated["days"]["wed"]["meals"][0]
+        thu = migrated["days"]["thu"]["meals"][0]
+        check("AUDIT-1A restores cooked W29 occurrences in original slots", (
+            wed["status"] == "cooked"
+            and wed["planned_for"] == "2026-07-15"
+            and wed["cooked_on"] == "2026-07-15"
+            and thu["status"] == "cooked"
+            and thu["planned_for"] == "2026-07-16"
+            and thu["cooked_on"] == "2026-07-17"
+        ))
+        migrated_history = json.loads(
+            (data_dir / "history.json").read_text(encoding="utf-8")
+        )
+        linked = {item["plan_occurrence_id"] for item in migrated_history["entries"]}
+        check("AUDIT-1A links canonical cook events to restored occurrences", (
+            wed["occurrence_id"] in linked and thu["occurrence_id"] in linked
+        ))
+        second_targets, second_report = migration.build_migration(data_dir)
+        check("AUDIT-1A migration is idempotent", (
+            second_targets == {}
+            and second_report["occurrences_backfilled"] == []
+        ))
+
+        canonical_plan = (plans_dir / "2026-W29.json").read_bytes()
+        canonical_history = (data_dir / "history.json").read_bytes()
+
+        def assert_collision(label, *, plan_change=None, history_change=None):
+            plan_data = json.loads(canonical_plan)
+            history_data = json.loads(canonical_history)
+            if plan_change is not None:
+                plan_change(plan_data["days"]["wed"]["meals"][0])
+            if history_change is not None:
+                event = next(
+                    item for item in history_data["entries"]
+                    if item["plan_occurrence_id"] == wed["occurrence_id"]
+                )
+                history_change(event)
+            (plans_dir / "2026-W29.json").write_text(
+                json.dumps(plan_data, ensure_ascii=False), encoding="utf-8"
+            )
+            (data_dir / "history.json").write_text(
+                json.dumps(history_data, ensure_ascii=False), encoding="utf-8"
+            )
+            before_conflict = {
+                path: path.read_bytes()
+                for path in (plans_dir / "2026-W29.json", data_dir / "history.json")
+            }
+            try:
+                migration.build_migration(data_dir)
+                collision_rejected = False
+            except ValueError:
+                collision_rejected = True
+            check(f"AUDIT-1A rejects {label} collision", collision_rejected)
+            check(f"AUDIT-1A {label} collision performs no writes", all(
+                path.read_bytes() == payload
+                for path, payload in before_conflict.items()
+            ))
+            (plans_dir / "2026-W29.json").write_bytes(canonical_plan)
+            (data_dir / "history.json").write_bytes(canonical_history)
+
+        plan_collisions = {
+            "plan occurrence ID": lambda row: row.update(
+                occurrence_id="mealocc_other"
+            ),
+            "plan revision": lambda row: row.update(revision=2),
+            "plan actual portions": lambda row: row.update(actual_portions=1),
+            "plan actual yield": lambda row: row.update(actual_yield_portions=1),
+            "plan predecessor": lambda row: row.update(
+                predecessor_occurrence_id="mealocc_other"
+            ),
+            "plan replacement": lambda row: row.update(
+                replacement_occurrence_id="mealocc_other"
+            ),
+            "plan leftovers": lambda row: row.update(leftover_lot_ids=["lot_other"]),
+        }
+        for label, mutate in plan_collisions.items():
+            assert_collision(label, plan_change=mutate)
+
+        history_collisions = {
+            "history actual portions": lambda event: event.update(actual_portions=1),
+            "history actual yield": lambda event: event.update(actual_yield_portions=1),
+            "history backfill flag": lambda event: event.update(backfilled=False),
+            "history provenance": lambda event: event.update(
+                provenance={"source": "different"}
+            ),
+            "history precision": lambda event: event.update(
+                time_precision="datetime",
+                cooked_at="2026-07-15T00:00:00Z",
+            ),
+        }
+        for label, mutate in history_collisions.items():
+            assert_collision(label, history_change=mutate)
+
+
 def main():
     _setup_tmp_data()
     try:
+        test_audit_transaction_commits_state_and_proof()
+        test_audit_transaction_recovers_mixed_state_to_before_images()
+        test_audit_transaction_recovers_all_after_as_committed()
+        test_audit_recovery_exports_committed_event_after_export_crash()
+        test_audit_hardening_rejects_symlinks_and_repairs_projection()
+        test_audit_hardening_blocks_parent_swap_and_corrupt_proof()
+        test_audit_attempt_identity_metadata_and_fd_cleanup()
+        test_audit1a_migration_reconstructs_w29_idempotently()
+        test_history_migrates_to_stable_cooking_occurrences()
+        test_native_history_and_audit_corruption_is_sanitized()
+        test_register_cooked_meal_completes_planned_occurrence()
         test_registered_update_fridge_schema_exposes_required_arguments()
         test_inventory_awareness_hook_is_exact_target_and_fail_safe()
         test_inventory_awareness_isolates_concurrent_gateway_contexts()

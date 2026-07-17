@@ -19,7 +19,7 @@ from pathlib import Path
 from collections import Counter
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +44,12 @@ _plan_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.plan")
 _plan_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_plan"
 )
+_history_repository_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.repositories.json_history"
+)
+_audit_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.audit.transaction")
+_audit_context_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.audit.context")
+_cooking_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.cooking")
 _prep_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_prep_item"
 )
@@ -55,6 +61,13 @@ JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
 JsonDishRepository = _dish_repository_module.JsonDishRepository
 dish_catalog_version = _dish_repository_module.dish_catalog_version
 JsonPlanRepository = _plan_repository_module.JsonPlanRepository
+JsonHistoryRepository = _history_repository_module.JsonHistoryRepository
+HistoryDataError = _history_repository_module.HistoryDataError
+AuditTransactionManager = _audit_module.AuditTransactionManager
+AuditConflictError = _audit_module.AuditConflictError
+audit_scope = _audit_context_module.audit_scope
+register_cooked = _cooking_module.register_cooked
+retract_cooked = _cooking_module.retract_cooked
 JsonPrepItemRepository = _prep_repository_module.JsonPrepItemRepository
 JsonShoppingRequestRepository = _shopping_request_repository_module.JsonShoppingRequestRepository
 project_plan_shopping = _shopping_module.project_plan_shopping
@@ -77,6 +90,8 @@ PLANS_DIR = DATA_DIR / "plans"
 _structured_dish_repo = JsonDishRepository(DISHES_PATH)
 _structured_fridge_repo = JsonFridgeRepository(FRIDGE_PATH)
 _structured_plan_repo = JsonPlanRepository(PLANS_DIR)
+_structured_history_repo = JsonHistoryRepository(HISTORY_PATH)
+_web_audit_manager = AuditTransactionManager(DATA_DIR)
 _structured_prep_repo = JsonPrepItemRepository(DATA_DIR / "prep_items.json")
 _structured_shopping_request_repo = JsonShoppingRequestRepository(
     DATA_DIR / "shopping_requests.json"
@@ -149,13 +164,58 @@ def load_available_ingredient_keys():
 def save_fridge(items):
     _fridge_repository().save(items)
 
+def _history_repository():
+    _structured_history_repo.path = Path(HISTORY_PATH)
+    return _structured_history_repo
+
+
+def _audit_transaction_manager(data_dir=None):
+    _web_audit_manager.configure(
+        Path(data_dir).resolve() if data_dir is not None else Path(HISTORY_PATH).parent
+    )
+    return _web_audit_manager
+
+
+def _web_audited(operation, data_root):
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            manager = _audit_transaction_manager(data_root())
+            try:
+                with audit_scope(
+                    operation=operation,
+                    manager=manager,
+                    actor_type="user",
+                    surface_kind="web_api",
+                ):
+                    return fn(*args, **kwargs)
+            except (AuditConflictError, OSError, json.JSONDecodeError) as exc:
+                logger.error("Audit storage failure", exc_info=exc)
+                raise HTTPException(
+                    503, "Audit storage is temporarily unavailable"
+                ) from exc
+        return wrapped
+    return decorate
+
+
+def _history_public(event):
+    result = event.to_dict()
+    result["dish"] = event.dish_name_snapshot
+    result["date"] = event.cooked_at or event.cooked_on
+    result["status"] = "active" if event.active else "retracted"
+    return result
+
+
 def load_history():
-    data = _read_json(HISTORY_PATH, {"history": []})
-    return data.get("history", [])
+    return [
+        _history_public(event)
+        for event in _history_repository().load_events(strict=True)
+    ]
+
 
 def save_history(entries):
-    _write_json(HISTORY_PATH, {"history": entries})
-
+    """Compatibility helper; canonical callers persist CookingEvent objects."""
+    _history_repository().save_events(entries)
 
 def _plan_repository():
     _structured_plan_repo.plans_dir = Path(PLANS_DIR)
@@ -630,12 +690,14 @@ def _optional_missing(dish_ingredients: dict, fridge: list) -> list:
     return [ing for ing, ess in dish_ingredients.items() if not ess and ing not in fridge_set]
 
 def _recent_dishes(history: list, days: int = RECENCY_COOLDOWN_DAYS) -> set:
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = date.today() - timedelta(days=days)
     recent = set()
     for entry in history:
+        if entry.get("status") == "retracted":
+            continue
         try:
-            d = datetime.fromisoformat(entry["date"])
-            if d >= cutoff:
+            cooked_on = datetime.fromisoformat(entry["date"].replace("Z", "+00:00")).date()
+            if cooked_on >= cutoff:
                 recent.add(_normalize(entry["dish"]))
         except (KeyError, ValueError, TypeError):
             continue
@@ -770,9 +832,20 @@ class PlanMealEdit(BaseModel):
         extra = "forbid"
 
 
+class PlanMealStableEdit(PlanMealEdit):
+    expected_revision: StrictInt = Field(ge=1)
+
+
 class CookedMeal(BaseModel):
-    dish: str
-    date: str | None = None  # ISO date, defaults to today
+    dish: str = Field(min_length=1, max_length=200)
+    date: str | None = None
+    occurrence_id: str | None = Field(default=None, min_length=1, max_length=100)
+    expected_revision: StrictInt | None = Field(default=None, ge=1)
+    actual_portions: StrictInt | None = Field(default=None, ge=0)
+    actual_yield_portions: StrictInt | None = Field(default=None, ge=0)
+
+    class Config:
+        extra = "forbid"
 
 # ─── API: Dishes ────────────────────────────────────────────────────────
 def _assert_dish_catalog_version(expected_version: str, dishes: list[Dish]) -> str:
@@ -798,6 +871,7 @@ def get_dishes():
 
 
 @app.post("/api/dishes")
+@_web_audited("add_dish", lambda: Path(DISHES_PATH).parent)
 def add_dish(payload: DishCreate):
     repo = _dish_repository()
     with repo.lock:
@@ -821,6 +895,7 @@ def add_dish(payload: DishCreate):
 
 
 @app.put("/api/dishes/{dish_name}")
+@_web_audited("update_dish", lambda: Path(DISHES_PATH).parent)
 def update_dish(dish_name: str, payload: DishUpdate):
     repo = _dish_repository()
     with repo.lock:
@@ -853,6 +928,7 @@ def update_dish(dish_name: str, payload: DishUpdate):
 
 
 @app.delete("/api/dishes/{dish_name}")
+@_web_audited("delete_dish", lambda: Path(DISHES_PATH).parent)
 def delete_dish(dish_name: str, expected_version: str):
     repo = _dish_repository()
     with repo.lock:
@@ -925,6 +1001,7 @@ def list_inventory_items():
 
 
 @app.post("/api/inventory/items")
+@_web_audited("add_inventory_item", lambda: Path(FRIDGE_PATH).parent)
 def add_inventory_item(payload: InventoryItemCreate):
     fields = _model_patch(payload)
     name = fields.pop("name")
@@ -936,6 +1013,7 @@ def add_inventory_item(payload: InventoryItemCreate):
 
 
 @app.patch("/api/inventory/items/{item_id}")
+@_web_audited("edit_inventory_item", lambda: Path(FRIDGE_PATH).parent)
 def edit_inventory_item(item_id: str, payload: InventoryItemPatch):
     try:
         fields = _model_patch(payload)
@@ -951,6 +1029,7 @@ def edit_inventory_item(item_id: str, payload: InventoryItemPatch):
 
 
 @app.delete("/api/inventory/items/{item_id}")
+@_web_audited("remove_inventory_item", lambda: Path(FRIDGE_PATH).parent)
 def remove_inventory_item(item_id: str, expected_updated_at: str):
     try:
         item = _fridge_repository().remove_item(
@@ -989,6 +1068,7 @@ def list_product_catalog(
 
 
 @app.patch("/api/products/category")
+@_web_audited("set_product_category", lambda: Path(FRIDGE_PATH).parent)
 @_inventory_api_errors
 def set_product_category(payload: ProductCategoryPatch):
     if payload.product_id:
@@ -1033,6 +1113,7 @@ def set_product_category(payload: ProductCategoryPatch):
 
 
 @app.post("/api/products/replenish")
+@_web_audited("replenish_product", lambda: Path(FRIDGE_PATH).parent)
 def replenish_product(payload: ProductReplenish):
     fields = _model_patch(payload)
     product_id = fields.pop("product_id", None)
@@ -1061,6 +1142,7 @@ def get_fridge():
     return {"ingredients": load_fridge()}
 
 @app.put("/api/fridge")
+@_web_audited("set_fridge", lambda: Path(FRIDGE_PATH).parent)
 @_inventory_api_errors
 def set_fridge(payload: FridgeUpdate):
     with _lock:
@@ -1069,6 +1151,7 @@ def set_fridge(payload: FridgeUpdate):
     return {"ingredients": items}
 
 @app.post("/api/fridge/add")
+@_web_audited("add_to_fridge", lambda: Path(FRIDGE_PATH).parent)
 @_inventory_api_errors
 def add_to_fridge(payload: FridgeAddRemove):
     with _lock:
@@ -1083,6 +1166,7 @@ def add_to_fridge(payload: FridgeAddRemove):
     return {"ingredients": fridge}
 
 @app.post("/api/fridge/remove")
+@_web_audited("remove_from_fridge", lambda: Path(FRIDGE_PATH).parent)
 @_inventory_api_errors
 def remove_from_fridge(payload: FridgeAddRemove):
     with _lock:
@@ -1093,6 +1177,7 @@ def remove_from_fridge(payload: FridgeAddRemove):
     return {"ingredients": fridge}
 
 @app.put("/api/fridge/item")
+@_web_audited("rename_fridge_item", lambda: Path(FRIDGE_PATH).parent)
 @_inventory_api_errors
 def rename_fridge_item(payload: FridgeRename):
     old_name = _normalize(payload.old_ingredient)
@@ -1120,6 +1205,7 @@ def rename_fridge_item(payload: FridgeRename):
     }
 
 @app.delete("/api/fridge")
+@_web_audited("clear_fridge", lambda: Path(FRIDGE_PATH).parent)
 @_inventory_api_errors
 def clear_fridge():
     with _lock:
@@ -1132,7 +1218,11 @@ def clear_fridge():
 def get_suggestions():
     dishes = load_dishes()
     fridge = load_available_ingredient_keys()
-    history = load_history()
+    try:
+        history = load_history()
+    except (HistoryDataError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.error("Suggestion history read failure", exc_info=exc)
+        raise HTTPException(503, "History storage is temporarily unavailable") from exc
     recent = _recent_dishes(history)
     suggestions = []
     for d in dishes:
@@ -1208,46 +1298,85 @@ def get_shopping():
 # ─── API: History ───────────────────────────────────────────────────────
 @app.get("/api/history")
 def get_history():
-    return {"history": load_history()}
+    try:
+        return {"history": load_history()}
+    except (HistoryDataError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.error("History read failure", exc_info=exc)
+        raise HTTPException(503, "History storage is temporarily unavailable") from exc
 
 @app.post("/api/history")
-@_inventory_api_errors
+@_web_audited("register_cooked_meal", lambda: Path(HISTORY_PATH).parent)
 def add_history(payload: CookedMeal):
-    with _lock:
-        history = load_history()
-        entry = {
-            "dish": _normalize(payload.dish),
-            "date": payload.date or datetime.now().isoformat(),
-        }
-        dishes = load_dishes()
-        dish = next((d for d in dishes if _normalize(d["name"]) == entry["dish"]), None)
-        repo = _fridge_repository()
-        inventory_before = None
-        with repo.lock:
-            if dish:
-                inventory_before = repo.load_catalog_items()
-                essentials_to_remove = {
-                    ing for ing, ess in dish.get("ingredients", {}).items() if ess
-                }
-                repo.remove_items(list(essentials_to_remove))
-            try:
-                history.append(entry)
-                save_history(history)
-            except Exception:
-                if inventory_before is not None:
-                    repo.save_items(inventory_before)
-                raise
-    return {"status": "ok", "entry": entry}
+    try:
+        result = register_cooked(
+            dish_name=_normalize(payload.dish),
+            occurrence_id=payload.occurrence_id,
+            expected_revision=payload.expected_revision,
+            cooked_at=payload.date,
+            actual_portions=payload.actual_portions,
+            actual_yield_portions=payload.actual_yield_portions,
+            actor_type="user",
+            surface_kind="web",
+            dish_repository=_dish_repository(),
+            fridge_repository=_fridge_repository(),
+            history_repository=_history_repository(),
+            plan_repository=_plan_repository(),
+            prep_repository=_prep_repository(),
+            audit_transaction_manager=_audit_transaction_manager(),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (
+        AuditConflictError, HistoryDataError, InventoryDataError,
+        OSError, json.JSONDecodeError,
+    ) as exc:
+        logger.error("Cooking transaction storage failure", exc_info=exc)
+        raise HTTPException(503, "Inventory storage is temporarily unavailable") from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    event = next(
+        item for item in _history_repository().load_events(strict=True)
+        if item.id == result["cook_event_id"]
+    )
+    return {
+        "status": "ok",
+        "entry": _history_public(event),
+        "transaction_id": result["transaction_id"],
+    }
 
-@app.delete("/api/history/{entry_index}")
-def delete_history_entry(entry_index: int):
-    with _lock:
-        history = load_history()
-        if entry_index < 0 or entry_index >= len(history):
-            raise HTTPException(404, "History entry not found")
-        history.pop(entry_index)
-        save_history(history)
-    return {"status": "ok"}
+
+@app.delete("/api/history/{event_id}")
+@_web_audited("retract_cooked_meal", lambda: Path(HISTORY_PATH).parent)
+def delete_history_entry(event_id: str):
+    try:
+        if event_id.isdigit():
+            events = _history_repository().load_events(strict=True)
+            index = int(event_id)
+            if index >= len(events):
+                raise LookupError("history entry index not found")
+            event_id = events[index].id
+        result = retract_cooked(
+            event_id=event_id,
+            actor_type="user",
+            surface_kind="web",
+            history_repository=_history_repository(),
+            plan_repository=_plan_repository(),
+            audit_transaction_manager=_audit_transaction_manager(),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (AuditConflictError, HistoryDataError, OSError, json.JSONDecodeError) as exc:
+        logger.error("History correction storage failure", exc_info=exc)
+        raise HTTPException(503, "History storage is temporarily unavailable") from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "status": "ok",
+        "entry": _history_public(result["entry"]),
+        "transaction_id": result["transaction_id"],
+        "plan_reopened": result["plan_reopened"],
+        "inventory_restored": False,
+    }
 
 # ─── API: Weekly plans ───────────────────────────────────────────────────
 @app.get("/api/plans")
@@ -1274,12 +1403,14 @@ def get_week_plan_view(week_id: str):
 
 
 @app.post("/api/plans/{week_id}/days/{day}/meals")
+@_web_audited("add_plan_meal", lambda: Path(PLANS_DIR).parent)
 def add_plan_meal(week_id: str, day: str, payload: PlanMealCreate):
     day_code = _require_plan_day(day)
     entry = _plan_meal_entry(payload.dish, payload.portions)
     repo = _plan_repository()
     with repo.lock:
         plan = _require_draft_plan(repo, week_id, payload.expected_version)
+        entry.bind_to_plan(plan.week_id, day_code)
         plan.days[day_code].meals.append(entry)
         plan.shopping = {}
         repo.save(plan)
@@ -1290,7 +1421,43 @@ def add_plan_meal(week_id: str, day: str, payload: PlanMealCreate):
         }
 
 
+@app.patch("/api/plans/{week_id}/meals/{occurrence_id}")
+@_web_audited("edit_plan_meal", lambda: Path(PLANS_DIR).parent)
+def edit_plan_meal_occurrence(
+    week_id: str,
+    occurrence_id: str,
+    payload: PlanMealStableEdit,
+):
+    repo = _plan_repository()
+    with repo.lock:
+        plan = _require_draft_plan(repo, week_id, payload.expected_version)
+        matches = [
+            meal
+            for day in plan.days.values()
+            for meal in day.meals
+            if meal.occurrence_id == occurrence_id
+        ]
+        if len(matches) != 1:
+            raise HTTPException(404, "Plan meal occurrence not found")
+        meal = matches[0]
+        candidate = _plan_meal_entry(
+            payload.dish, payload.portions, existing_dish=meal.dish
+        )
+        try:
+            meal.revise(
+                dish=candidate.dish,
+                portions=candidate.portions,
+                expected_revision=payload.expected_revision,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        plan.shopping = {}
+        repo.save(plan)
+        return {"plan": plan.to_dict(), "version": _plan_version(plan)}
+
+
 @app.patch("/api/plans/{week_id}/days/{day}/meals/{meal_index}")
+@_web_audited("edit_plan_meal", lambda: Path(PLANS_DIR).parent)
 def edit_plan_meal(
     week_id: str,
     day: str,
@@ -1304,18 +1471,96 @@ def edit_plan_meal(
         meals = plan.days[day_code].meals
         if meal_index < 0 or meal_index >= len(meals):
             raise HTTPException(404, "Plan meal not found")
-        entry = _plan_meal_entry(
+        candidate = _plan_meal_entry(
             payload.dish,
             payload.portions,
             existing_dish=meals[meal_index].dish,
         )
-        meals[meal_index] = entry
+        try:
+            meals[meal_index].revise(
+                dish=candidate.dish,
+                portions=candidate.portions,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         plan.shopping = {}
         repo.save(plan)
         return {"plan": plan.to_dict(), "version": _plan_version(plan)}
 
 
+@app.delete("/api/plans/{week_id}/meals/{occurrence_id}")
+@_web_audited("cancel_plan_meal", lambda: Path(PLANS_DIR).parent)
+def cancel_plan_meal(
+    week_id: str,
+    occurrence_id: str,
+    expected_version: str,
+    expected_revision: int = Query(ge=1),
+):
+    repo = _plan_repository()
+    audit = _audit_transaction_manager(Path(PLANS_DIR).parent)
+    with audit.lock:
+        audit.recover()
+        with repo.lock:
+            plan = _require_draft_plan(repo, week_id, expected_version)
+            found = [
+                (day_code, meal)
+                for day_code, day in plan.days.items()
+                for meal in day.meals
+                if meal.occurrence_id == occurrence_id
+            ]
+            if len(found) != 1:
+                raise HTTPException(404, "Plan meal occurrence not found")
+            day_code, cancelled = found[0]
+            try:
+                cancelled.transition_to(
+                    "cancelled", expected_revision=expected_revision
+                )
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            plan.shopping = {}
+            after = json.dumps(
+                plan.to_dict(), ensure_ascii=False, indent=2
+            ).encode("utf-8")
+            try:
+                transaction = audit.commit(
+                    operation="web_cancel_plan_meal",
+                    targets={f"plans/{plan.week_id}.json": after},
+                    events=[{
+                        "event_type": "plan.meal.cancelled.v1",
+                        "entity": {
+                            "type": "meal_occurrence",
+                            "id": cancelled.occurrence_id,
+                        },
+                        "payload": {
+                            "week": plan.week_id,
+                            "day": day_code,
+                            "dish": cancelled.dish,
+                            "portions_planned": cancelled.portions_planned,
+                            "revision": cancelled.revision,
+                        },
+                    }],
+                    context={
+                        "actor": {"type": "user"},
+                        "surface": {
+                            "kind": "web",
+                            "operation": "cancel_plan_meal",
+                        },
+                    },
+                )
+            except Exception:
+                transaction = audit.resolve_last_transaction()
+                if transaction is None:
+                    raise
+            return {
+                "plan": plan.to_dict(),
+                "version": _plan_version(plan),
+                "cancelled": cancelled.to_dict(),
+                "transaction_id": transaction["transaction_id"],
+            }
+
+
 @app.delete("/api/plans/{week_id}/days/{day}/meals/{meal_index}")
+@_web_audited("cancel_plan_meal_legacy", lambda: Path(PLANS_DIR).parent)
 def delete_plan_meal(
     week_id: str,
     day: str,
@@ -1329,17 +1574,16 @@ def delete_plan_meal(
         meals = plan.days[day_code].meals
         if meal_index < 0 or meal_index >= len(meals):
             raise HTTPException(404, "Plan meal not found")
-        removed = meals.pop(meal_index)
-        plan.shopping = {}
-        repo.save(plan)
-        return {
-            "plan": plan.to_dict(),
-            "version": _plan_version(plan),
-            "removed": removed.to_dict(),
-        }
+        occurrence_id = meals[meal_index].occurrence_id
+    result = cancel_plan_meal(
+        week_id, occurrence_id, expected_version, meals[meal_index].revision
+    )
+    result["removed"] = result["cancelled"]
+    return result
 
 
 @app.delete("/api/plans/{week_id}")
+@_web_audited("delete_week_plan", lambda: Path(PLANS_DIR).parent)
 def delete_week_plan(week_id: str, expected_version: str):
     try:
         normalized_week = WeekPlan.normalize_week_id(week_id)
@@ -1355,6 +1599,46 @@ def delete_week_plan(week_id: str, expected_version: str):
             raise HTTPException(404, f"Plan '{normalized_week}' not found")
     return {"status": "ok", "week": normalized_week}
 
+# ─── API: Audit ──────────────────────────────────────────────────────────
+@app.get("/api/audit/events")
+def get_audit_events(
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    event_type: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    actor_type: str | None = None,
+    surface_kind: str | None = None,
+    operation: str | None = None,
+    operation_id: str | None = None,
+    limit: int = 100,
+):
+    try:
+        events = _audit_transaction_manager().list_events(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            event_type=event_type,
+            since=since,
+            until=until,
+            actor_type=actor_type,
+            surface_kind=surface_kind,
+            operation=operation,
+            operation_id=operation_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (AuditConflictError, OSError) as exc:
+        logger.error("Audit history storage failure", exc_info=exc)
+        raise HTTPException(503, "Audit history is temporarily unavailable") from exc
+    return {"events": events}
+
+
+@app.get("/api/audit/entities/{entity_type}/{entity_id}")
+def get_entity_audit_history(entity_type: str, entity_id: str, limit: int = 100):
+    return get_audit_events(entity_type=entity_type, entity_id=entity_id, limit=limit)
+
+
 # ─── API: Stats ─────────────────────────────────────────────────────────
 @app.get("/api/stats")
 @_inventory_api_errors
@@ -1364,7 +1648,11 @@ def get_stats():
     fridge = list({
         name for item in inventory_items for name in (item.name, *item.aliases)
     })
-    history = load_history()
+    try:
+        history = load_history()
+    except (HistoryDataError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.error("History stats read failure", exc_info=exc)
+        raise HTTPException(503, "History storage is temporarily unavailable") from exc
     recent = _recent_dishes(history)
 
     cookable = sum(1 for d in dishes if _can_cook(d.get("ingredients", {}), fridge))
@@ -1388,15 +1676,16 @@ def get_stats():
     ]
 
     # History stats
-    cook_counts = Counter(h.get("dish", "") for h in history)
+    active_history = [h for h in history if h.get("status") != "retracted"]
+    cook_counts = Counter(h.get("dish", "") for h in active_history)
     last_7_days = [
         (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
         for i in range(6, -1, -1)
     ]
     cooks_by_day = {day: 0 for day in last_7_days}
-    for h in history:
+    for h in active_history:
         try:
-            day = datetime.fromisoformat(h["date"]).strftime("%Y-%m-%d")
+            day = datetime.fromisoformat(h["date"].replace("Z", "+00:00")).strftime("%Y-%m-%d")
             if day in cooks_by_day:
                 cooks_by_day[day] += 1
         except (KeyError, ValueError):

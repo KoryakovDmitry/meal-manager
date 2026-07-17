@@ -340,6 +340,8 @@ textarea { resize: vertical; min-height: 60px; }
 .history-item .dish-name { font-weight: 600; }
 .history-item .date { font-size: 0.8rem; color: var(--text-dim); }
 .history-item .actions { display: flex; gap: 8px; }
+.history-item.history-retracted { opacity:.58; }
+.history-item.history-retracted .dish-name { text-decoration:line-through; }
 
 /* ─── Weekly plans ─── */
 .plan-history { display: grid; gap: 8px; margin-bottom: 16px; }
@@ -354,7 +356,14 @@ textarea { resize: vertical; min-height: 60px; }
 .plan-days { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .plan-day { padding: 12px; background: var(--bg); border-radius: 10px; min-height: 90px; }
 .plan-day h4 { margin-bottom: 8px; color: var(--accent-light); }
-.plan-meal { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); font-size:0.85rem; }
+.plan-meal { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 0; border-bottom:1px solid var(--border); font-size:0.85rem; }
+.plan-meal.status-cooked { opacity:.78; }
+.plan-meal.status-cooked .plan-meal-name { text-decoration:line-through; text-decoration-thickness:1px; }
+.plan-meal.status-cancelled, .plan-meal.status-skipped { opacity:.55; }
+.plan-meal-status { display:inline-block; margin-left:6px; padding:2px 7px; border-radius:999px; font-size:.7rem; font-weight:700; }
+.plan-meal-status.cooked { color:var(--green); background:rgba(68,207,142,.13); }
+.plan-meal-status.cancelled, .plan-meal-status.skipped { color:var(--text-dim); background:rgba(148,163,184,.13); }
+.plan-meal-status.moved, .plan-meal-status.substituted { color:var(--orange); background:rgba(255,169,49,.13); }
 .plan-meal-actions, .plan-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .plan-toolbar { justify-content:space-between; margin-bottom:12px; }
 .plan-day .btn { margin-top:8px; }
@@ -1155,12 +1164,25 @@ async function deleteDish(name) {
   }
 }
 
-async function cookDish(name) {
+async function cookDish(name, occurrenceId = null, expectedRevision = null) {
   try {
-    await api('/api/history', 'POST', { dish: name });
+    const payload = {dish: name};
+    if (occurrenceId !== null) {
+      payload.occurrence_id = occurrenceId;
+      payload.expected_revision = expectedRevision;
+    }
+    await api('/api/history', 'POST', payload);
     toast(`🍳 ${name} приготовлен! Ингредиенты списаны.`);
     await refreshAll();
   } catch (e) { toast(e.message, true); }
+}
+
+async function cookPlanMeal(occurrenceId) {
+  const meals = Object.values(CACHE.selectedPlan?.days || {})
+    .flatMap(day => day.meals || []);
+  const meal = meals.find(item => item.occurrence_id === occurrenceId);
+  if (!meal || meal.status !== 'planned') return;
+  await cookDish(meal.dish, meal.occurrence_id, meal.revision);
 }
 
 function closeModal() {
@@ -1804,11 +1826,20 @@ function renderPlanDetail() {
     const day = plan.days?.[code] || {meals: []};
     const meals = (day.meals || []).map((meal, index) => {
       const safeDish = escapeHtml(meal.dish);
-      const actions = editable ? `<span class="plan-meal-actions">
+      const status = meal.status || 'planned';
+      const statusLabels = {cooked:'приготовлено', cancelled:'отменено', skipped:'пропущено', moved:'перенесено', substituted:'заменено'};
+      const statusBadge = status === 'planned' ? '' : `<span class="plan-meal-status ${escapeHtml(status)}">${escapeHtml(statusLabels[status] || status)}</span>`;
+      const editActions = editable && status === 'planned' ? `
         <button class="btn btn-ghost btn-sm icon-action" type="button" data-action="edit-meal" data-value="${code}:${index}" aria-label="Изменить ${safeDish}">✎</button>
-        <button class="btn btn-danger btn-sm icon-action" type="button" data-action="delete-meal" data-value="${code}:${index}" aria-label="Удалить ${safeDish} из плана">✕</button>
-      </span>` : '';
-      return `<div class="plan-meal"><span>${safeDish} · ${Number(meal.portions) || 0} порц.</span>${actions}</div>`;
+        <button class="btn btn-danger btn-sm icon-action" type="button" data-action="delete-meal" data-value="${escapeHtml(meal.occurrence_id)}" aria-label="Отменить ${safeDish} в плане">✕</button>` : '';
+      const cookAction = status === 'planned' && plan.status !== 'archived' ? `
+        <button class="btn btn-primary btn-sm icon-action" type="button" data-action="cook-plan-meal" data-value="${escapeHtml(meal.occurrence_id)}" aria-label="Отметить ${safeDish} приготовленным">🍳</button>` : '';
+      const actions = cookAction || editActions
+        ? `<span class="plan-meal-actions">${cookAction}${editActions}</span>`
+        : '';
+      const actual = status === 'cooked' && meal.actual_yield_portions != null
+        ? ` · выход ${Number(meal.actual_yield_portions)} порц.` : '';
+      return `<div class="plan-meal status-${escapeHtml(status)}"><span class="plan-meal-name">${safeDish} · ${Number(meal.portions_planned ?? meal.portions) || 0} порц.${actual}${statusBadge}</span>${actions}</div>`;
     }).join('');
     const add = editable
       ? `<button class="btn btn-ghost btn-sm" type="button" data-action="add-meal" data-value="${code}">+ Блюдо</button>`
@@ -1828,6 +1859,7 @@ function renderPlanDetail() {
   bindDataActions(detail, {
     'add-meal': day => showPlanMealModal(day),
     'edit-meal': target => showPlanMealModal(...target.split(':')),
+    'cook-plan-meal': cookPlanMeal,
     'delete-meal': deletePlanMeal,
     'delete-plan': deleteWeekPlan,
   });
@@ -1858,7 +1890,7 @@ function showPlanMealModal(day, mealIndex = null) {
         </div>
         <div class="form-row">
           <label for="plan-meal-portions">Порции</label>
-          <input id="plan-meal-portions" type="number" min="1" step="1" value="${meal?.portions || 2}">
+          <input id="plan-meal-portions" type="number" min="1" step="1" value="${meal?.portions_planned ?? meal?.portions ?? 2}">
         </div>
         <div style="display:flex;gap:8px;margin-top:16px">
           <button class="btn btn-primary" type="button" data-modal-action="save">Сохранить</button>
@@ -1872,12 +1904,15 @@ function showPlanMealModal(day, mealIndex = null) {
     if (event.target === backdrop) closeModal();
   });
   dialog.addEventListener('keydown', trapModalFocus);
-  dialog.querySelector('[data-modal-action="save"]').addEventListener('click', () => savePlanMeal(day, index));
+  dialog.querySelector('[data-modal-action="save"]').addEventListener(
+    'click',
+    () => savePlanMeal(day, meal?.occurrence_id ?? null, meal?.revision ?? null),
+  );
   dialog.querySelector('[data-modal-action="cancel"]').addEventListener('click', closeModal);
   document.getElementById('plan-meal-dish').focus();
 }
 
-async function savePlanMeal(day, mealIndex) {
+async function savePlanMeal(day, occurrenceId, expectedRevision) {
   const dish = document.getElementById('plan-meal-dish').value;
   const portions = Number(document.getElementById('plan-meal-portions').value);
   if (!dish || !Number.isInteger(portions) || portions < 1) {
@@ -1888,9 +1923,13 @@ async function savePlanMeal(day, mealIndex) {
   const payload = {dish, portions, expected_version: CACHE.selectedPlanVersion};
   const base = `/api/plans/${encodeURIComponent(plan.week)}/days/${day}/meals`;
   try {
-    const response = mealIndex === null
+    const response = occurrenceId === null
       ? await api(base, 'POST', payload)
-      : await api(`${base}/${mealIndex}`, 'PATCH', payload);
+      : await api(
+          `/api/plans/${encodeURIComponent(plan.week)}/meals/${encodeURIComponent(occurrenceId)}`,
+          'PATCH',
+          {...payload, expected_revision: expectedRevision},
+        );
     closeModal();
     updateSelectedPlan(response);
     toast('План сохранён');
@@ -1901,17 +1940,17 @@ async function savePlanMeal(day, mealIndex) {
   }
 }
 
-async function deletePlanMeal(target) {
-  const [day, rawIndex] = target.split(':');
-  const mealIndex = Number(rawIndex);
-  const meal = CACHE.selectedPlan?.days?.[day]?.meals?.[mealIndex];
-  if (!meal || !confirm(`Удалить «${meal.dish}» из плана?`)) return;
+async function deletePlanMeal(occurrenceId) {
+  const meal = Object.values(CACHE.selectedPlan?.days || {})
+    .flatMap(day => day.meals || [])
+    .find(item => item.occurrence_id === occurrenceId);
+  if (!meal || !confirm(`Отменить «${meal.dish}» в плане? Запись останется в истории плана.`)) return;
   const plan = CACHE.selectedPlan;
-  const path = `/api/plans/${encodeURIComponent(plan.week)}/days/${day}/meals/${mealIndex}?expected_version=${encodeURIComponent(CACHE.selectedPlanVersion)}`;
+  const path = `/api/plans/${encodeURIComponent(plan.week)}/meals/${encodeURIComponent(occurrenceId)}?expected_version=${encodeURIComponent(CACHE.selectedPlanVersion)}&expected_revision=${encodeURIComponent(meal.revision)}`;
   try {
     const response = await api(path, 'DELETE');
     updateSelectedPlan(response);
-    toast('Блюдо удалено из плана');
+    toast('Блюдо отмечено как отменённое');
     await refreshAll();
     document.getElementById('plan-detail-title')?.focus();
   } catch (error) {
@@ -1946,28 +1985,31 @@ function renderHistory() {
     return;
   }
   const sorted = [...CACHE.history].reverse();
-  c.innerHTML = sorted.map((h, revIdx) => {
-    const realIdx = CACHE.history.length - 1 - revIdx;
+  c.innerHTML = sorted.map(h => {
     const date = new Date(h.date);
-    const dateStr = date.toLocaleDateString('ru') + ' ' + date.toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+    const hasTime = typeof h.date === 'string' && h.date.includes('T');
+    const dateStr = Number.isNaN(date.getTime()) ? String(h.date || '')
+      : date.toLocaleDateString('ru') + (hasTime ? ' ' + date.toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'}) : '');
     const dishName = escapeHtml(h.dish);
-    return `<div class="history-item">
+    const retracted = h.status === 'retracted';
+    const eventId = escapeHtml(h.id);
+    const correction = retracted ? '<span class="plan-meal-status cancelled">исправлено</span>' : '';
+    const action = retracted ? '' : `<button class="btn btn-danger btn-sm icon-action" data-action="delete" data-value="${eventId}" aria-label="Исправить запись истории ${dishName}" title="Исправить запись истории ${dishName}">✕</button>`;
+    return `<div class="history-item ${retracted ? 'history-retracted' : ''}">
       <div>
-        <div class="dish-name">${dishName}</div>
+        <div class="dish-name">${dishName}${correction}</div>
         <div class="date">${escapeHtml(dateStr)}</div>
       </div>
-      <div class="actions">
-        <button class="btn btn-danger btn-sm icon-action" data-action="delete" data-value="${realIdx}" aria-label="Удалить запись истории ${dishName}" title="Удалить запись истории ${dishName}">✕</button>
-      </div>
+      <div class="actions">${action}</div>
     </div>`;
   }).join('');
   bindDataActions(c, {delete: deleteHistory});
 }
 
-async function deleteHistory(idx) {
+async function deleteHistory(eventId) {
   try {
-    await api('/api/history/' + idx, 'DELETE');
-    toast('Запись удалена');
+    await api('/api/history/' + encodeURIComponent(eventId), 'DELETE');
+    toast('Запись отмечена как исправленная; исходное событие сохранено');
     await refreshAll();
   } catch (e) { toast(e.message, true); }
 }

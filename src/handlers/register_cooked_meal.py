@@ -1,10 +1,10 @@
-"""Tool: register_cooked_meal — record cook event and consume essentials."""
+"""Tool: register_cooked_meal — commit one canonical cooking occurrence."""
 
 import logging
-from datetime import date
 
 from .. import tuning
-from ..repositories import dish_repo, fridge_repo, history_repo, prep_repo, tuning_repo
+from ..cooking import register_cooked
+from ..repositories import fridge_repo, tuning_repo
 from ._common import (
     days_since_last_cook,
     normalize_dish_name,
@@ -18,16 +18,38 @@ NAME = "register_cooked_meal"
 
 SCHEMA = {
     "description": (
-        "Register that a specific dish was cooked today. Records it in the "
-        "cooking history so the suggestion engine avoids recommending it "
-        "again too soon. Also auto-removes essential ingredients from the "
-        "fridge."
+        "Register a catalog dish as cooked. When occurrence_id is supplied, "
+        "the planned row remains in place and becomes cooked. The operation "
+        "also appends canonical cooking history and consumes essentials."
     ),
     "type": "object",
     "properties": {
         "dish_name": {
             "type": "string",
             "description": "exact dish name from the catalog",
+        },
+        "occurrence_id": {
+            "type": "string",
+            "description": "optional stable mealocc_* ID from a weekly plan",
+        },
+        "expected_revision": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "required OCC revision when occurrence_id is supplied",
+        },
+        "cooked_at": {
+            "type": "string",
+            "description": "optional timezone-aware RFC3339 actual cook time",
+        },
+        "actual_portions": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "portions actually served",
+        },
+        "actual_yield_portions": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "total portions produced, including leftovers",
         },
     },
     "required": ["dish_name"],
@@ -38,64 +60,37 @@ SCHEMA = {
 def HANDLER(args: dict, **kwargs):
     raw_name = require_arg(args, "dish_name")
     name = normalize_dish_name(raw_name)
+    occurrence_id = args.get("occurrence_id")
+    expected_revision = args.get("expected_revision")
+    cooked_at = args.get("cooked_at")
+    actual_portions = args.get("actual_portions")
+    actual_yield_portions = args.get("actual_yield_portions")
 
-    with dish_repo.lock:
-        dishes = dish_repo.load()
-        dish = next((d for d in dishes if d.name == name), None)
+    for value, label in (
+        (actual_portions, "actual_portions"),
+        (actual_yield_portions, "actual_yield_portions"),
+    ):
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            raise ValueError(f"{label} must be a non-negative integer or null")
 
-    if dish is None:
-        raise LookupError(f"'{raw_name}' is not in the recipe catalog.")
-
-    # Snapshot the decision state as it was at the moment the user chose to
-    # cook — before history and fridge are mutated below. The learning update
-    # at the end of the handler replays the ranking against this snapshot.
+    # Capture the learner decision state before the cook transaction mutates it.
     fridge_snapshot = fridge_repo.load_set()
     days_snapshot = days_since_last_cook()
 
-    today_iso = date.today().isoformat()
-    previous_history = history_repo.set_entry(name, today_iso)
+    result = register_cooked(
+        dish_name=name,
+        occurrence_id=occurrence_id,
+        expected_revision=expected_revision,
+        cooked_at=cooked_at,
+        actual_portions=actual_portions,
+        actual_yield_portions=actual_yield_portions,
+    )
+    dishes = result.pop("dishes_snapshot")
 
-    essentials = [ing for ing, is_essential in dish.ingredients.items() if is_essential]
-
-    try:
-        with fridge_repo.lock:
-            catalog = fridge_repo.load_catalog_items()
-            removed = [
-                ing for ing in essentials
-                if any(
-                    item.available and ing in (item.name, *item.aliases)
-                    for item in catalog
-                )
-            ]
-            if removed:
-                fridge_repo.remove_items(removed)
-    except Exception:
-        try:
-            history_repo.revert_entry(name, today_iso, previous_history)
-        except Exception:
-            logger.exception("register_cooked_meal rollback failed")
-        raise
-
-    removed_msg = f" Removed from fridge: {', '.join(removed)}." if removed else ""
-
-    # Consume prep items that this dish depends on
-    prep_consumed = []
-    if dish.prep_depends:
-        with prep_repo.lock:
-            items = prep_repo.load()
-            for dep_name in dish.prep_depends:
-                dep_item = next((it for it in items if it.name == dep_name), None)
-                if dep_item is not None and dep_item.remaining > 0:
-                    dep_item.remaining -= 1
-                    prep_consumed.append(dep_name)
-            prep_repo.save(items)
-
-    prep_msg = ""
-    if prep_consumed:
-        prep_msg = f" Consumed prep items: {', '.join(prep_consumed)}."
-
-    # Best-effort online weight tuning. This must never fail or roll back the
-    # cook registration: any error here is logged and swallowed.
+    # Derived learner state is a non-critical correlated child update. The
+    # active native audit scope journals the tuning document replacement.
     try:
         with tuning_repo.lock:
             state = tuning_repo.load()
@@ -109,4 +104,20 @@ def HANDLER(args: dict, **kwargs):
     except Exception:
         logger.exception("weight tuning update failed (non-critical)")
 
-    return f"Registered '{dish.name}' as cooked on {today_iso}.{removed_msg}{prep_msg}"
+    removed_msg = ""
+    if result["removed_inventory"]:
+        removed_msg = (
+            " Removed from fridge: "
+            + ", ".join(result["removed_inventory"])
+            + "."
+        )
+    prep_msg = ""
+    if result["prep_consumed"]:
+        prep_msg = " Consumed prep items: " + ", ".join(result["prep_consumed"]) + "."
+    occurrence_msg = ""
+    if occurrence_id:
+        occurrence_msg = f" Plan occurrence {occurrence_id} marked cooked."
+    return (
+        f"Registered '{result['dish']}' as cooked on {result['cooked_on']}."
+        f"{occurrence_msg}{removed_msg}{prep_msg}"
+    )

@@ -135,12 +135,12 @@ python3 -c "import sys, importlib, pathlib; sys.path.insert(0, str(pathlib.Path(
 
 - Ingredient and dish names are normalized with `strip().lower()` semantics. The normalization rule lives in `Dish._clean(value, *, label)` and is applied via `Dish.normalize_name` / `Dish.normalize_ingredient` (and the `_common.normalize_*` wrappers that add length validation).
 - `Dish.__post_init__` enforces that `Dish.name` is always stored normalized, so downstream consumers compare `dish.name == name` directly — do not add defensive `.strip().lower()` at call sites.
-- Cooking history keys are normalized to lowercase on load, so `history.json` comparisons are case-insensitive.
+- Cooking history schema v2 stores append-preserving `CookingEvent` occurrences with stable `cook_*` IDs; legacy dish→date maps and Web lists migrate deterministically on read.
 - `Dish.ingredients` maps ingredient name to `bool`.
 - `True` means essential.
 - `False` means optional.
 - Dishes cooked fewer than 2 days ago are excluded from suggestions.
-- `register_cooked_meal` removes essential ingredients from the fridge after recording the meal.
+- `register_cooked_meal` commits history, linked plan status, inventory/prep consumption, and audit proof together. A linked planned row transitions to `cooked` and remains visible in its original slot.
 - Quick shopping suggestions only surface dishes missing exactly one essential ingredient.
 - Inventory schema v6 aliases map generic recipe ingredients to one exact product identity; its internal `stock_cycle` increments only on available→unavailable. Availability checks, legacy add/remove, prep, and cooking must resolve and mutate that exact identity rather than create a generic duplicate.
 - Weekly shopping is a live projection over plan, recipes, prep, inventory aliases, and active manual requests. Derived `shop_*` IDs are stable per missing-stock occurrence and must rotate after an item is replenished, consumed, and needed again; old completion tombstones apply only to their occurrence. Browser checkboxes are local notes only. Receipt reconciliation is serialized under the shopping-request lock: reserve the exact-name winner, then write inventory, then persist the completion tombstone.

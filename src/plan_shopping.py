@@ -275,6 +275,8 @@ def build_plan_shopping_list(*, plan, dishes, prep_items, fridge):
 
     for day in plan.days.values():
         for meal in day.meals:
+            if meal.status != "planned":
+                continue
             dish = dishes_by_name.get(meal.dish)
             if dish is None:
                 raise LookupError(f"dish '{meal.dish}' is not in the catalog")

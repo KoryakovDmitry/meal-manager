@@ -77,6 +77,8 @@ def configure(data_dir) -> None:
     prep_repo.path = data_dir / "prep_items.json"
     plan_repo.plans_dir = data_dir / "plans"
     shopping_request_repo.path = data_dir / "shopping_requests.json"
+    from ..audit import configure as configure_audit
+    configure_audit(data_dir)
 
 
 __all__ = [

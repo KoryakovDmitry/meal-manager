@@ -9,9 +9,12 @@ import json
 import logging
 from datetime import date
 
+from ..audit import AuditConflictError, audit_manager
+from ..audit.context import audit_scope
 from ..dish import Dish
 from ..repositories import history_repo
 from ..repositories.json_fridge import InventoryDataError
+from ..repositories.json_history import HistoryDataError
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,21 @@ MAX_NAME_LEN = 200
 MAX_INGREDIENTS = 100
 MAX_BATCH_SIZE = 50
 MAX_FRIDGE_UPDATE = 200
+
+_MUTATING_TOOLS = {
+    "update_fridge_inventory", "rename_fridge_item", "add_inventory_item",
+    "edit_inventory_item", "remove_inventory_item", "merge_product_identity",
+    "set_product_category", "replenish_product", "register_cooked_meal",
+    "delete_history_entry", "add_dish", "add_dishes_batch", "delete_dish",
+    "edit_dish", "set_dish_instructions", "clear_fridge",
+    "init_ingredient_session", "dii_add_suggested", "dii_skip_suggested",
+    "dii_remove_ingredient", "dii_add_manual", "dii_clear_all",
+    "finalize_ingredient_session", "dii_get_state", "add_prep_item",
+    "delete_prep_item", "make_prep", "create_week_plan", "add_meal_to_plan",
+    "remove_meal_from_plan", "set_plan_status", "repeat_week_plan",
+    "generate_shopping_list", "add_manual_shopping_item",
+    "receive_shopping_item", "estimate_plan_cost", "split_shopping_list",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -51,11 +69,23 @@ def tool_handler(name: str):
         @functools.wraps(fn)
         def runner(args, **kwargs):
             try:
-                return json.dumps(fn(args, **kwargs), ensure_ascii=False)
+                if name in _MUTATING_TOOLS:
+                    with audit_scope(
+                        operation=name,
+                        manager=audit_manager,
+                        actor_type="agent",
+                        surface_kind="native_tool",
+                    ):
+                        result = fn(args, **kwargs)
+                else:
+                    result = fn(args, **kwargs)
+                return json.dumps(result, ensure_ascii=False)
             except Exception as exc:
                 log.exception("%s failed", name)
                 if isinstance(exc, InventoryDataError):
                     message = "Inventory storage is temporarily unavailable"
+                elif isinstance(exc, (AuditConflictError, HistoryDataError)):
+                    message = "Storage is temporarily unavailable"
                 elif isinstance(exc, OSError):
                     message = "Storage is temporarily unavailable"
                 else:

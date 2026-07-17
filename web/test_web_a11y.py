@@ -299,10 +299,24 @@ setTimeout(async () => {
   const planDays = Object.fromEntries(['mon','tue','wed','thu','fri','sat','sun'].map(day => [day, {meals: []}]));
   document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
   document.getElementById('page-plans').classList.add('active');
-  planDays.wed.meals = [{dish:'суп', portions:2}];
+  planDays.wed.meals = [{occurrence_id:'mealocc_qa', dish:'суп', portions_planned:2, status:'planned', revision:1}];
   CACHE.selectedPlan = {week:'2026-W29', status:'draft', prep:[], days:planDays, shopping:{}};
   CACHE.selectedPlanVersion = 'sha256:plan-v1';
   renderPlanDetail();
+  let planCall = null;
+  api = async (path, method, body) => {
+    planCall = {path, method, body};
+    return {status:'ok'};
+  };
+  refreshAll = async () => {};
+  const planCook = document.querySelector('#plan-detail [data-action="cook-plan-meal"]');
+  await cookPlanMeal('mealocc_qa');
+  const planCookOccurrenceAware = planCook?.getAttribute('data-value') === 'mealocc_qa' &&
+    planCall?.path === '/api/history' && planCall?.method === 'POST' &&
+    planCall?.body?.dish === 'суп' &&
+    planCall?.body?.occurrence_id === 'mealocc_qa' &&
+    planCall?.body?.expected_revision === 1;
+  planCall = null;
   const planEdit = document.querySelector('#plan-detail [data-action="edit-meal"]');
   planEdit.focus();
   planEdit.click();
@@ -312,25 +326,26 @@ setTimeout(async () => {
     document.activeElement === document.getElementById('plan-meal-dish') &&
     document.getElementById('plan-meal-portions').getBoundingClientRect().height >= 44;
   document.getElementById('plan-meal-portions').value = '3';
-  let planCall = null;
+  planCall = null;
   api = async (path, method, body) => {
     planCall = {path, method, body};
     if (method === 'DELETE') return {status:'ok', week:'2026-W29'};
-    planDays.wed.meals = [{dish:'суп', portions:3}];
+    planDays.wed.meals = [{occurrence_id:'mealocc_qa', dish:'суп', portions_planned:3, status:'planned', revision:2}];
     return {plan:{week:'2026-W29', status:'draft', prep:[], days:planDays, shopping:{}}, version:'sha256:plan-v2'};
   };
   refreshAll = async () => renderAll();
-  await savePlanMeal('wed', 0);
+  await savePlanMeal('wed', 'mealocc_qa', 1);
   const planSaveVersioned = planCall.method === 'PATCH' &&
-    planCall.path.endsWith('/days/wed/meals/0') &&
+    planCall.path.endsWith('/meals/mealocc_qa') &&
     planCall.body.expected_version === 'sha256:plan-v1' &&
+    planCall.body.expected_revision === 1 &&
     planCall.body.portions === 3;
   const planSaveFocus = document.activeElement?.id === 'plan-detail-title';
 
   showPlanMealModal('wed', '0');
   document.getElementById('plan-meal-portions').value = '4';
   const authoritativeDays = Object.fromEntries(['mon','tue','wed','thu','fri','sat','sun'].map(day => [day, {meals: []}]));
-  authoritativeDays.wed.meals = [{dish:'паста', portions:1}];
+  authoritativeDays.wed.meals = [{occurrence_id:'mealocc_qa', dish:'паста', portions_planned:1, status:'planned', revision:2}];
   api = async () => {
     const conflict = new Error('plan conflict');
     conflict.status = 409;
@@ -341,7 +356,7 @@ setTimeout(async () => {
     };
     throw conflict;
   };
-  await savePlanMeal('wed', 0);
+  await savePlanMeal('wed', 'mealocc_qa', 1);
   const planConflictModalClosed = !document.querySelector('#modal-container [role="dialog"]') &&
     CACHE.selectedPlan.days.wed.meals[0].dish === 'паста' &&
     CACHE.selectedPlanVersion === 'sha256:plan-v3' &&
@@ -524,7 +539,7 @@ setTimeout(async () => {
     inFlightEditLocked, fridgeSaveRestore, expiryAccessible,
     inventoryCategoryBadges, inventoryCategoryFilter,
     deleteAccessible, deleteVersioned, dirtyPatchOnly, conflictRenamePreserved, deletedConflictResolved,
-    planModalSemantics, planSaveVersioned, planSaveFocus, planConflictModalClosed,
+    planModalSemantics, planCookOccurrenceAware, planSaveVersioned, planSaveFocus, planConflictModalClosed,
     planDeleteVersioned, planDeleted, planDetailCleared, planListFocus, externallyDeletedPlanCleared,
     productModalSemantics, replenishFreshBatch, replenishCategoryPrefill, productFocusRestore,
     categoryModalSemantics, categoryVersioned, categoryFocusRestore, categoryBadge, categoryFilter,
@@ -607,7 +622,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            + ";".join(["true"] * 48) + ";0"
+            + ";".join(["true"] * 49) + ";0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"
