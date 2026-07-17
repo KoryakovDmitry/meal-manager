@@ -43,6 +43,18 @@
 
 **Acceptance gate.** RED→GREEN domain/migration tests для schema v4 и legacy/v2/v3; fail-closed lifecycle invariant `available ⇒ ever_stocked`; recipe-only identity/status/replenish regressions; native schema parity; stale category/replenish byte-for-byte no-write; двухпроцессные materialize/materialize и materialize/replenish races с одним winner; Web API и Chromium filtering/badge/modal/focus/XSS tests; production migration rehearsal на backup; полный unit/integration/Web gate; независимое GO; coordinated Web/Gateway rollout и disposable live QA.
 
+### INV-6 — Safe duplicate product identity merge 🔨
+
+**Инцидент.** Workaround для бага повторной покупки создал вторую persisted identity брокколи. После soft removal она исчезла из текущего запаса, но корректно осталась `out_of_stock` в полном каталоге: `remove_inventory_item` управляет наличием и по контракту не удаляет identity. Поддерживаемого hard-delete/merge flow не было.
+
+**Контракт repair.** Новый native maintenance tool `merge_product_identity` принимает stable source/target IDs и обязательные `expected_source_updated_at`/`expected_target_updated_at`. Под shopping-request lock, затем inventory lock, он требует `source.available=false`, `target.available=true` и одинаковую category; сохраняет target ID, canonical name, batch metadata, lifecycle flags и `stock_cycle`; переносит source canonical name и aliases в target; физически удаляет source одной atomic write; меняет только target `updated_at`. Обычный `remove_inventory_item` остаётся soft removal.
+
+**Fail-closed границы.** Missing/same identity, available source, unavailable target, category mismatch, stale source/target OCC, corrupt inventory/shopping schema и write failure не меняют inventory bytes. Merge блокируется при completion tombstone с source `product_id`, active derived receipt source occurrence или pending exact receipt в source namespace; tombstones не retargetятся, потому что это потребовало бы crash-safe двухфайловой транзакции. Recipe/prep labels не переписываются: полный перенос namespace сохраняет resolution через alias.
+
+**Production cleanup.** После полного gate, независимого review и locked backup stale `inv_deec7dc493c44f1ba3f56f57e65ced49` должна быть absorbed в canonical available `inv_5f05229a31c04dcabfd21e75fb36ee53`. Preflight обязан повторно подтвердить обе OCC-версии, одинаковую category и отсутствие receipt references. Postcondition: source ID отсутствует, target stock/batch/`stock_cycle` сохранены, alias `свежая брокколи auchan` разрешается в target, recipe count и live shopping остаются корректны.
+
+**Acceptance gate.** RED handler discovery; success/preservation/alias regressions; invalid topology и dual stale OCC byte-for-byte; receipt/pending guards; injected write failure; strict shopping schema type; native manifest/schema parity; cross-process race with one deterministic winner; full unit/integration/Web/Chromium/compile/diff gate; independent exact-tree `GO`; backup, production merge rehearsal, coordinated restart и native/Web post-QA.
+
 ### PLAN-4 — Web editing and deletion of weekly plans 🔨
 
 **Проблема.** Раздел «Планы» показывает полноценную структуру недели, но оставляет её read-only и отправляет пользователя обратно в `meal_manager` даже для простого исправления порций, замены/удаления блюда или удаления ошибочного draft. Это делает личную Web-поверхность непоследовательной относительно уже доступного ручного CRUD рецептов и кухонного запаса.

@@ -32,7 +32,14 @@ class JsonShoppingRequestRepository:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ShoppingRequestDataError(f"Invalid shopping request file: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") not in {1, 2}:
+        if not isinstance(raw, dict):
+            raise ShoppingRequestDataError("Unsupported shopping request schema")
+        version = raw.get("schema_version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ShoppingRequestDataError(
+                "Shopping request schema_version must be a JSON integer"
+            )
+        if version not in {1, 2}:
             raise ShoppingRequestDataError("Unsupported shopping request schema")
         values = raw.get("requests")
         if not isinstance(values, list):
@@ -94,6 +101,35 @@ class JsonShoppingRequestRepository:
             request for request in self._load_all()
             if request.id == request_id and not request.is_active
         ), None)
+
+    def identity_merge_conflicts(
+        self, product_id: str, identity_names: set[str]
+    ) -> list[str]:
+        """Return durable receipt state that makes identity removal unsafe."""
+        if not isinstance(product_id, str) or not product_id.strip():
+            raise ValueError("product_id cannot be empty")
+        normalized_names = {
+            Dish.normalize_ingredient(name) for name in identity_names
+        }
+        with self.lock:
+            conflicts: list[str] = []
+            for request in self._load_all():
+                if not request.is_active and request.product_id == product_id.strip():
+                    conflicts.append(f"completed receipt {request.id}")
+                    continue
+                if (
+                    request.is_active
+                    and request.id.startswith("shop_")
+                    and request.requested_name in normalized_names
+                ):
+                    conflicts.append(f"active derived receipt {request.id}")
+                    continue
+                if (
+                    request.is_active
+                    and request.pending_exact_name in normalized_names
+                ):
+                    conflicts.append(f"pending exact receipt {request.id}")
+            return conflicts
 
     def reserve_receipt(
         self,

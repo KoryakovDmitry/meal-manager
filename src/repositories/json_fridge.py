@@ -672,6 +672,68 @@ class JsonFridgeRepository:
             self._save_items_unlocked(items)
             return removed
 
+    def merge_product_identity(
+        self,
+        source_item_id: str,
+        target_item_id: str,
+        *,
+        expected_source_updated_at: str,
+        expected_target_updated_at: str,
+    ) -> tuple[InventoryItem, list[str]]:
+        """Absorb one unavailable duplicate identity into an active target."""
+        if not isinstance(source_item_id, str) or not source_item_id.strip():
+            raise ValueError("source_item_id cannot be empty")
+        if not isinstance(target_item_id, str) or not target_item_id.strip():
+            raise ValueError("target_item_id cannot be empty")
+        source_id = source_item_id.strip()
+        target_id = target_item_id.strip()
+        if source_id == target_id:
+            raise ValueError("source and target product identities must differ")
+        if not isinstance(expected_source_updated_at, str) or not expected_source_updated_at.strip():
+            raise ValueError("expected_source_updated_at cannot be empty")
+        if not isinstance(expected_target_updated_at, str) or not expected_target_updated_at.strip():
+            raise ValueError("expected_target_updated_at cannot be empty")
+
+        with self.lock:
+            items = self.load_catalog_items()
+            source = next((item for item in items if item.id == source_id), None)
+            target = next((item for item in items if item.id == target_id), None)
+            if source is None:
+                raise LookupError(f"Source product identity '{source_id}' not found")
+            if target is None:
+                raise LookupError(f"Target product identity '{target_id}' not found")
+            self._check_expected_updated_at(source, expected_source_updated_at)
+            self._check_expected_updated_at(target, expected_target_updated_at)
+            if source.available:
+                raise ValueError("source product identity must be out of stock")
+            if not target.available:
+                raise ValueError("target product identity must be in stock")
+            if source.category != target.category:
+                raise ValueError("source and target product categories must match")
+
+            seen = {target.name}
+            aliases: list[str] = []
+            for name in (*target.aliases, source.name, *source.aliases):
+                normalized = Dish.normalize_ingredient(name)
+                if normalized not in seen:
+                    seen.add(normalized)
+                    aliases.append(normalized)
+            transferred = [
+                name for name in (source.name, *source.aliases)
+                if name != target.name and name not in target.aliases
+            ]
+            candidate_data = target.to_dict()
+            candidate_data["aliases"] = aliases
+            candidate_data["updated_at"] = self._next_updated_at(target)
+            candidate = InventoryItem.from_dict(candidate_data)
+            merged_items = [
+                candidate if item.id == target_id else item
+                for item in items
+                if item.id != source_id
+            ]
+            self._save_items_unlocked(merged_items)
+            return candidate, transferred
+
     def rename_by_name(self, old_name: str, new_name: str) -> InventoryItem:
         old_normalized = Dish.normalize_ingredient(old_name)
         new_normalized = Dish.normalize_ingredient(new_name)

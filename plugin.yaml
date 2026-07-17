@@ -15,6 +15,7 @@ provides_tools:
   - add_inventory_item
   - edit_inventory_item
   - remove_inventory_item
+  - merge_product_identity
   - list_product_catalog
   - set_product_category
   - replenish_product

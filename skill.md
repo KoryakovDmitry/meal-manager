@@ -66,6 +66,8 @@ Use `replenish_product` only after the user confirms that a product is physicall
 
 Removing, consuming, or clearing current stock marks catalog identities as unavailable instead of forgetting them. The catalog states are `in_stock`, `out_of_stock`, and `recipe_only`.
 
+Use `merge_product_identity` only as a destructive maintenance operation for a confirmed duplicate identity. It requires stable source/target IDs and both current `updated_at` versions. The source must be out of stock, the target must be in stock, and categories must match. The operation preserves the target record and batch metadata, transfers the source name/aliases, and physically removes the source. It fails closed when the source has a completed or pending receipt reference. Never use ordinary `remove_inventory_item` as identity cleanup: that operation only marks stock unavailable.
+
 ### `register_cooked_meal`
 
 Registers that a dish was cooked today so the suggestion engine doesn't recommend it again too soon.

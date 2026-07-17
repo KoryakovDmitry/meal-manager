@@ -1199,6 +1199,7 @@ def test_product_catalog_native_tools():
         set_category = _load_handler("set_product_category")
         add_item = _load_handler("add_inventory_item")
         remove_item = _load_handler("remove_inventory_item")
+        merge_identity = _load_handler("merge_product_identity")
     except ModuleNotFoundError:
         check("product catalog native handlers exist", False)
         return
@@ -1252,6 +1253,58 @@ def test_product_catalog_native_tools():
     check("native replenish updates current fridge", {
         "catalog stocked qa", "catalog recipe only",
     }.issubset(set(parse(list_fridge({})))))
+
+    merge_target = parse(add_item({
+        "name": "catalog canonical broccoli", "quantity": "2", "unit": "pcs",
+        "storage": "fridge", "comment": "keep target metadata",
+    }))
+    merge_source_received = _repos_mod.fridge_repo.receive_product(
+        requested_name="catalog stale broccoli generic",
+        exact_name="catalog stale broccoli exact",
+    )
+    merge_source = parse(remove_item({"item_id": merge_source_received.id}))
+    merged = parse(merge_identity({
+        "source_item_id": merge_source["id"],
+        "target_item_id": merge_target["id"],
+        "expected_source_updated_at": merge_source["updated_at"],
+        "expected_target_updated_at": merge_target["updated_at"],
+    }))
+    merged_item = merged.get("item", {})
+    check("native identity merge removes stale source and preserves target", (
+        merged.get("merged_from") == merge_source["id"]
+        and merged_item.get("id") == merge_target["id"]
+        and merged_item.get("name") == merge_target["name"]
+        and merged_item.get("quantity") == "2"
+        and merged_item.get("unit") == "pcs"
+        and merged_item.get("storage") == "fridge"
+        and merged_item.get("comment") == "keep target metadata"
+    ), merged)
+    check("native identity merge transfers source canonical and aliases", {
+        "catalog stale broccoli generic", "catalog stale broccoli exact",
+    }.issubset(set(merged_item.get("aliases", []))), merged_item)
+    merged_rows = parse(list_catalog({"query": "catalog stale broccoli"}))
+    check("catalog search resolves stale labels to exactly one target", (
+        len(merged_rows) == 1 and merged_rows[0]["id"] == merge_target["id"]
+    ), merged_rows)
+    check("merged source identity is physically absent", all(
+        item.id != merge_source["id"]
+        for item in _repos_mod.fridge_repo.load_catalog_items()
+    ))
+
+    active_source = parse(add_item({"name": "catalog active merge source"}))
+    active_target = parse(add_item({"name": "catalog active merge target"}))
+    before_active_reject = _repos_mod.fridge_repo.path.read_bytes()
+    active_reject = parse(merge_identity({
+        "source_item_id": active_source["id"],
+        "target_item_id": active_target["id"],
+        "expected_source_updated_at": active_source["updated_at"],
+        "expected_target_updated_at": active_target["updated_at"],
+    }))
+    check("identity merge rejects available source byte-for-byte", (
+        "error" in active_reject
+        and _repos_mod.fridge_repo.path.read_bytes() == before_active_reject
+    ), active_reject)
+
     check("native catalog rejects overlong search", "error" in parse(
         list_catalog({"query": "x" * 201})
     ))
@@ -1264,6 +1317,366 @@ def test_product_catalog_native_tools():
         })
     finally:
         _repos_mod.fridge_repo.path.write_bytes(raw_inventory)
+
+
+def test_product_identity_merge_safety():
+    print("\n-- product identity merge safety --")
+    from tempfile import TemporaryDirectory
+
+    fridge_module = importlib.import_module(
+        ".src.repositories.json_fridge", _PLUGIN_DIR.name
+    )
+    shopping_module = importlib.import_module(
+        ".src.repositories.json_shopping_request", _PLUGIN_DIR.name
+    )
+    merge_command = importlib.import_module(
+        ".src.product_identity", _PLUGIN_DIR.name
+    ).merge_product_identity
+
+    with TemporaryDirectory() as tmp:
+        fridge_path = Path(tmp) / "fridge.json"
+        shopping_path = Path(tmp) / "shopping_requests.json"
+        fridge = fridge_module.JsonFridgeRepository(fridge_path)
+        shopping = shopping_module.JsonShoppingRequestRepository(shopping_path)
+
+        target = fridge.add_item(
+            name="merge canonical target", quantity="2", unit="pcs",
+            storage="fridge", comment="target batch",
+        )
+        source = fridge.receive_product(
+            requested_name="merge source generic",
+            exact_name="merge source exact",
+        )
+        source = fridge.remove_item(source.id)
+        target_cycle = target.stock_cycle
+        merged = merge_command(
+            fridge_repo=fridge,
+            shopping_request_repo=shopping,
+            source_item_id=source.id,
+            target_item_id=target.id,
+            expected_source_updated_at=source.updated_at,
+            expected_target_updated_at=target.updated_at,
+        )
+        merged_item = next(
+            item for item in fridge.load_catalog_items() if item.id == target.id
+        )
+        check("merge core physically removes source identity", all(
+            item.id != source.id for item in fridge.load_catalog_items()
+        ))
+        check("merge core preserves target lifecycle and metadata", (
+            merged["item"]["id"] == target.id
+            and merged_item.name == target.name
+            and merged_item.available is True
+            and merged_item.category == target.category
+            and merged_item.quantity == target.quantity
+            and merged_item.storage == target.storage
+            and merged_item.comment == target.comment
+            and merged_item.stock_cycle == target_cycle
+            and merged_item.updated_at != target.updated_at
+        ))
+        check("merge core transfers complete source namespace", {
+            "merge source generic", "merge source exact",
+        }.issubset(set(merged_item.aliases)))
+
+        stale_target = fridge.add_item(name="merge stale target")
+        stale_source = fridge.add_item(name="merge stale source")
+        stale_source = fridge.remove_item(stale_source.id)
+        stale_source_version = stale_source.updated_at
+        stale_source = fridge.set_product_category(
+            None, "ready_meal", item_id=stale_source.id,
+            expected_updated_at=stale_source.updated_at,
+        )
+        before_stale_source = fridge_path.read_bytes()
+        try:
+            merge_command(
+                fridge_repo=fridge,
+                shopping_request_repo=shopping,
+                source_item_id=stale_source.id,
+                target_item_id=stale_target.id,
+                expected_source_updated_at=stale_source_version,
+                expected_target_updated_at=stale_target.updated_at,
+            )
+            stale_source_rejected = False
+        except fridge_module.InventoryConflictError:
+            stale_source_rejected = True
+        check("merge rejects stale source OCC byte-for-byte", (
+            stale_source_rejected and fridge_path.read_bytes() == before_stale_source
+        ))
+
+        stale_target_version = stale_target.updated_at
+        stale_target = fridge.edit_item(stale_target.id, {"comment": "changed"})
+        before_stale_target = fridge_path.read_bytes()
+        try:
+            merge_command(
+                fridge_repo=fridge,
+                shopping_request_repo=shopping,
+                source_item_id=stale_source.id,
+                target_item_id=stale_target.id,
+                expected_source_updated_at=stale_source.updated_at,
+                expected_target_updated_at=stale_target_version,
+            )
+            stale_target_rejected = False
+        except fridge_module.InventoryConflictError:
+            stale_target_rejected = True
+        check("merge rejects stale target OCC byte-for-byte", (
+            stale_target_rejected and fridge_path.read_bytes() == before_stale_target
+        ))
+
+        unavailable_source = fridge.add_item(name="merge unavailable source")
+        unavailable_source = fridge.remove_item(unavailable_source.id)
+        unavailable_target = fridge.add_item(name="merge unavailable target")
+        unavailable_target = fridge.remove_item(unavailable_target.id)
+        category_target = fridge.add_item(
+            name="merge category target", category="prep"
+        )
+        invalid_merge_cases = [
+            (
+                "same identity",
+                unavailable_source.id, unavailable_source.id,
+                unavailable_source.updated_at, unavailable_source.updated_at,
+            ),
+            (
+                "unavailable target",
+                unavailable_source.id, unavailable_target.id,
+                unavailable_source.updated_at, unavailable_target.updated_at,
+            ),
+            (
+                "category mismatch",
+                unavailable_source.id, category_target.id,
+                unavailable_source.updated_at, category_target.updated_at,
+            ),
+            (
+                "missing source",
+                "inv_missing_merge_source", category_target.id,
+                unavailable_source.updated_at, category_target.updated_at,
+            ),
+        ]
+        invalid_results = []
+        for label, source_id, target_id, source_version, target_version in invalid_merge_cases:
+            before_invalid = fridge_path.read_bytes()
+            try:
+                merge_command(
+                    fridge_repo=fridge,
+                    shopping_request_repo=shopping,
+                    source_item_id=source_id,
+                    target_item_id=target_id,
+                    expected_source_updated_at=source_version,
+                    expected_target_updated_at=target_version,
+                )
+                rejected = False
+            except (ValueError, LookupError):
+                rejected = True
+            invalid_results.append((
+                label, rejected and fridge_path.read_bytes() == before_invalid
+            ))
+        check("merge rejects invalid identity topology byte-for-byte", (
+            all(result for _, result in invalid_results)
+        ), str(invalid_results))
+
+        referenced_source = fridge.add_item(name="merge referenced source")
+        referenced_source = fridge.remove_item(referenced_source.id)
+        referenced_target = fridge.add_item(name="merge referenced target")
+        request = shopping.add(
+            week="2026-W30", requested_name="merge receipt request"
+        )
+        shopping.reserve_receipt(
+            request.id, week=request.week,
+            requested_name=request.requested_name,
+            exact_name="merge receipt exact",
+        )
+        shopping.complete(
+            request.id, product_id=referenced_source.id,
+            exact_name="merge receipt exact",
+        )
+        before_reference_fridge = fridge_path.read_bytes()
+        before_reference_shopping = shopping_path.read_bytes()
+        try:
+            merge_command(
+                fridge_repo=fridge,
+                shopping_request_repo=shopping,
+                source_item_id=referenced_source.id,
+                target_item_id=referenced_target.id,
+                expected_source_updated_at=referenced_source.updated_at,
+                expected_target_updated_at=referenced_target.updated_at,
+            )
+            completion_reference_rejected = False
+        except ValueError:
+            completion_reference_rejected = True
+        check("merge rejects completed receipt reference without writes", (
+            completion_reference_rejected
+            and fridge_path.read_bytes() == before_reference_fridge
+            and shopping_path.read_bytes() == before_reference_shopping
+        ))
+
+        pending_source = fridge.add_item(name="merge pending source")
+        pending_source = fridge.remove_item(pending_source.id)
+        pending_target = fridge.add_item(name="merge pending target")
+        shopping.reserve_receipt(
+            "shop_pending_merge", week="2026-W30",
+            requested_name=pending_source.name,
+            exact_name=pending_source.name,
+        )
+        before_pending = fridge_path.read_bytes()
+        try:
+            merge_command(
+                fridge_repo=fridge,
+                shopping_request_repo=shopping,
+                source_item_id=pending_source.id,
+                target_item_id=pending_target.id,
+                expected_source_updated_at=pending_source.updated_at,
+                expected_target_updated_at=pending_target.updated_at,
+            )
+            pending_reference_rejected = False
+        except ValueError:
+            pending_reference_rejected = True
+        check("merge rejects pending derived receipt without inventory write", (
+            pending_reference_rejected and fridge_path.read_bytes() == before_pending
+        ))
+
+        failure_source = fridge.add_item(name="merge failure source")
+        failure_source = fridge.remove_item(failure_source.id)
+        failure_target = fridge.add_item(name="merge failure target")
+        before_failure = fridge_path.read_bytes()
+        original_save = fridge._save_items_unlocked
+        try:
+            def fail_save(_items):
+                raise OSError("injected merge write failure")
+
+            fridge._save_items_unlocked = fail_save
+            try:
+                merge_command(
+                    fridge_repo=fridge,
+                    shopping_request_repo=shopping,
+                    source_item_id=failure_source.id,
+                    target_item_id=failure_target.id,
+                    expected_source_updated_at=failure_source.updated_at,
+                    expected_target_updated_at=failure_target.updated_at,
+                )
+                write_failure_rejected = False
+            except OSError:
+                write_failure_rejected = True
+        finally:
+            fridge._save_items_unlocked = original_save
+        check("merge write failure preserves original inventory bytes", (
+            write_failure_rejected and fridge_path.read_bytes() == before_failure
+        ))
+
+        strict_fridge_path = Path(tmp) / "strict-fridge.json"
+        strict_shopping_path = Path(tmp) / "strict-shopping.json"
+        strict_fridge = fridge_module.JsonFridgeRepository(strict_fridge_path)
+        strict_shopping = shopping_module.JsonShoppingRequestRepository(
+            strict_shopping_path
+        )
+        strict_target = strict_fridge.add_item(name="strict merge target")
+        strict_source = strict_fridge.add_item(name="strict merge source")
+        strict_source = strict_fridge.remove_item(strict_source.id)
+        strict_shopping_path.write_text(json.dumps({
+            "schema_version": 2.0, "requests": [],
+        }), encoding="utf-8")
+        strict_before = strict_fridge_path.read_bytes()
+        try:
+            merge_command(
+                fridge_repo=strict_fridge,
+                shopping_request_repo=strict_shopping,
+                source_item_id=strict_source.id,
+                target_item_id=strict_target.id,
+                expected_source_updated_at=strict_source.updated_at,
+                expected_target_updated_at=strict_target.updated_at,
+            )
+            malformed_shopping_rejected = False
+        except shopping_module.ShoppingRequestDataError:
+            malformed_shopping_rejected = True
+        check("merge fails closed on non-integer shopping schema version", (
+            malformed_shopping_rejected
+            and strict_fridge_path.read_bytes() == strict_before
+        ))
+        malformed_version_results = []
+        for malformed_version in (2.0, "2", True, None):
+            strict_shopping_path.write_text(json.dumps({
+                "schema_version": malformed_version, "requests": [],
+            }), encoding="utf-8")
+            try:
+                strict_shopping.identity_merge_conflicts(
+                    "inv_schema_probe", {"schema probe"}
+                )
+                malformed_version_results.append(False)
+            except shopping_module.ShoppingRequestDataError:
+                malformed_version_results.append(True)
+        check("shopping schema rejects float/string/bool/null versions", (
+            all(malformed_version_results)
+        ), str(malformed_version_results))
+
+        import multiprocessing
+        race_fridge_path = Path(tmp) / "race-fridge.json"
+        race_shopping_path = Path(tmp) / "race-shopping.json"
+        race_fridge = fridge_module.JsonFridgeRepository(race_fridge_path)
+        race_target = race_fridge.add_item(name="race merge target")
+        race_source = race_fridge.add_item(name="race merge source")
+        race_source = race_fridge.remove_item(race_source.id)
+        ctx = multiprocessing.get_context("fork")
+        race_start = ctx.Event()
+        race_results = ctx.Queue()
+
+        def run_merge_racer():
+            local_fridge = fridge_module.JsonFridgeRepository(race_fridge_path)
+            local_shopping = shopping_module.JsonShoppingRequestRepository(
+                race_shopping_path
+            )
+            race_start.wait()
+            try:
+                merge_command(
+                    fridge_repo=local_fridge,
+                    shopping_request_repo=local_shopping,
+                    source_item_id=race_source.id,
+                    target_item_id=race_target.id,
+                    expected_source_updated_at=race_source.updated_at,
+                    expected_target_updated_at=race_target.updated_at,
+                )
+                race_results.put(("merge", "ok"))
+            except Exception as exc:
+                race_results.put(("merge", type(exc).__name__))
+
+        def run_replenish_racer():
+            local_fridge = fridge_module.JsonFridgeRepository(race_fridge_path)
+            race_start.wait()
+            try:
+                local_fridge.replenish_item(
+                    item_id=race_source.id,
+                    expected_updated_at=race_source.updated_at,
+                )
+                race_results.put(("replenish", "ok"))
+            except Exception as exc:
+                race_results.put(("replenish", type(exc).__name__))
+
+        racers = [ctx.Process(target=run_merge_racer), ctx.Process(target=run_replenish_racer)]
+        for racer in racers:
+            racer.start()
+        race_start.set()
+        for racer in racers:
+            racer.join(10)
+        race_outcomes = [race_results.get(timeout=2) for _ in racers]
+        race_items = race_fridge.load_catalog_items()
+        race_source_after = next((
+            item for item in race_items if item.id == race_source.id
+        ), None)
+        race_target_after = next(
+            item for item in race_items if item.id == race_target.id
+        )
+        successful_racers = [name for name, result in race_outcomes if result == "ok"]
+        race_state_valid = (
+            race_source_after is None
+            and "race merge source" in race_target_after.aliases
+            and successful_racers == ["merge"]
+        ) or (
+            race_source_after is not None
+            and race_source_after.available is True
+            and successful_racers == ["replenish"]
+        )
+        check("merge/replenish cross-process race has one valid winner", (
+            all(not racer.is_alive() and racer.exitcode == 0 for racer in racers)
+            and race_target_after.available is True
+            and race_state_valid
+        ), str(race_outcomes))
 
 
 def test_update_fridge_add():
@@ -2641,6 +3054,7 @@ def main():
         test_inventory_category_schema_v4_and_recipe_identity()
         test_structured_inventory_native_crud()
         test_product_catalog_native_tools()
+        test_product_identity_merge_safety()
         test_update_fridge_add()
         test_update_fridge_add_duplicate()
         test_update_fridge_remove()

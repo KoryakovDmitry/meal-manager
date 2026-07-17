@@ -157,6 +157,7 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `add_inventory_item` | Adds a categorized structured item with quantity, storage, expiry, and comment |
 | `edit_inventory_item` | Patches a structured item/category by stable ID without losing omitted metadata |
 | `remove_inventory_item` | Removes exactly one current structured item by stable ID while retaining its catalog identity |
+| `merge_product_identity` | Atomically absorbs one confirmed out-of-stock duplicate into an in-stock target with dual-version OCC and receipt-reference guards |
 | `list_product_catalog` | Lists/searches all products by stock state and category, including recipe-only ingredients |
 | `set_product_category` | Assigns `product`, `prep`, or `ready_meal` without changing stock availability |
 | `replenish_product` | Returns an out-of-stock or recipe-only product to current inventory as a fresh categorized batch |
