@@ -29,6 +29,18 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
+### AUDIT-1 — Domain audit trail and meal occurrence history 🔨
+
+**Production problem.** Приготовленные блюда исчезли из active weekly plan: после `register_cooked_meal` агент вызывал `remove_meal_from_plan`, поэтому Web показывает завершённый день как обычное `свободно`. Фактические calls подтверждают удаление W29 Wed ramen (`3` planned portions) и Thu pasta (`5` planned portions). Одновременно native history хранит только последнюю дату на dish, а Web использует несовместимый event-list envelope — повторные готовки и аналитика уже сейчас теряются.
+
+**Product direction.** Meal row становится stable occurrence со status lifecycle (`planned`, `cooked`, `moved`, `substituted`, `skipped/cancelled` после UX review). Cooking переводит occurrence в `cooked`, но не удаляет её из сетки; Web показывает completed badge/timestamp и отличает настоящий empty day от закрытой occurrence. Repeated dish cooking создаёт отдельные occurrences, planned/actual portions и yield/leftovers связываются явно.
+
+**Audit foundation.** Все успешные native/Web mutations должны создавать typed committed events с operation/entity identity, UTC time, actor/surface, correlation/causation, domain payload и correction/provenance metadata. Best-effort logging запрещён: persistence protocol обязан переживать crash между audit и canonical state через operation journal/outbox/recovery. Current JSON остаётся projection, audit — append-only evidence; undo создаёт compensating event.
+
+**Scope/phases.** 1A: journal foundation + plan/cooking vertical slice + W29 evidence-backed backfill + audit read API/tool. 1B: inventory, recipes, prep, shopping, all plan CRUD/status/delete and mechanically verified writer coverage. 1C: rebuildable analytics, Web timelines, filters and JSON/CSV export. Backfill не выдаёт догадки за факты: каждое historical событие помечает source, confidence и `backfilled=true`.
+
+Подробный ticket: [`docs/issues/AUDIT-1-domain-audit-and-meal-occurrence-history.md`](docs/issues/AUDIT-1-domain-audit-and-meal-occurrence-history.md).
+
 ### INV-5 — Product categories across kitchen inventory and catalog 🔨
 
 **Проблема.** Текущий кухонный запас и «Каталог продуктов» смешивают обычные ингредиенты, заранее подготовленные полуфабрикаты и уже готовую еду. По названию или комментарию это не всегда очевидно, а отфильтровать запас по степени готовности невозможно.
