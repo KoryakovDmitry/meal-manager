@@ -43,7 +43,7 @@
 
 **Acceptance gate.** RED→GREEN domain/migration tests для schema v4 и legacy/v2/v3; fail-closed lifecycle invariant `available ⇒ ever_stocked`; recipe-only identity/status/replenish regressions; native schema parity; stale category/replenish byte-for-byte no-write; двухпроцессные materialize/materialize и materialize/replenish races с одним winner; Web API и Chromium filtering/badge/modal/focus/XSS tests; production migration rehearsal на backup; полный unit/integration/Web gate; независимое GO; coordinated Web/Gateway rollout и disposable live QA.
 
-### INV-6 — Safe duplicate product identity merge 🔨
+### INV-6 — Safe duplicate product identity merge ✅
 
 **Инцидент.** Workaround для бага повторной покупки создал вторую persisted identity брокколи. После soft removal она исчезла из текущего запаса, но корректно осталась `out_of_stock` в полном каталоге: `remove_inventory_item` управляет наличием и по контракту не удаляет identity. Поддерживаемого hard-delete/merge flow не было.
 
@@ -54,6 +54,8 @@
 **Production cleanup.** После полного gate, независимого review и locked backup stale `inv_deec7dc493c44f1ba3f56f57e65ced49` должна быть absorbed в canonical available `inv_5f05229a31c04dcabfd21e75fb36ee53`. Preflight обязан повторно подтвердить обе OCC-версии, одинаковую category и отсутствие receipt references. Postcondition: source ID отсутствует, target stock/batch/`stock_cycle` сохранены, alias `свежая брокколи auchan` разрешается в target, recipe count и live shopping остаются корректны.
 
 **Acceptance gate.** RED handler discovery; success/preservation/alias regressions; invalid topology и dual stale OCC byte-for-byte; receipt/pending guards; injected write failure; strict shopping schema type; native manifest/schema parity; cross-process race with one deterministic winner; full unit/integration/Web/Chromium/compile/diff gate; independent exact-tree `GO`; backup, production merge rehearsal, coordinated restart и native/Web post-QA.
+
+**Результат.** Выпущено в `016e1d6`. Gate: 273 unit, 378 integration, Web plans/API и Chromium PASS; independent exact-tree review и 12 adversarial merge/receipt races дали `GO`. Locked backup: `inv6-identity-merge-20260717T022249+0200` (manifest 9/9). Production cleanup атомарно сократил catalog identities с 67 до 66: stale source удалён, canonical broccoli target сохранил ID, 2 pcs, batch metadata и `stock_cycle=0`, получил alias `свежая брокколи auchan`; shopping requests остались byte-for-byte неизменными. Native и Web показывают одну in-stock позицию с `recipe_count=2`, текущий weekly shopping считает брокколи покрытой и не stale.
 
 ### PLAN-4 — Web editing and deletion of weekly plans 🔨
 
