@@ -83,7 +83,19 @@
 
 ## 📐 READY INTERMEDIATE ISSUES
 
-Готовых промежуточных issues сейчас нет.
+### RECEIPT-1 — Receipt ledger and purchase analytics 📐
+
+**Проблема.** Сейчас чек читается как одноразовое evidence для конкретного inventory/shopping действия, но его содержимое не остаётся в системе. Из-за этого теряются магазин, дата, полный список строк, фактические цены, скидки и total; анализ расходов и динамики цен невозможен.
+
+**Продуктовый контракт.** Каждый присланный читаемый чек сохраняется в отдельный versioned receipt ledger независимо от холодильника: merchant/branch, purchase date/time, currency, ordered raw lines, quantity/unit, unit/line prices, discounts/returns/deposits, printed totals, source и confidence. Неизвестные значения остаются `null`, неоднозначные строки — raw-only со статусом `needs_review`; correction сохраняет исходную расшифровку, retraction исключает запись из аналитики без физического удаления.
+
+**Явная граница.** Запись чека не добавляет продукты в inventory, не меняет availability и не закрывает shopping request. `receive_shopping_item` остаётся отдельной явной операцией. Optional links receipt line → catalog/shopping нужны только для аналитики. В ledger сохраняются также бытовые товары, тара и покупки вне плана.
+
+**MVP и аналитика.** Native flow: `record/list/get/correct/retract_purchase_receipt`; vision/OCR выполняет агент, а canonical structured result обязательно записывается. Money хранится exact integer cents, quantity — lossless decimal. Read model даёт расходы по period/store, список покупок, price history, скидки, reconciliation gaps и coverage/confidence. Web upload/review/history строится следующей поверхностью над тем же repository.
+
+**Acceptance gate.** Idempotent evidence replay и duplicate conflict; ordered raw-line round trip; no hallucinated quantity/price; mismatch→review; append-preserving corrections; byte-for-byte доказательство, что receipt-only workflow не меняет inventory/plans/shopping; AUDIT coverage, malformed-data fail-closed, native/Web parity, full test/review/release gate.
+
+Подробный ticket: [`docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md`](docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md).
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
 
@@ -326,17 +338,6 @@
 ---
 
 ## 🧭 DISCOVERY
-
-### Receipt ingestion and price history
-
-**Зачем.** Уйти от ручной explicit price map к реальным люксембургским ценам и видеть динамику бюджета.
-
-- [ ] Upload flow для чеков от Илианы/Димы.
-- [ ] OCR/parser с ручным подтверждением неоднозначных строк.
-- [ ] Нормализация store product → ingredient/package.
-- [ ] История unit/package prices с датой и магазином.
-- [ ] Projected basket cost с указанием confidence и даты последней цены.
-- [ ] Weekly/trip budget reports без превращения soft budget в blocker.
 
 ### Recipe quantities and nutrition
 
