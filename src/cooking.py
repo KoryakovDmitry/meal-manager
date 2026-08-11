@@ -188,6 +188,28 @@ def register_cooked(
                 occurrence.actual_portions = actual_portions
                 occurrence.actual_yield_portions = actual_yield_portions
                 occurrence.cook_event_id = cook_event.id
+
+                # Create a leftover lot when the cook produced more portions
+                # than were served.  The lot is stored in the weekly plan's
+                # ``leftovers`` dict and linked from the occurrence via
+                # ``leftover_lot_ids`` so downstream views and shopping
+                # projections can account for it.
+                if (
+                    isinstance(actual_portions, int)
+                    and isinstance(actual_yield_portions, int)
+                    and actual_yield_portions > actual_portions
+                ):
+                    lot_id = "leftover_" + uuid.uuid4().hex
+                    plan.leftovers[lot_id] = {
+                        "dish": dish.name,
+                        "portions": actual_yield_portions - actual_portions,
+                        "source_cook_event_id": cook_event.id,
+                        "source_occurrence_id": occurrence_id,
+                        "created_at": _utc_now(),
+                        "consumed_portions": 0,
+                    }
+                    occurrence.leftover_lot_ids.append(lot_id)
+
                 plan.shopping = {}
                 targets[f"plans/{plan.week_id}.json"] = _json_bytes(plan.to_dict())
 
