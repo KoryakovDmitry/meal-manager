@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .. import atomic_write_json
+from .. import atomic_write_json, read_json_file
 from ..dish import Dish
 from ..shopping_request import ShoppingRequest
 from .file_lock import JsonFileLock
@@ -26,12 +26,13 @@ class JsonShoppingRequestRepository:
         return datetime.now(timezone.utc).isoformat()
 
     def _load_all(self) -> list[ShoppingRequest]:
-        if not self.path.exists():
-            return []
+        missing = object()
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = read_json_file(self.path, missing=missing)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ShoppingRequestDataError(f"Invalid shopping request file: {exc}") from exc
+        if raw is missing:
+            return []
         if not isinstance(raw, dict):
             raise ShoppingRequestDataError("Unsupported shopping request schema")
         version = raw.get("schema_version")

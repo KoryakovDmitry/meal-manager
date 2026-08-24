@@ -56,7 +56,13 @@ def HANDLER(args: dict, **kwargs):
         ]
         if not candidates:
             raise LookupError(f"'{raw_name}' not found in active cooking history.")
-        event = candidates[-1]
+        if len(candidates) != 1:
+            event_ids = ", ".join(sorted(item.id for item in candidates))
+            raise ValueError(
+                "multiple active cooking events match dish_name; provide event_id: "
+                + event_ids
+            )
+        event = candidates[0]
     result = retract_cooked(event_id=event.id)
     plan_msg = " Linked plan occurrence reopened." if result["plan_reopened"] else ""
     return f"Retracted cooking event '{event.id}' for '{name}'.{plan_msg}"
