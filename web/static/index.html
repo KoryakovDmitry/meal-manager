@@ -1993,8 +1993,8 @@ function renderHistory() {
     const dishName = escapeHtml(h.dish);
     const retracted = h.status === 'retracted';
     const eventId = escapeHtml(h.id);
-    const correction = retracted ? '<span class="plan-meal-status cancelled">отменено</span>' : '';
-    const action = retracted ? '' : `<button class="btn btn-danger btn-sm icon-action" data-action="delete" data-value="${eventId}" aria-label="Отменить регистрацию готовки ${dishName}" title="Отменить регистрацию готовки ${dishName}">✕</button>`;
+    const correction = retracted ? '<span class="plan-meal-status cancelled">исправлено</span>' : '';
+    const action = retracted ? '' : `<button class="btn btn-danger btn-sm icon-action" data-action="delete" data-value="${eventId}" aria-label="Исправить запись истории ${dishName}" title="Исправить запись истории ${dishName}">✕</button>`;
     return `<div class="history-item ${retracted ? 'history-retracted' : ''}">
       <div>
         <div class="dish-name">${dishName}${correction}</div>
@@ -2009,7 +2009,7 @@ function renderHistory() {
 async function deleteHistory(eventId) {
   try {
     await api('/api/history/' + encodeURIComponent(eventId), 'DELETE');
-    toast('Регистрация готовки отменена; исходное событие сохранено. Запас автоматически не восстановлен.');
+    toast('Запись отмечена как исправленная; исходное событие сохранено');
     await refreshAll();
   } catch (e) { toast(e.message, true); }
 }

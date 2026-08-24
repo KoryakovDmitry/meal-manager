@@ -5,7 +5,7 @@ import logging
 import threading
 from pathlib import Path
 
-from .. import atomic_write_json, read_json_file, tuning
+from .. import atomic_write_json, tuning
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +25,13 @@ class JsonTuningRepository:
         self.lock = threading.Lock()
 
     def load(self) -> dict:
-        missing = object()
+        if not self.path.exists():
+            return tuning.initialize_state()
         try:
-            raw = read_json_file(self.path, missing=missing)
+            with open(self.path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to load %s: %s", self.path.name, exc)
-            return tuning.initialize_state()
-        if raw is missing:
             return tuning.initialize_state()
         return tuning.validate_state(raw)
 

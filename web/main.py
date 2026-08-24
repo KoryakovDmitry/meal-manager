@@ -57,12 +57,10 @@ _shopping_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.shopping")
 _shopping_request_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_shopping_request"
 )
-_src_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src")
 JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
 JsonDishRepository = _dish_repository_module.JsonDishRepository
 dish_catalog_version = _dish_repository_module.dish_catalog_version
 JsonPlanRepository = _plan_repository_module.JsonPlanRepository
-PlanDataError = _plan_repository_module.PlanDataError
 JsonHistoryRepository = _history_repository_module.JsonHistoryRepository
 HistoryDataError = _history_repository_module.HistoryDataError
 AuditTransactionManager = _audit_module.AuditTransactionManager
@@ -70,7 +68,6 @@ AuditConflictError = _audit_module.AuditConflictError
 audit_scope = _audit_context_module.audit_scope
 register_cooked = _cooking_module.register_cooked
 retract_cooked = _cooking_module.retract_cooked
-CookingConflictError = _cooking_module.CookingConflictError
 JsonPrepItemRepository = _prep_repository_module.JsonPrepItemRepository
 JsonShoppingRequestRepository = _shopping_request_repository_module.JsonShoppingRequestRepository
 project_plan_shopping = _shopping_module.project_plan_shopping
@@ -81,7 +78,6 @@ Dish = _dish_module.Dish
 MealEntry = _plan_module.MealEntry
 WeekPlan = _plan_module.WeekPlan
 build_product_catalog = _product_catalog_module.build_product_catalog
-read_json_file = _src_module.read_json_file
 logger = logging.getLogger(__name__)
 DATA_DIR = Path(__import__("os").environ.get("MEAL_DATA_DIR", PLUGIN_ROOT / "data"))
 DISHES_PATH = DATA_DIR / "dishes.json"
@@ -180,23 +176,6 @@ def _audit_transaction_manager(data_dir=None):
     return _web_audit_manager
 
 
-def _coherent_web_read(fn):
-    """Hold one recovery-aware snapshot across complete Web response assembly."""
-    @wraps(fn)
-    def wrapped(*args, **kwargs):
-        try:
-            with _audit_transaction_manager().consistent_read():
-                return fn(*args, **kwargs)
-        except HTTPException:
-            raise
-        except (AuditConflictError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            logger.error("Web read storage failure", exc_info=exc)
-            raise HTTPException(
-                503, "Meal data is temporarily unavailable"
-            ) from exc
-    return wrapped
-
-
 def _web_audited(operation, data_root):
     def decorate(fn):
         @wraps(fn)
@@ -228,11 +207,10 @@ def _history_public(event):
 
 
 def load_history():
-    with _audit_transaction_manager().consistent_read():
-        return [
-            _history_public(event)
-            for event in _history_repository().load_events(strict=True)
-        ]
+    return [
+        _history_public(event)
+        for event in _history_repository().load_events(strict=True)
+    ]
 
 
 def save_history(entries):
@@ -245,8 +223,7 @@ def _plan_repository():
 
 
 def load_tuning():
-    value = read_json_file(TUNING_PATH, missing={})
-    return value if isinstance(value, dict) else {}
+    return _read_json(TUNING_PATH, {})
 
 def _valid_iso_week(week_id: str) -> bool:
     match = _WEEK_ID_RE.fullmatch(week_id)
@@ -585,23 +562,23 @@ def _valid_plan_payload(plan, expected_week: str) -> bool:
 def _read_valid_week_plan(week_id: str):
     if not _valid_iso_week(week_id):
         return None
-    plan = _plan_repository().load_strict(week_id)
-    return None if plan is None else plan.to_dict()
-
+    plan = _read_json(PLANS_DIR / f"{week_id}.json", None)
+    return plan if _valid_plan_payload(plan, week_id) else None
 
 def load_week_plan(week_id: str):
     if not _valid_iso_week(week_id):
         raise HTTPException(400, "Invalid ISO week; expected a real YYYY-Www week")
+    raw_plan = _read_valid_week_plan(week_id)
+    if raw_plan is None:
+        plan_path = Path(PLANS_DIR) / f"{week_id}.json"
+        if plan_path.exists():
+            raise HTTPException(503, "Weekly plan data is malformed")
+        raise HTTPException(404, f"Plan '{week_id}' not found")
     try:
-        with _audit_transaction_manager().consistent_read():
-            plan = _plan_repository().load_strict(week_id)
-            if plan is None:
-                raise HTTPException(404, f"Plan '{week_id}' not found")
-            return plan.to_dict()
-    except HTTPException:
-        raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(503, "Weekly plan data is malformed") from exc
+        return WeekPlan.from_dict(raw_plan).to_dict()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(404, f"Plan '{week_id}' not found or malformed") from exc
+
 
 def _plan_version(plan: WeekPlan | dict) -> str:
     payload = (
@@ -671,8 +648,27 @@ def _plan_meal_entry(
 
 
 def list_week_plans():
-    with _audit_transaction_manager().consistent_read():
-        return _plan_repository().list_weeks()
+    if not PLANS_DIR.exists():
+        return []
+    result = []
+    for path in sorted(PLANS_DIR.glob("*.json"), reverse=True):
+        if not _valid_iso_week(path.stem):
+            continue
+        plan = _read_valid_week_plan(path.stem)
+        if plan is None:
+            continue
+        days = plan["days"]
+        meal_count = sum(
+            len(days[day_code].get("meals", []))
+            for day_code in _PLAN_DAYS
+        )
+        result.append({
+            "week": path.stem,
+            "status": plan.get("status", "draft"),
+            "meals_count": meal_count,
+            "prep_count": len(plan.get("prep", [])),
+        })
+    return result
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 def _normalize(name: str) -> str:
@@ -842,63 +838,14 @@ class PlanMealStableEdit(PlanMealEdit):
 
 class CookedMeal(BaseModel):
     dish: str = Field(min_length=1, max_length=200)
-    date: str | None = Field(default=None, max_length=100)
-    occurrence_id: str | None = Field(
-        default=None, min_length=9, max_length=100,
-        pattern=r"^mealocc_[A-Za-z0-9][A-Za-z0-9_-]*$",
-    )
+    date: str | None = None
+    occurrence_id: str | None = Field(default=None, min_length=1, max_length=100)
     expected_revision: StrictInt | None = Field(default=None, ge=1)
     actual_portions: StrictInt | None = Field(default=None, ge=0)
     actual_yield_portions: StrictInt | None = Field(default=None, ge=0)
-    replaces_event_id: str | None = Field(
-        default=None, min_length=6, max_length=100,
-        pattern=r"^cook_[A-Za-z0-9][A-Za-z0-9_-]*$",
-    )
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        if self.occurrence_id is not None and self.expected_revision is None:
-            raise ValueError("expected_revision is required for occurrence_id")
-        if self.replaces_event_id is not None and self.occurrence_id is None:
-            raise ValueError(
-                "replaces_event_id requires a linked occurrence_id and expected_revision"
-            )
 
     class Config:
         extra = "forbid"
-        _linkage_schema = {
-            "allOf": [
-                {
-                    "if": {
-                        "required": ["occurrence_id"],
-                        "properties": {"occurrence_id": {"type": "string"}},
-                    },
-                    "then": {
-                        "required": ["expected_revision"],
-                        "properties": {
-                            "expected_revision": {"type": "integer", "minimum": 1}
-                        },
-                    },
-                },
-                {
-                    "if": {
-                        "required": ["replaces_event_id"],
-                        "properties": {"replaces_event_id": {"type": "string"}},
-                    },
-                    "then": {
-                        "required": ["occurrence_id", "expected_revision"],
-                        "properties": {
-                            "occurrence_id": {"type": "string"},
-                            "expected_revision": {"type": "integer", "minimum": 1},
-                        },
-                    },
-                },
-            ]
-        }
-        if hasattr(BaseModel, "model_validate"):
-            json_schema_extra = _linkage_schema
-        else:
-            schema_extra = _linkage_schema
 
 # ─── API: Dishes ────────────────────────────────────────────────────────
 def _assert_dish_catalog_version(expected_version: str, dishes: list[Dish]) -> str:
@@ -913,7 +860,6 @@ def _assert_dish_catalog_version(expected_version: str, dishes: list[Dish]) -> s
 
 
 @app.get("/api/dishes")
-@_coherent_web_read
 def get_dishes():
     repo = _dish_repository()
     with repo.lock:
@@ -1047,7 +993,6 @@ def _legacy_inventory_name(value: str) -> str:
 
 
 @app.get("/api/inventory/items")
-@_coherent_web_read
 def list_inventory_items():
     try:
         return {"items": [item.to_public_dict() for item in _fridge_repository().load_items()]}
@@ -1108,7 +1053,6 @@ def _catalog_dishes() -> list[Dish]:
 
 @app.get("/api/products")
 @_inventory_api_errors
-@_coherent_web_read
 def list_product_catalog(
     status: str = "all",
     category: str = "all",
@@ -1194,7 +1138,6 @@ def replenish_product(payload: ProductReplenish):
 
 @app.get("/api/fridge")
 @_inventory_api_errors
-@_coherent_web_read
 def get_fridge():
     return {"ingredients": load_fridge()}
 
@@ -1272,7 +1215,6 @@ def clear_fridge():
 # ─── API: Suggestions & Shopping ────────────────────────────────────────
 @app.get("/api/suggestions")
 @_inventory_api_errors
-@_coherent_web_read
 def get_suggestions():
     dishes = load_dishes()
     fridge = load_available_ingredient_keys()
@@ -1335,7 +1277,6 @@ def _weekly_plan_shopping_view(week_id: str, catalog=None) -> dict:
 
 @app.get("/api/shopping")
 @_inventory_api_errors
-@_coherent_web_read
 def get_shopping():
     week_id = _current_week_id()
     catalog = _fridge_repository().load_catalog_items()
@@ -1356,7 +1297,6 @@ def get_shopping():
 
 # ─── API: History ───────────────────────────────────────────────────────
 @app.get("/api/history")
-@_coherent_web_read
 def get_history():
     try:
         return {"history": load_history()}
@@ -1368,15 +1308,13 @@ def get_history():
 @_web_audited("register_cooked_meal", lambda: Path(HISTORY_PATH).parent)
 def add_history(payload: CookedMeal):
     try:
-        if hasattr(payload, "model_fields_set"):
-            fields_set = payload.model_fields_set
-        else:  # Pydantic v1 compatibility for supported legacy installs.
-            fields_set = payload.__fields_set__
-        cook_kwargs = dict(
+        result = register_cooked(
             dish_name=_normalize(payload.dish),
             occurrence_id=payload.occurrence_id,
             expected_revision=payload.expected_revision,
-            replaces_event_id=payload.replaces_event_id,
+            cooked_at=payload.date,
+            actual_portions=payload.actual_portions,
+            actual_yield_portions=payload.actual_yield_portions,
             actor_type="user",
             surface_kind="web",
             dish_repository=_dish_repository(),
@@ -1386,40 +1324,24 @@ def add_history(payload: CookedMeal):
             prep_repository=_prep_repository(),
             audit_transaction_manager=_audit_transaction_manager(),
         )
-        if "date" in fields_set:
-            cook_kwargs["cooked_at"] = payload.date
-        if "actual_portions" in fields_set:
-            cook_kwargs["actual_portions"] = payload.actual_portions
-        if "actual_yield_portions" in fields_set:
-            cook_kwargs["actual_yield_portions"] = payload.actual_yield_portions
-        result = register_cooked(**cook_kwargs)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except CookingConflictError as exc:
-        raise HTTPException(409, str(exc)) from exc
     except (
-        AuditConflictError, HistoryDataError, PlanDataError, InventoryDataError,
+        AuditConflictError, HistoryDataError, InventoryDataError,
         OSError, json.JSONDecodeError,
     ) as exc:
         logger.error("Cooking transaction storage failure", exc_info=exc)
         raise HTTPException(503, "Inventory storage is temporarily unavailable") from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    event = next(
+        item for item in _history_repository().load_events(strict=True)
+        if item.id == result["cook_event_id"]
+    )
     return {
         "status": "ok",
-        "entry": _history_public(result["event"]),
-        "corrected": result["corrected"],
-        "replaces_event_id": result["replaces_event_id"],
-        "root_event_id": result["root_event_id"],
-        "effects_origin_event_id": result["effects_origin_event_id"],
-        "plan_occurrence_id": result["plan_occurrence_id"],
-        "occurrence_revision": result["occurrence_revision"],
-        "request_fingerprint": result["request_fingerprint"],
-        "leftover_after": result["leftover_after"],
-        "removed_inventory": result["removed_inventory"],
-        "prep_consumed": result["prep_consumed"],
+        "entry": _history_public(event),
         "transaction_id": result["transaction_id"],
-        "replayed": result["replayed"],
     }
 
 
@@ -1458,20 +1380,12 @@ def delete_history_entry(event_id: str):
 
 # ─── API: Weekly plans ───────────────────────────────────────────────────
 @app.get("/api/plans")
-@_coherent_web_read
 def get_week_plans():
-    try:
-        return {"plans": list_week_plans()}
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        logger.error("Weekly plan list storage failure", exc_info=exc)
-        raise HTTPException(
-            503, "Weekly plan data is temporarily unavailable"
-        ) from exc
+    return {"plans": list_week_plans()}
 
 
 @app.get("/api/plans/{week_id}")
 @_inventory_api_errors
-@_coherent_web_read
 def get_week_plan_view(week_id: str):
     persisted = load_week_plan(week_id)
     plan = WeekPlan.from_dict(persisted)
@@ -1728,7 +1642,6 @@ def get_entity_audit_history(entity_type: str, entity_id: str, limit: int = 100)
 # ─── API: Stats ─────────────────────────────────────────────────────────
 @app.get("/api/stats")
 @_inventory_api_errors
-@_coherent_web_read
 def get_stats():
     dishes = load_dishes()
     inventory_items = _fridge_repository().load_items()

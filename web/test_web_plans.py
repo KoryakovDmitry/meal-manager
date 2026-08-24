@@ -44,39 +44,6 @@ def write_plan(directory: Path, week: str, payload) -> None:
     )
 
 
-def set_data_root(root: Path) -> tuple:
-    previous = (
-        web.DISHES_PATH,
-        web.FRIDGE_PATH,
-        web.HISTORY_PATH,
-        web.TUNING_PATH,
-        web.PLANS_DIR,
-        web.PREP_ITEMS_PATH,
-        web.SHOPPING_REQUESTS_PATH,
-    )
-    web.DISHES_PATH = root / "dishes.json"
-    web.FRIDGE_PATH = root / "fridge.json"
-    web.HISTORY_PATH = root / "history.json"
-    web.TUNING_PATH = root / "tuning.json"
-    web.PLANS_DIR = root / "plans"
-    web.PREP_ITEMS_PATH = root / "prep_items.json"
-    web.SHOPPING_REQUESTS_PATH = root / "shopping_requests.json"
-    web.PLANS_DIR.mkdir(parents=True, exist_ok=True)
-    return previous
-
-
-def restore_data_root(previous: tuple) -> None:
-    (
-        web.DISHES_PATH,
-        web.FRIDGE_PATH,
-        web.HISTORY_PATH,
-        web.TUNING_PATH,
-        web.PLANS_DIR,
-        web.PREP_ITEMS_PATH,
-        web.SHOPPING_REQUESTS_PATH,
-    ) = previous
-
-
 def valid_plan(week="2026-W30"):
     days: dict[str, dict] = {
         day: {"meals": []}
@@ -128,10 +95,17 @@ def main():
     assert not web._valid_iso_week("../../etc/passwd")
 
     with tempfile.TemporaryDirectory() as tmp:
-        test_root = Path(tmp)
-        original_paths = set_data_root(test_root)
+        web.PLANS_DIR = Path(tmp)
         write_plan(web.PLANS_DIR, "2026-W30", valid_plan())
         original_current_week = getattr(web, "_current_week_id", None)
+        original_fridge_path = web.FRIDGE_PATH
+        original_dishes_path = web.DISHES_PATH
+        original_prep_path = web.PREP_ITEMS_PATH
+        original_shopping_requests_path = web.SHOPPING_REQUESTS_PATH
+        web.FRIDGE_PATH = Path(tmp) / "fridge.json"
+        web.DISHES_PATH = Path(tmp) / "dishes.json"
+        web.PREP_ITEMS_PATH = Path(tmp) / "prep_items.json"
+        web.SHOPPING_REQUESTS_PATH = Path(tmp) / "shopping_requests.json"
         web.FRIDGE_PATH.write_text(
             json.dumps({"schema_version": 4, "items": []}), encoding="utf-8"
         )
@@ -184,6 +158,10 @@ def main():
                 del web._current_week_id
             else:
                 web._current_week_id = original_current_week
+            web.FRIDGE_PATH = original_fridge_path
+            web.DISHES_PATH = original_dishes_path
+            web.PREP_ITEMS_PATH = original_prep_path
+            web.SHOPPING_REQUESTS_PATH = original_shopping_requests_path
         assert shopping_view["week"] == "2026-W30"
         assert shopping_view["source"] == "weekly_plan"
         assert [item["ingredient"] for item in shopping_view["items"]] == ["carrot <b>"]
@@ -380,16 +358,7 @@ def main():
 
         for payload in malformed:
             write_plan(web.PLANS_DIR, "2026-W31", payload)
-            try:
-                web.list_week_plans()
-                raise AssertionError(f"malformed plan listed: {payload!r}")
-            except ValueError:
-                pass
-            try:
-                web.get_week_plans()
-                raise AssertionError(f"malformed plan route succeeded: {payload!r}")
-            except HTTPException as exc:
-                assert exc.status_code == 503
+            assert all(row["week"] != "2026-W31" for row in web.list_week_plans())
             try:
                 web.load_week_plan("2026-W31")
                 raise AssertionError(f"malformed plan accepted: {payload!r}")
@@ -397,11 +366,7 @@ def main():
                 assert exc.status_code == 503
 
         (web.PLANS_DIR / "2026-W31.json").write_bytes(b"\xff\xfeinvalid-json")
-        try:
-            web.get_week_plans()
-            raise AssertionError("invalid UTF-8 plan route succeeded")
-        except HTTPException as exc:
-            assert exc.status_code == 503
+        assert all(row["week"] != "2026-W31" for row in web.list_week_plans())
         try:
             web.load_week_plan("2026-W31")
             raise AssertionError("invalid UTF-8 plan accepted")
@@ -413,14 +378,17 @@ def main():
             raise AssertionError("impossible ISO week accepted")
         except HTTPException as exc:
             assert exc.status_code == 400
-        restore_data_root(original_paths)
 
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = Path(tmp)
-        original_paths = set_data_root(data_dir)
-        web.PREP_ITEMS_PATH.write_text(
-            json.dumps({"prep_items": []}), encoding="utf-8"
+        original_paths = (
+            web.DISHES_PATH, web.FRIDGE_PATH, web.HISTORY_PATH, web.PLANS_DIR,
         )
+        web.DISHES_PATH = data_dir / "dishes.json"
+        web.FRIDGE_PATH = data_dir / "fridge.json"
+        web.HISTORY_PATH = data_dir / "history.json"
+        web.PLANS_DIR = data_dir / "plans"
+        web.PLANS_DIR.mkdir()
         web.DISHES_PATH.write_text(json.dumps({"dishes": [
             {"name": "суп", "ingredients": {"лук": True, "морковь": True}},
             {"name": "паста", "ingredients": {"лук": True, "томаты": True}},
@@ -488,194 +456,16 @@ def main():
                 ))
                 raise AssertionError("stale Web cook revision succeeded")
             except HTTPException as exc:
-                assert exc.status_code == 409
+                assert exc.status_code == 400
             assert all(
                 path.read_bytes() == payload for path, payload in stale_before.items()
             )
-
-            web_cooked = web.add_history(web.CookedMeal(
-                dish="history-only dish",
-                occurrence_id=occurrence["occurrence_id"],
-                expected_revision=occurrence["revision"],
-                date="2026-07-17",
-                actual_portions=1,
-                actual_yield_portions=2,
-            ))
-            web_first_id = web_cooked["entry"]["id"]
-            http_before_invalid = {
-                path: path.read_bytes() for path in (
-                    web.HISTORY_PATH,
-                    web.PLANS_DIR / "2026-W31.json",
-                )
-            }
-            with TestClient(web.app) as client:
-                missing_revision = client.post("/api/history", json={
-                    "dish": "history-only dish",
-                    "occurrence_id": occurrence["occurrence_id"],
-                    "replaces_event_id": web_first_id,
-                })
-                assert missing_revision.status_code == 422
-                unknown_field = client.post("/api/history", json={
-                    "dish": "history-only dish",
-                    "occurrence_id": occurrence["occurrence_id"],
-                    "expected_revision": occurrence["revision"] + 1,
-                    "replaces_event_id": web_first_id,
-                    "actual_portion": 1,
-                })
-                assert unknown_field.status_code == 422
-                assert all(
-                    path.read_bytes() == payload
-                    for path, payload in http_before_invalid.items()
-                )
-                omitted_response = client.post("/api/history", json={
-                    "dish": "history-only dish",
-                    "occurrence_id": occurrence["occurrence_id"],
-                    "expected_revision": occurrence["revision"] + 1,
-                    "replaces_event_id": web_first_id,
-                })
-                assert omitted_response.status_code == 200, omitted_response.text
-                web_corrected = omitted_response.json()
-            assert web_corrected["entry"]["date"] == "2026-07-17"
-            assert web_corrected["entry"]["actual_portions"] == 1
-            assert web_corrected["entry"]["actual_yield_portions"] == 2
-            assert web_corrected["corrected"] is True
-            assert web_corrected["replaces_event_id"] == web_first_id
-            assert web_corrected["occurrence_revision"] == occurrence["revision"] + 2
-            assert web_corrected["replayed"] is False
-            web_replacement_id = web_corrected["entry"]["id"]
-            with TestClient(web.app) as client:
-                null_response = client.post("/api/history", json={
-                    "dish": "history-only dish",
-                    "occurrence_id": occurrence["occurrence_id"],
-                    "expected_revision": occurrence["revision"] + 2,
-                    "replaces_event_id": web_replacement_id,
-                    "actual_portions": None,
-                    "actual_yield_portions": None,
-                })
-                assert null_response.status_code == 200, null_response.text
-                web_cleared = null_response.json()
-            assert web_cleared["entry"]["date"] == "2026-07-17"
-            assert web_cleared["entry"]["actual_portions"] is None
-            assert web_cleared["entry"]["actual_yield_portions"] is None
-            web_lineage = [
-                row for row in web.get_history()["history"]
-                if row["plan_occurrence_id"] == occurrence["occurrence_id"]
-            ]
-            assert len(web_lineage) == 3
-            assert len([row for row in web_lineage if row["status"] == "active"]) == 1
-            corrected_plan = web.get_week_plan_view("2026-W31")["plan"]
-            corrected_occurrence = corrected_plan["days"]["wed"]["meals"][0]
-            assert corrected_occurrence["revision"] == occurrence["revision"] + 3
-            assert corrected_occurrence["cook_event_id"] == web_cleared["entry"]["id"]
-            assert corrected_occurrence["leftover_lot_ids"] == []
-            assert corrected_plan["leftovers"] == {}
-
-            plan_path = web.PLANS_DIR / "2026-W31.json"
-            valid_plan_bytes = plan_path.read_bytes()
-            malformed_plan_bytes = b'{"schema_version":2,"week_id":"2026-W31"}'
-            audit_manager = web._audit_transaction_manager()
-            audit_context = {
-                "actor": {"type": "test"},
-                "surface": {"kind": "test"},
-            }
-            audit_event = [{
-                "event_type": "plan.test_corruption.v1",
-                "entity": {"type": "weekly_plan", "id": "2026-W31"},
-                "payload": {"test": True},
-            }]
-            audit_manager.commit(
-                operation="test_commit_malformed_plan",
-                targets={"plans/2026-W31.json": malformed_plan_bytes},
-                events=audit_event,
-                context=audit_context,
-            )
-            history_before_corrupt_plan = web.HISTORY_PATH.read_bytes()
-            with TestClient(web.app) as client:
-                corrupt_plan_response = client.post("/api/history", json={
-                    "dish": "history-only dish",
-                    "occurrence_id": occurrence["occurrence_id"],
-                    "expected_revision": occurrence["revision"] + 3,
-                    "replaces_event_id": web_cleared["entry"]["id"],
-                })
-            assert corrupt_plan_response.status_code == 503
-            assert web.HISTORY_PATH.read_bytes() == history_before_corrupt_plan
-            assert plan_path.read_bytes() == malformed_plan_bytes
-            audit_manager.commit(
-                operation="test_restore_valid_plan",
-                targets={"plans/2026-W31.json": valid_plan_bytes},
-                events=audit_event,
-                context=audit_context,
-            )
-
-            from jsonschema import Draft7Validator
-            handlers_module = __import__(
-                f"{web.PLUGIN_ROOT.name}.src.handlers", fromlist=["iter_tools"]
-            )
-            native_cook_schema = next(
-                schema for name, schema, _handler in handlers_module.iter_tools()
-                if name == "register_cooked_meal"
-            )
-            native_validator = Draft7Validator(native_cook_schema)
-            parity_payloads = [
-                ({"dish_name": "dish"}, True),
-                ({
-                    "dish_name": "dish",
-                    "occurrence_id": "mealocc_x",
-                    "expected_revision": 1,
-                    "cooked_at": None,
-                    "actual_portions": None,
-                    "actual_yield_portions": None,
-                    "replaces_event_id": None,
-                }, True),
-                ({
-                    "dish_name": "dish",
-                    "occurrence_id": "mealocc_x",
-                    "expected_revision": 1,
-                    "replaces_event_id": "cook_x",
-                }, True),
-                ({"dish_name": "dish", "replaces_event_id": "cook_x"}, False),
-                ({
-                    "dish_name": "dish",
-                    "occurrence_id": "mealocc_x",
-                    "replaces_event_id": "cook_x",
-                }, False),
-                ({"dish_name": "dish", "occurrence_id": "mealocc_x"}, False),
-                ({"dish_name": "dish", "replaces_event_id": "cook_"}, False),
-                ({"dish_name": "dish", "replaces_event_id": "cook_" + "x" * 96}, False),
-                ({"dish_name": "dish", "occurrence_id": "mealocc_"}, False),
-                ({"dish_name": "dish", "occurrence_id": "mealocc_" + "x" * 93}, False),
-                ({
-                    "dish_name": "dish", "occurrence_id": "mealocc_x/path",
-                    "expected_revision": 1,
-                }, False),
-                ({"dish_name": "dish", "replaces_event_id": "cook_x/path"}, False),
-                ({"dish_name": "dish", "cooked_at": "x" * 101}, False),
-                ({"dish_name": "dish", "unexpected": True}, False),
-            ]
-            for native_payload, expected_valid in parity_payloads:
-                native_valid = not list(native_validator.iter_errors(native_payload))
-                web_payload = dict(native_payload)
-                web_payload["dish"] = web_payload.pop("dish_name")
-                if "cooked_at" in web_payload:
-                    web_payload["date"] = web_payload.pop("cooked_at")
-                try:
-                    web.CookedMeal.model_validate(web_payload)
-                    web_valid = True
-                except Exception:
-                    web_valid = False
-                assert native_valid == web_valid == expected_valid, (
-                    native_payload, native_valid, web_valid, expected_valid
-                )
 
             legacy_cooked = web.add_history(web.CookedMeal(
                 dish="history-only dish",
                 date="2026-07-16",
             ))
-            legacy_index = next(
-                index for index, event in enumerate(web.load_history())
-                if event["id"] == legacy_cooked["entry"]["id"]
-            )
-            legacy_retracted = web.delete_history_entry(str(legacy_index))
+            legacy_retracted = web.delete_history_entry("1")
             assert legacy_retracted["entry"]["id"] == legacy_cooked["entry"]["id"]
             assert legacy_retracted["entry"]["status"] == "retracted"
             web.DISHES_PATH.write_text(
@@ -1189,7 +979,6 @@ def main():
             finally:
                 repo._now = original_now
 
-            valid_fridge_bytes = web.FRIDGE_PATH.read_bytes()
             web.FRIDGE_PATH.write_text("{broken", encoding="utf-8")
             corrupt_calls = [
                 lambda: web.get_fridge(),
@@ -1201,7 +990,6 @@ def main():
                 lambda: web.get_suggestions(),
                 lambda: web.get_shopping(),
                 lambda: web.get_stats(),
-                lambda: web.get_history(),
                 lambda: web.add_history(web.CookedMeal(dish="суп")),
                 lambda: web.list_inventory_items(),
             ]
@@ -1211,9 +999,8 @@ def main():
                     raise AssertionError("corrupt inventory did not return storage error")
                 except HTTPException as exc:
                     assert exc.status_code == 503
-                    assert str(web.FRIDGE_PATH) not in str(exc.detail)
-                    assert "traceback" not in str(exc.detail).lower()
-            web.FRIDGE_PATH.write_bytes(valid_fridge_bytes)
+                    assert exc.detail == "Inventory storage is temporarily unavailable"
+                    assert str(web.FRIDGE_PATH) not in exc.detail
             assert web.load_history() == history_before_failure
             web.FRIDGE_PATH.write_bytes(b"\xff")
             try:
@@ -1222,15 +1009,19 @@ def main():
             except HTTPException as exc:
                 assert exc.status_code == 503
                 assert "codec" not in exc.detail.lower()
-            web.FRIDGE_PATH.write_bytes(valid_fridge_bytes)
         finally:
-            restore_data_root(original_paths)
+            (
+                web.DISHES_PATH, web.FRIDGE_PATH, web.HISTORY_PATH, web.PLANS_DIR,
+            ) = original_paths
         assert stats["fridge_utility"] == {"лук": 2, "морковь": 1, "банан": 0}
         assert stats["unused_fridge_items"] == ["банан"]
 
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = Path(tmp)
-        original_plan_paths = set_data_root(data_dir)
+        original_plan_paths = (web.PLANS_DIR, web.DISHES_PATH)
+        web.PLANS_DIR = data_dir / "plans"
+        web.PLANS_DIR.mkdir()
+        web.DISHES_PATH = data_dir / "dishes.json"
         web.DISHES_PATH.write_text(json.dumps({"dishes": [
             {"name": "паста", "ingredients": {}},
             {"name": "суп", "ingredients": {}},
@@ -1319,22 +1110,7 @@ def main():
 
             approved = orphan_edited["plan"]
             approved["status"] = "approved"
-            approved_bytes = (
-                json.dumps(approved, ensure_ascii=False, indent=2) + "\n"
-            ).encode("utf-8")
-            web._audit_transaction_manager().commit(
-                operation="test_set_plan_status",
-                targets={"plans/2026-W30.json": approved_bytes},
-                events=[{
-                    "event_type": "plan.test_status_changed.v1",
-                    "entity": {"type": "weekly_plan", "id": "2026-W30"},
-                    "payload": {"status": "approved"},
-                }],
-                context={
-                    "actor": {"type": "test"},
-                    "surface": {"kind": "test"},
-                },
-            )
+            write_plan(web.PLANS_DIR, "2026-W30", approved)
             approved_view = web.get_week_plan_view("2026-W30")
             try:
                 web.add_plan_meal(
@@ -1366,7 +1142,7 @@ def main():
             except HTTPException as exc:
                 assert exc.status_code == 404
         finally:
-            restore_data_root(original_plan_paths)
+            web.PLANS_DIR, web.DISHES_PATH = original_plan_paths
 
     plan_routes = {}
     for route in web.app.routes:
@@ -1436,8 +1212,7 @@ def main():
     assert ".icon-action { min-width: 44px; min-height: 44px" in html
     assert 'data-action="delete" data-value="${dishName}" aria-label="Удалить рецепт ${dishName}"' in html
     assert 'data-action="edit" data-value="${suggestionName}" aria-label="Изменить рецепт ${suggestionName}"' in html
-    assert 'aria-label="Отменить регистрацию готовки ${dishName}"' in html
-    assert 'Запас автоматически не восстановлен.' in html
+    assert 'aria-label="Исправить запись истории ${dishName}"' in html
     assert 'aria-label="Удалить продукт ${safeItem}"' in html
     assert 'aria-label="Редактировать продукт ${safeItem}"' in html
     assert 'data-action="edit" data-value="${safeItem}"' in html

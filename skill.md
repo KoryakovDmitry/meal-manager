@@ -72,10 +72,6 @@ Use `merge_product_identity` only as a destructive maintenance operation for a c
 
 Registers one canonical cooking occurrence. When `occurrence_id` identifies a planned meal, that row remains in its original plan slot and transitions to `cooked`; it is never removed. Optional actual portions/yield and a timezone-aware `cooked_at` can be recorded. History, plan, inventory, prep, and audit proof are committed by one recovery-safe command.
 
-To correct the date, actual portions, or yield for the **same physical cook**, call this tool again with the linked `occurrence_id`, current `expected_revision`, and the current cook event's `replaces_event_id`. Do this directly while the predecessor is active; do not retract it first. The correction atomically retracts the predecessor, appends one active replacement, preserves omitted date/portion fields, reconciles its unconsumed leftover lot, and does not consume inventory, prep, or tuning again. Pass an explicit `null` for either portion field only when that value must be cleared. If the predecessor was already retracted, the same explicit replacement call is the supported recovery path. Never issue an ordinary re-registration for a linked occurrence with prior cooking history.
-
-Pre-correction legacy data can contain multiple untyped, already-retracted tombstones for one occurrence. They remain readable only when the plan row and OCC revision uniquely pin one active event; that plan-bound active event is the only safe correction target. If no active event is pinned, multiple legacy tips are ambiguous and correction fails closed. Typed correction provenance must always remain one linear predecessor/root/effects-origin chain.
-
 - **When to use:**
   - The user says they cooked or are cooking a specific dish.
   - The user confirms they're going to prepare one of the suggested dishes.
@@ -84,7 +80,7 @@ Pre-correction legacy data can contain multiple untyped, already-retracted tombs
 
 ### `delete_history_entry`
 
-Retracts one active cooking occurrence without replacing it. The original occurrence and audit evidence remain, recency ignores the retracted event, and a linked cooked plan row is reopened. This operation does **not** restore inventory or prep side effects. It is not the metadata-correction path; use atomic `register_cooked_meal` replacement with `replaces_event_id` for that.
+Retracts the latest active cooking occurrence for the dish. This is the correction path for `register_cooked_meal`: the original occurrence and audit evidence remain, recency ignores the retracted event, and a linked cooked plan row is reopened.
 
 - **When to use:**
   - The user says they registered a dish by mistake.

@@ -8,7 +8,7 @@ import json
 import logging
 from pathlib import Path
 
-from .. import atomic_write_json, read_json_file
+from .. import atomic_write_json
 from ..prep_item import PrepItem
 from .file_lock import JsonFileLock
 
@@ -23,13 +23,13 @@ class JsonPrepItemRepository:
         self.lock = JsonFileLock(lambda: self.path)
 
     def load_strict(self) -> list[PrepItem]:
-        missing = object()
+        if not self.path.exists():
+            return []
         try:
-            data = read_json_file(self.path, missing=missing)
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError(f"invalid prep catalog: {exc}") from exc
-        if data is missing:
-            return []
         if not isinstance(data, dict) or not isinstance(data.get("prep_items", []), list):
             raise ValueError("invalid prep catalog envelope")
         try:
@@ -38,13 +38,13 @@ class JsonPrepItemRepository:
             raise ValueError(f"invalid prep catalog entry: {exc}") from exc
 
     def load(self) -> list[PrepItem]:
-        missing = object()
+        if not self.path.exists():
+            return []
         try:
-            data = read_json_file(self.path, missing=missing)
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to load %s: %s", self.path.name, exc)
-            return []
-        if data is missing:
             return []
         if not isinstance(data, dict):
             logger.warning(

@@ -15,7 +15,6 @@ from ..dish import Dish
 from ..repositories import history_repo
 from ..repositories.json_fridge import InventoryDataError
 from ..repositories.json_history import HistoryDataError
-from ..repositories.json_plan import PlanDataError
 
 logger = logging.getLogger(__name__)
 
@@ -79,16 +78,13 @@ def tool_handler(name: str):
                     ):
                         result = fn(args, **kwargs)
                 else:
-                    with audit_manager.consistent_read():
-                        result = fn(args, **kwargs)
+                    result = fn(args, **kwargs)
                 return json.dumps(result, ensure_ascii=False)
             except Exception as exc:
                 log.exception("%s failed", name)
                 if isinstance(exc, InventoryDataError):
                     message = "Inventory storage is temporarily unavailable"
-                elif isinstance(exc, (
-                    AuditConflictError, HistoryDataError, PlanDataError
-                )):
+                elif isinstance(exc, (AuditConflictError, HistoryDataError)):
                     message = "Storage is temporarily unavailable"
                 elif isinstance(exc, OSError):
                     message = "Storage is temporarily unavailable"
@@ -184,7 +180,7 @@ def normalize_ingredients(ingredients) -> dict:
 
 def days_since_last_cook() -> dict[str, int]:
     """Build a mapping of dish name -> days since it was last cooked."""
-    history = history_repo.load(strict=True)
+    history = history_repo.load()
     today = date.today()
     result = {}
     for name, date_str in history.items():

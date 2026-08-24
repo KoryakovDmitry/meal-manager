@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from .. import atomic_write_json, read_json_file
+from .. import atomic_write_json
 from ..dish import Dish
 from .file_lock import JsonFileLock
 
@@ -34,13 +34,13 @@ class JsonDishRepository:
 
     def load_strict(self) -> list[Dish]:
         path = self._io_path()
-        missing = object()
+        if not path.exists():
+            return []
         try:
-            data = read_json_file(path, missing=missing)
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError(f"invalid dish catalog: {exc}") from exc
-        if data is missing:
-            return []
         if not isinstance(data, dict) or not isinstance(data.get("dishes", []), list):
             raise ValueError("invalid dish catalog envelope")
         try:
@@ -50,13 +50,13 @@ class JsonDishRepository:
 
     def load(self) -> list[Dish]:
         path = self._io_path()
-        missing = object()
+        if not path.exists():
+            return []
         try:
-            data = read_json_file(path, missing=missing)
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to load %s: %s", self.path.name, exc)
-            return []
-        if data is missing:
             return []
         if not isinstance(data, dict):
             logger.warning(
@@ -97,12 +97,12 @@ class JsonDishRepository:
         verbatim instead of dropping them.
         """
         path = self._io_path()
-        missing = object()
-        try:
-            data = read_json_file(path, missing=missing)
-        except (json.JSONDecodeError, ValueError, OSError):
+        if not path.exists():
             return []
-        if data is missing:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, ValueError, OSError):
             return []
         if not isinstance(data, dict):
             return []

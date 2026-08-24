@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .. import atomic_write_json, read_json_file
+from .. import atomic_write_json
 from ..dish import Dish
 from ..inventory import InventoryItem
 from .file_lock import JsonFileLock
@@ -72,10 +72,11 @@ class JsonFridgeRepository:
 
     def _read_raw(self):
         path = self._io_path()
-        missing = object()
+        if not path.exists():
+            return []
         try:
-            value = read_json_file(path, missing=missing)
-            return [] if value is missing else value
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
             raise InventoryDataError(f"Invalid inventory file: {exc}") from exc
 

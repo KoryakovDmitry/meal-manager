@@ -2,15 +2,13 @@
 
 import hashlib
 import json
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from .. import atomic_write_json, read_json_file
+from .. import atomic_write_json
 from ..dish import Dish
-from ..identifiers import validate_cook_event_id, validate_meal_occurrence_id
 from .file_lock import JsonFileLock
 
 
@@ -34,99 +32,6 @@ def _legacy_id(source, dish, cooked_on, index):
     return "cook_" + hashlib.sha256(payload).hexdigest()[:24]
 
 
-def validate_event_lineage(events):
-    """Validate global IDs and typed correction chains without row ordering."""
-    by_id = {}
-    active_by_occurrence = {}
-    for event in events:
-        if event.id in by_id:
-            raise ValueError(f"duplicate cooking event id '{event.id}'")
-        by_id[event.id] = event
-        if event.plan_occurrence_id is not None and event.active:
-            active_by_occurrence.setdefault(event.plan_occurrence_id, []).append(event)
-    if any(len(active) > 1 for active in active_by_occurrence.values()):
-        raise ValueError("linked plan occurrence has multiple active cooking events")
-
-    children = {}
-    parents = {}
-    roots_by_occurrence = {}
-    for event in events:
-        provenance = event.provenance
-        if not (
-            isinstance(provenance, dict)
-            and provenance.get("source") == "cook_event_correction"
-        ):
-            continue
-        expected_fields = {
-            "source",
-            "replaces_event_id",
-            "root_event_id",
-            "effects_origin_event_id",
-            "request_fingerprint",
-        }
-        if set(provenance) != expected_fields:
-            raise ValueError("cooking correction provenance fields are invalid")
-        predecessor_id = provenance["replaces_event_id"]
-        root_id = provenance["root_event_id"]
-        effects_origin_id = provenance["effects_origin_event_id"]
-        request_fingerprint = provenance["request_fingerprint"]
-        for value, label in (
-            (predecessor_id, "correction predecessor id"),
-            (root_id, "correction root id"),
-            (effects_origin_id, "correction effects-origin id"),
-        ):
-            validate_cook_event_id(value, label)
-        if event.plan_occurrence_id is None:
-            raise ValueError("cooking correction requires a linked plan occurrence")
-        if (
-            not isinstance(request_fingerprint, str)
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", request_fingerprint) is None
-        ):
-            raise ValueError("cooking correction request fingerprint is invalid")
-        predecessor = by_id.get(predecessor_id)
-        if predecessor is None or predecessor is event:
-            raise ValueError("cooking correction predecessor is missing or cyclic")
-        if (
-            predecessor.plan_occurrence_id != event.plan_occurrence_id
-            or predecessor.dish_name_snapshot != event.dish_name_snapshot
-        ):
-            raise ValueError("cooking correction predecessor belongs to another chain")
-        if predecessor_id in children:
-            raise ValueError("cooking correction lineage forks")
-        parent_provenance = predecessor.provenance
-        if (
-            isinstance(parent_provenance, dict)
-            and parent_provenance.get("source") == "cook_event_correction"
-        ):
-            expected_root = parent_provenance["root_event_id"]
-            expected_effects_origin = parent_provenance["effects_origin_event_id"]
-        else:
-            expected_root = predecessor.id
-            expected_effects_origin = predecessor.id
-        if root_id != expected_root or effects_origin_id != expected_effects_origin:
-            raise ValueError("cooking correction root/effects lineage changed")
-        if predecessor.active:
-            raise ValueError("superseded cooking event must be retracted")
-        children[predecessor_id] = event.id
-        parents[event.id] = predecessor_id
-        roots_by_occurrence.setdefault(event.plan_occurrence_id, set()).add(root_id)
-
-    if any(len(roots) > 1 for roots in roots_by_occurrence.values()):
-        raise ValueError("linked occurrence has disconnected correction chains")
-    for event_id in parents:
-        seen = set()
-        current = event_id
-        while current in parents:
-            if current in seen:
-                raise ValueError("cooking correction lineage contains a cycle")
-            seen.add(current)
-            current = parents[current]
-    for event in events:
-        if event.active and event.id in children:
-            raise ValueError("active cooking event is not a correction-chain tip")
-    return by_id, children
-
-
 @dataclass
 class CookingEvent:
     id: str
@@ -146,10 +51,8 @@ class CookingEvent:
         self.dish_name_snapshot = Dish.normalize_name(self.dish_name_snapshot)
         if not self.dish_name_snapshot:
             raise ValueError("cooking event dish name cannot be empty")
-        validate_cook_event_id(self.id)
-        validate_meal_occurrence_id(
-            self.plan_occurrence_id, "plan_occurrence_id", optional=True
-        )
+        if not isinstance(self.id, str) or not self.id.startswith("cook_"):
+            raise ValueError("cooking event id must start with cook_")
         if self.time_precision not in {"date", "datetime"}:
             raise ValueError("cooking event time_precision must be date or datetime")
         if self.time_precision == "date":
@@ -164,8 +67,6 @@ class CookingEvent:
                 raise ValueError("cooked_at must be timezone-aware")
             if self.cooked_on is None:
                 self.cooked_on = parsed.date().isoformat()
-            elif date.fromisoformat(self.cooked_on) != parsed.date():
-                raise ValueError("cooked_on must match cooked_at calendar date")
         for value, label in (
             (self.actual_portions, "actual_portions"),
             (self.actual_yield_portions, "actual_yield_portions"),
@@ -174,35 +75,8 @@ class CookingEvent:
                 not isinstance(value, int) or isinstance(value, bool) or value < 0
             ):
                 raise ValueError(f"{label} must be a non-negative integer or null")
-        if (
-            self.actual_portions is not None
-            and self.actual_yield_portions is not None
-            and self.actual_yield_portions < self.actual_portions
-        ):
-            raise ValueError(
-                "actual_yield_portions cannot be below actual_portions served"
-            )
         if not isinstance(self.backfilled, bool):
             raise ValueError("backfilled must be boolean")
-        for value, label in (
-            (self.recorded_at, "recorded_at"),
-            (self.retracted_at, "retracted_at"),
-        ):
-            if value is None:
-                if label == "recorded_at" and not self.backfilled:
-                    raise ValueError("non-backfilled cooking events require recorded_at")
-                continue
-            if not isinstance(value, str) or not value.endswith("Z"):
-                raise ValueError(f"{label} must be a canonical UTC timestamp")
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            if parsed.tzinfo != timezone.utc:
-                raise ValueError(f"{label} must be UTC")
-        if self.provenance is not None and (
-            not isinstance(self.provenance, dict)
-            or not isinstance(self.provenance.get("source"), str)
-            or not self.provenance["source"]
-        ):
-            raise ValueError("cooking event provenance requires source")
 
     @property
     def active(self):
@@ -247,7 +121,10 @@ class JsonHistoryRepository:
         self.lock = JsonFileLock(lambda: self.path)
 
     def _load_raw(self):
-        return read_json_file(self.path, missing=None)
+        if not self.path.exists():
+            return None
+        with open(self.path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
 
     def _migrate(self, raw):
         if raw is None:
@@ -264,9 +141,7 @@ class JsonHistoryRepository:
                 raise ValueError(f"unsupported history schema_version {version!r}")
             if set(raw) != {"schema_version", "entries"} or not isinstance(raw["entries"], list):
                 raise ValueError("history schema v2 must contain an entries list")
-            events = [CookingEvent.from_dict(item) for item in raw["entries"]]
-            validate_event_lineage(events)
-            return events
+            return [CookingEvent.from_dict(item) for item in raw["entries"]]
         if set(raw) == {"history"}:
             rows = raw["history"]
             if not isinstance(rows, list):
@@ -299,7 +174,6 @@ class JsonHistoryRepository:
                     backfilled=True,
                     provenance={"source": "legacy_web_history"},
                 ))
-            validate_event_lineage(events)
             return events
         events = []
         for index, (name, cooked_on) in enumerate(sorted(raw.items())):
@@ -315,7 +189,6 @@ class JsonHistoryRepository:
                 backfilled=True,
                 provenance={"source": "legacy_native_history"},
             ))
-        validate_event_lineage(events)
         return events
 
     def load_events(self, *, strict=False):
@@ -326,9 +199,9 @@ class JsonHistoryRepository:
                 raise HistoryDataError("cooking history storage is corrupt") from exc
             return []
 
-    def load(self, *, strict=False) -> dict[str, str]:
+    def load(self) -> dict[str, str]:
         latest = {}
-        for event in self.load_events(strict=strict):
+        for event in self.load_events():
             if not event.active:
                 continue
             cooked_on = event.cooked_on
