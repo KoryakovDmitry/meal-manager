@@ -76,6 +76,22 @@ SCHEMA = {
                 "again; pass explicit null for portion fields to clear them"
             ),
         },
+        "acknowledge_legacy_tombstones": {
+            "type": ["array", "null"],
+            "items": {
+                "type": "string",
+                "minLength": 6,
+                "maxLength": 100,
+                "pattern": "^cook_[A-Za-z0-9][A-Za-z0-9_-]*$",
+            },
+            "minItems": 1,
+            "uniqueItems": True,
+            "description": (
+                "legacy retracted cook events on the same occurrence that are "
+                "not part of this correction's verified lineage; list them "
+                "explicitly to confirm they belong to the same physical cook"
+            ),
+        },
     },
     "required": ["dish_name"],
     "additionalProperties": False,
@@ -117,6 +133,7 @@ def HANDLER(args: dict, **kwargs):
         "actual_portions",
         "actual_yield_portions",
         "replaces_event_id",
+        "acknowledge_legacy_tombstones",
     })
     raw_name = require_arg(args, "dish_name")
     name = normalize_dish_name(raw_name)
@@ -126,6 +143,7 @@ def HANDLER(args: dict, **kwargs):
     actual_portions = args.get("actual_portions", UNSET)
     actual_yield_portions = args.get("actual_yield_portions", UNSET)
     replaces_event_id = args.get("replaces_event_id")
+    acknowledge_legacy_tombstones = args.get("acknowledge_legacy_tombstones")
 
     validate_meal_occurrence_id(
         occurrence_id, "occurrence_id", optional=True
@@ -142,6 +160,10 @@ def HANDLER(args: dict, **kwargs):
     if replaces_event_id is not None and occurrence_id is None:
         raise ValueError(
             "replaces_event_id requires a linked occurrence_id and expected_revision"
+        )
+    if acknowledge_legacy_tombstones is not None and replaces_event_id is None:
+        raise ValueError(
+            "acknowledge_legacy_tombstones requires replaces_event_id"
         )
 
     for value, label in (
@@ -170,6 +192,7 @@ def HANDLER(args: dict, **kwargs):
         actual_portions=actual_portions,
         actual_yield_portions=actual_yield_portions,
         replaces_event_id=replaces_event_id,
+        acknowledge_legacy_tombstones=acknowledge_legacy_tombstones,
     )
     dishes = result.pop("dishes_snapshot")
 

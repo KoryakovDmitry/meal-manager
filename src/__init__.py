@@ -46,7 +46,8 @@ def _read_regular_bytes_no_follow(path: Path, *, missing):
         descriptor = os.open(
             path.name,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0),
             dir_fd=parent_fd,
         )
         opened = os.fstat(descriptor)

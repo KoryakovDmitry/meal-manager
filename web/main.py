@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, field_validator
 
 # ─── Configuration ──────────────────────────────────────────────────────
 # Resolve data dir: allow override via MEAL_DATA_DIR env var,
@@ -854,6 +854,29 @@ class CookedMeal(BaseModel):
         default=None, min_length=6, max_length=100,
         pattern=r"^cook_[A-Za-z0-9][A-Za-z0-9_-]*$",
     )
+    acknowledge_legacy_tombstones: list[str] | None = Field(
+        default=None, min_length=1, max_length=50,
+    )
+
+    @field_validator("acknowledge_legacy_tombstones")
+    @classmethod
+    def _validate_acknowledged(cls, value):
+        if value is None:
+            return value
+        if any(
+            not isinstance(item, str)
+            or re.fullmatch(r"^cook_[A-Za-z0-9][A-Za-z0-9_-]*$", item) is None
+            or len(item) > 100
+            for item in value
+        ):
+            raise ValueError(
+                "acknowledge_legacy_tombstones entries must be cook event ids"
+            )
+        if len(set(value)) != len(value):
+            raise ValueError(
+                "acknowledge_legacy_tombstones entries must be unique"
+            )
+        return value
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -862,6 +885,13 @@ class CookedMeal(BaseModel):
         if self.replaces_event_id is not None and self.occurrence_id is None:
             raise ValueError(
                 "replaces_event_id requires a linked occurrence_id and expected_revision"
+            )
+        if (
+            self.acknowledge_legacy_tombstones is not None
+            and self.replaces_event_id is None
+        ):
+            raise ValueError(
+                "acknowledge_legacy_tombstones requires replaces_event_id"
             )
 
     class Config:
@@ -1377,6 +1407,9 @@ def add_history(payload: CookedMeal):
             occurrence_id=payload.occurrence_id,
             expected_revision=payload.expected_revision,
             replaces_event_id=payload.replaces_event_id,
+            acknowledge_legacy_tombstones=(
+                payload.acknowledge_legacy_tombstones
+            ),
             actor_type="user",
             surface_kind="web",
             dish_repository=_dish_repository(),

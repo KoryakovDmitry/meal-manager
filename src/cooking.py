@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import uuid
 from contextlib import ExitStack
 from datetime import date, datetime
@@ -301,6 +302,27 @@ def _unique_lineage_tip(events, lineage_children):
     return tips[0]
 
 
+def _event_is_lineage_ancestor(event, target, history_by_id, lineage_children):
+    """True when ``event`` is a chain ancestor of ``target``."""
+    current = target
+    visited = set()
+    while current is not None:
+        if current.id == event.id:
+            return True
+        if current.id in visited:
+            return False
+        visited.add(current.id)
+        provenance = current.provenance
+        if (
+            isinstance(provenance, dict)
+            and provenance.get("source") == "cook_event_correction"
+        ):
+            current = history_by_id.get(provenance["replaces_event_id"])
+        else:
+            current = None
+    return False
+
+
 def _reconcile_replacement_leftovers(
     *,
     plan,
@@ -378,6 +400,7 @@ def _register_cooked_once(
     actual_portions=UNSET,
     actual_yield_portions=UNSET,
     replaces_event_id=None,
+    acknowledge_legacy_tombstones=None,
     actor_type="agent",
     surface_kind="native_tool",
     dish_repository=dish_repo,
@@ -406,6 +429,26 @@ def _register_cooked_once(
         "actual_portions": _request_field(actual_portions),
         "actual_yield_portions": _request_field(actual_yield_portions),
     }
+    if acknowledge_legacy_tombstones is not None and replaces_event_id is None:
+        raise ValueError(
+            "acknowledge_legacy_tombstones requires replaces_event_id"
+        )
+    if acknowledge_legacy_tombstones is not None:
+        if (
+            not isinstance(acknowledge_legacy_tombstones, list)
+            or not acknowledge_legacy_tombstones
+            or any(
+                not isinstance(item, str)
+                or re.fullmatch(r"cook_[0-9a-f]{24,32}", item) is None
+                for item in acknowledge_legacy_tombstones
+            )
+            or len(set(acknowledge_legacy_tombstones))
+                != len(acknowledge_legacy_tombstones)
+        ):
+            raise ValueError(
+                "acknowledge_legacy_tombstones must be a non-empty list of "
+                "unique cook event ids"
+            )
     if cooked_at is not UNSET and cooked_at is not None and (
         not isinstance(cooked_at, str) or len(cooked_at) > 100
     ):
@@ -448,6 +491,7 @@ def _register_cooked_once(
             history_by_id, lineage_children = validate_event_lineage(history_events)
             replaced_event = None
             replacement_target_was_active = False
+            unverified_tombstones = []
             dish = None
             if replaces_event_id is not None:
                 if not explicit_occurrence_id:
@@ -540,6 +584,35 @@ def _register_cooked_once(
                 if replaced_event.plan_occurrence_id != occurrence_id:
                     raise ValueError(
                         "replacement target belongs to another plan occurrence"
+                    )
+                unverified_tombstones = [
+                    event.id
+                    for event in linked_events
+                    if (
+                        event.id != replaced_event.id
+                        and event.plan_occurrence_id == occurrence_id
+                        and not (
+                            isinstance(event.provenance, dict)
+                            and event.provenance.get("source")
+                                == "cook_event_correction"
+                        )
+                        and not _event_is_lineage_ancestor(
+                            event, replaced_event, history_by_id,
+                            lineage_children,
+                        )
+                    )
+                ]
+                acknowledged = set(acknowledge_legacy_tombstones or [])
+                if unverified_tombstones and not (
+                    set(unverified_tombstones) <= acknowledged
+                ):
+                    raise ValueError(
+                        "linked occurrence has unverified legacy cooking "
+                        "events; acknowledge_legacy_tombstones must list "
+                        "them explicitly: "
+                        + ", ".join(sorted(
+                            set(unverified_tombstones) - acknowledged
+                        ))
                     )
                 if replaced_event.id in lineage_children:
                     child = history_by_id[lineage_children[replaced_event.id]]
@@ -663,6 +736,9 @@ def _register_cooked_once(
                         "root_event_id": root_event_id,
                         "effects_origin_event_id": effects_origin_event_id,
                         "request_fingerprint": correction_fingerprint,
+                        "acknowledged_legacy_event_ids": sorted(
+                            unverified_tombstones
+                        ),
                     }
                     if replaced_event is not None else None
                 ),

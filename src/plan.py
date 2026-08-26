@@ -209,6 +209,26 @@ class MealEntry:
             raise ValueError(
                 "actual_yield_portions cannot be below actual_portions served"
             )
+        if self.status == "cooked":
+            if (
+                self.cook_event_id is None
+                or self.cooked_on is None
+                or self.cooked_time_precision not in ("date", "datetime")
+                or (self.cooked_time_precision == "datetime"
+                    and self.cooked_at is None)
+            ):
+                raise ValueError(
+                    "cooked meal occurrences require canonical cook linkage"
+                )
+        elif (
+            self.cook_event_id is not None
+            or self.cooked_at is not None
+            or self.cooked_on is not None
+            or self.cooked_time_precision is not None
+        ):
+            raise ValueError(
+                "non-cooked meal occurrences cannot carry cooked state"
+            )
 
     @property
     def portions_planned(self):

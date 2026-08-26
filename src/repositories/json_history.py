@@ -63,9 +63,23 @@ def validate_event_lineage(events):
             "root_event_id",
             "effects_origin_event_id",
             "request_fingerprint",
+            "acknowledged_legacy_event_ids",
         }
         if set(provenance) != expected_fields:
             raise ValueError("cooking correction provenance fields are invalid")
+        acknowledged_ids = provenance["acknowledged_legacy_event_ids"]
+        if (
+            not isinstance(acknowledged_ids, list)
+            or any(
+                not isinstance(item, str)
+                or re.fullmatch(r"cook_[0-9a-f]{24,32}", item) is None
+                for item in acknowledged_ids
+            )
+            or len(set(acknowledged_ids)) != len(acknowledged_ids)
+        ):
+            raise ValueError(
+                "cooking correction acknowledged legacy ids are invalid"
+            )
         predecessor_id = provenance["replaces_event_id"]
         root_id = provenance["root_event_id"]
         effects_origin_id = provenance["effects_origin_event_id"]
@@ -111,8 +125,33 @@ def validate_event_lineage(events):
         parents[event.id] = predecessor_id
         roots_by_occurrence.setdefault(event.plan_occurrence_id, set()).add(root_id)
 
-    if any(len(roots) > 1 for roots in roots_by_occurrence.values()):
-        raise ValueError("linked occurrence has disconnected correction chains")
+    plain_rooted = {}
+    acknowledged_by_occurrence = {}
+    for event in events:
+        provenance = event.provenance
+        if (
+            isinstance(provenance, dict)
+            and provenance.get("source") == "cook_event_correction"
+        ):
+            occurrence = event.plan_occurrence_id
+            if occurrence is not None:
+                acknowledged_by_occurrence.setdefault(occurrence, set()).update(
+                    provenance["acknowledged_legacy_event_ids"]
+                )
+            continue
+        if event.plan_occurrence_id is None:
+            continue
+        plain_rooted.setdefault(event.plan_occurrence_id, set()).add(event.id)
+    for occurrence_id, plain_roots in plain_rooted.items():
+        correction_roots = roots_by_occurrence.get(occurrence_id, set())
+        allowed = (
+            correction_roots
+            | acknowledged_by_occurrence.get(occurrence_id, set())
+        )
+        if correction_roots and not plain_roots <= allowed:
+            raise ValueError(
+                "linked occurrence has disconnected correction chains"
+            )
     for event_id in parents:
         seen = set()
         current = event_id

@@ -36,6 +36,25 @@ _TERMINAL_MARKERS = ("commit.json", "abort.json", "conflict.json")
 _AUDIT_TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
+_RAW_EVENT_FIELDS = {"event_type", "entity"}
+_CANONICAL_EVENT_FIELDS = {
+    "schema_version",
+    "event_id",
+    "transaction_id",
+    "operation_id",
+    "sequence",
+    "operation",
+    "occurred_at",
+    "actor",
+    "surface",
+    "correlation_id",
+    "causation_id",
+    "redaction_policy",
+}
+
+
+def _is_exact_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 class AuditConflictError(RuntimeError):
@@ -700,8 +719,18 @@ class AuditTransactionManager:
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
                 raise AuditConflictError("audit target must be a regular file")
             descriptor = os.open(
-                name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent,
             )
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                os.close(descriptor)
+                raise AuditConflictError("audit target identity changed")
             with os.fdopen(descriptor, "rb") as handle:
                 return handle.read()
         finally:
@@ -766,28 +795,100 @@ class AuditTransactionManager:
             if owns_parent:
                 os.close(parent)
 
-    def _validate_event(self, event):
+    def _assert_manifest_parents(self, targets, target_parents):
+        """Require recovery target parents to match prepare-time identity."""
+        for target in targets:
+            manifest_parent = target.get("parent_dir")
+            if manifest_parent is None:
+                continue
+            parent_fd, _name = target_parents[target["relative_path"]]
+            current = os.fstat(parent_fd)
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or current.st_dev != manifest_parent["dev"]
+                or current.st_ino != manifest_parent["ino"]
+            ):
+                raise AuditConflictError(
+                    "audit target parent identity changed since prepare"
+                )
+
+    @staticmethod
+    def _validate_context(context):
+        if not isinstance(context, dict):
+            raise ValueError("audit context must be an object")
+        required = {"actor", "surface"}
+        allowed = required | {"correlation_id", "causation_id"}
+        actor = context.get("actor")
+        surface = context.get("surface")
+        if (
+            not required.issubset(context)
+            or not set(context).issubset(allowed)
+            or not isinstance(actor, dict)
+            or set(actor) != {"type"}
+            or not isinstance(actor.get("type"), str)
+            or not actor["type"]
+            or not isinstance(surface, dict)
+            or set(surface) not in ({"kind"}, {"kind", "operation"})
+            or not isinstance(surface.get("kind"), str)
+            or not surface["kind"]
+            or (
+                "operation" in surface
+                and (
+                    not isinstance(surface["operation"], str)
+                    or not surface["operation"]
+                )
+            )
+            or (
+                "correlation_id" in context
+                and (
+                    not isinstance(context["correlation_id"], str)
+                    or not context["correlation_id"]
+                )
+            )
+            or (
+                context.get("causation_id") is not None
+                and not isinstance(context.get("causation_id"), str)
+            )
+        ):
+            raise ValueError("audit context fields are invalid")
+
+    def _validate_event(self, event, *, canonical=False):
         if not isinstance(event, dict):
             raise ValueError("audit events must be objects")
+        content_fields = {key for key in ("payload", "change") if key in event}
+        expected = _RAW_EVENT_FIELDS | content_fields
+        if canonical:
+            expected |= _CANONICAL_EVENT_FIELDS
+        if len(content_fields) != 1 or set(event) != expected:
+            raise ValueError("audit event fields are invalid")
         if not isinstance(event.get("event_type"), str) or not event["event_type"]:
             raise ValueError("audit event_type is required")
         entity = event.get("entity")
         if (
             not isinstance(entity, dict)
+            or set(entity) != {"type", "id"}
             or not isinstance(entity.get("type"), str)
             or not entity.get("type")
             or not isinstance(entity.get("id"), str)
             or not entity.get("id")
         ):
             raise ValueError("audit event entity requires type and id")
-        if ("payload" in event) == ("change" in event):
-            raise ValueError("audit event requires exactly one of payload or change")
+        content = event[next(iter(content_fields))]
+        if not isinstance(content, dict):
+            raise ValueError("audit event payload/change must be an object")
+        if canonical:
+            self._validate_context({
+                "actor": event.get("actor"),
+                "surface": event.get("surface"),
+                "correlation_id": event.get("correlation_id"),
+                "causation_id": event.get("causation_id"),
+            })
 
     def _validate_prepared_event(
         self, event, *, transaction_id, sequence, operation
     ):
         try:
-            self._validate_event(event)
+            self._validate_event(event, canonical=True)
             _month(event.get("occurred_at"))
         except (KeyError, TypeError, ValueError) as exc:
             raise AuditConflictError("audit event metadata is corrupt") from exc
@@ -797,13 +898,14 @@ class AuditTransactionManager:
         correlation_id = event.get("correlation_id")
         causation_id = event.get("causation_id")
         if (
-            event.get("schema_version") != 1
+            not _is_exact_int(event.get("schema_version"))
+            or event.get("schema_version") != 1
             or not isinstance(event_id, str)
             or re.fullmatch(r"evt_[0-9a-f]{32}", event_id) is None
             or event.get("transaction_id") != transaction_id
             or event.get("operation_id") != transaction_id
+            or not _is_exact_int(event.get("sequence"))
             or event.get("sequence") != sequence
-            or isinstance(event.get("sequence"), bool)
             or event.get("operation") != operation
             or not isinstance(actor, dict)
             or not isinstance(actor.get("type"), str)
@@ -819,12 +921,9 @@ class AuditTransactionManager:
             raise AuditConflictError("audit event metadata is corrupt")
 
     def _prepare_events(self, events, transaction_id, operation, context, occurred_at):
-        actor = context.get("actor") if isinstance(context, dict) else None
-        surface = context.get("surface") if isinstance(context, dict) else None
-        if not isinstance(actor, dict) or not isinstance(actor.get("type"), str):
-            raise ValueError("audit context actor.type is required")
-        if not isinstance(surface, dict) or not isinstance(surface.get("kind"), str):
-            raise ValueError("audit context surface.kind is required")
+        self._validate_context(context)
+        actor = context["actor"]
+        surface = context["surface"]
         prepared = []
         for sequence, raw in enumerate(events, 1):
             self._validate_event(raw)
@@ -900,6 +999,7 @@ class AuditTransactionManager:
             before = self._read_target(
                 relative, pinned=target_parents[relative]
             )
+            parent_stat = os.fstat(target_parents[relative][0])
             before_name = f"targets/{index:03d}.before"
             after_name = f"targets/{index:03d}.after"
             if before is not None:
@@ -914,6 +1014,10 @@ class AuditTransactionManager:
                 "after_exists": after is not None,
                 "after_sha256": _sha256(after),
                 "after_blob": after_name if after is not None else None,
+                "parent_dir": {
+                    "dev": parent_stat.st_dev,
+                    "ino": parent_stat.st_ino,
+                },
             })
 
         prepare = {
@@ -1061,7 +1165,8 @@ class AuditTransactionManager:
         try:
             descriptor = os.open(
                 name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
                 dir_fd=directory_fd,
             )
             info = os.fstat(descriptor)
@@ -1095,7 +1200,8 @@ class AuditTransactionManager:
                 descriptor = child
             file_fd = os.open(
                 pure.name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
                 dir_fd=descriptor,
             )
             info = os.fstat(file_fd)
@@ -1133,9 +1239,14 @@ class AuditTransactionManager:
         operation = prepare.get("operation")
         context = prepare.get("context")
         version = prepare.get("schema_version")
+        try:
+            self._validate_context(context)
+        except ValueError as exc:
+            raise AuditConflictError("audit prepare context is corrupt") from exc
         if (
             not required_prepare_fields.issubset(prepare)
             or not set(prepare).issubset(allowed_prepare_fields)
+            or not _is_exact_int(version)
             or version not in {1, 2}
             or (version == 1 and set(prepare) != required_prepare_fields)
             or (version == 2 and set(prepare) != allowed_prepare_fields)
@@ -1143,7 +1254,6 @@ class AuditTransactionManager:
             or prepare.get("state") != "prepared"
             or not isinstance(operation, str)
             or not operation
-            or not isinstance(context, dict)
         ):
             raise AuditConflictError("audit prepare metadata is corrupt")
         predecessor = prepare.get("predecessor_transaction_id")
@@ -1183,9 +1293,32 @@ class AuditTransactionManager:
         if expected_month is not None and _month(occurred_at) != expected_month:
             raise AuditConflictError("audit transaction is in the wrong month directory")
         relative_paths = []
+        target_fields_v1 = {
+            "relative_path",
+            "before_exists",
+            "before_sha256",
+            "before_blob",
+            "after_exists",
+            "after_sha256",
+            "after_blob",
+        }
+        target_fields_v2 = target_fields_v1 | {"parent_dir"}
         for index, target in enumerate(targets):
-            if not isinstance(target, dict):
+            expected_fields = (
+                target_fields_v2 if version == 2 else target_fields_v1
+            )
+            if not isinstance(target, dict) or set(target) != expected_fields:
                 raise AuditConflictError("audit target manifest is corrupt")
+            manifest_parent = target.get("parent_dir")
+            if manifest_parent is not None and (
+                not isinstance(manifest_parent, dict)
+                or set(manifest_parent) != {"dev", "ino"}
+                or not _is_exact_int(manifest_parent.get("dev"))
+                or not _is_exact_int(manifest_parent.get("ino"))
+            ):
+                raise AuditConflictError(
+                    "audit target parent identity is corrupt"
+                )
             try:
                 relative = self._relative_target(
                     target["relative_path"], allow_legacy_recovery=True
@@ -1265,13 +1398,14 @@ class AuditTransactionManager:
         target_states = record.get("target_states")
         if (
             not isinstance(record, dict)
+            or not _is_exact_int(record.get("schema_version"))
             or record.get("schema_version") != 1
             or record.get("transaction_id") != transaction_id
             or record.get("state") != expected_state
             or not required_fields.issubset(record)
             or not set(record).issubset(required_fields | optional_fields)
             or any(
-                key in record and not isinstance(record[key], bool)
+                key in record and record[key] is not True
                 for key in ("recovered", "rolled_back_mixed_state")
             )
             or (
@@ -1360,6 +1494,7 @@ class AuditTransactionManager:
     def _recover_unlocked(self):
         recovered = []
         committed_records = []
+        seen_transaction_ids = set()
         for (
             month_name,
             transaction_name,
@@ -1367,13 +1502,30 @@ class AuditTransactionManager:
             transaction_fd,
             transaction_dir,
         ) in self._iter_transaction_directories():
+            if transaction_name in seen_transaction_ids:
+                raise AuditConflictError(
+                    "audit transaction IDs are not globally unique"
+                )
+            seen_transaction_ids.add(transaction_name)
             prepare_path = transaction_dir / "prepare.json"
             if not self._regular_entry_exists(
                 transaction_fd, "prepare.json", label="audit prepare record"
             ):
+                terminal_without_prepare = any(
+                    self._regular_entry_exists(
+                        transaction_fd,
+                        marker,
+                        label="audit terminal marker",
+                    )
+                    for marker in _TERMINAL_MARKERS
+                )
                 self._assert_transaction_directory_identity(
                     month_name, transaction_name, month_fd, transaction_fd
                 )
+                if terminal_without_prepare:
+                    raise AuditConflictError(
+                        "audit terminal marker has no prepare record"
+                    )
                 continue
             try:
                 prepare = json.loads(
@@ -1441,6 +1593,7 @@ class AuditTransactionManager:
             with self._pin_target_parents(
                 target["relative_path"] for target in targets
             ) as target_parents:
+                self._assert_manifest_parents(targets, target_parents)
                 states = self._target_states(targets, target_parents)
                 self._assert_transaction_directory_identity(
                     month_name, transaction_name, month_fd, transaction_fd

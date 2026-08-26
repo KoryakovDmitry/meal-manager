@@ -13,6 +13,7 @@ import gc
 import hashlib
 import importlib
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -5150,6 +5151,431 @@ def test_audit_hardening_blocks_parent_swap_and_corrupt_proof():
         check("partial terminal marker fails closed", partial_terminal_rejected)
 
 
+def test_audit_canonical_records_are_closed_and_exactly_typed():
+    print("\n-- strict canonical audit record schema --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "strict-schema"},
+        "payload": {},
+    }
+    context = {
+        "actor": {"type": "test"},
+        "surface": {"kind": "test"},
+    }
+
+    def update_json(path, mutate):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        mutate(record)
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+    mutations = {
+        "float prepare version": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record.update(schema_version=2.0),
+        ),
+        "boolean prepare version": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record.update(schema_version=True),
+        ),
+        "float event version": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0].update(schema_version=1.0),
+        ),
+        "float event sequence": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0].update(sequence=1.0),
+        ),
+        "float terminal version": lambda tx: update_json(
+            tx / "commit.json",
+            lambda record: record.update(schema_version=1.0),
+        ),
+        "unknown event field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0].update(unexpected=True),
+        ),
+        "unknown entity field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0]["entity"].update(unexpected=True),
+        ),
+        "unknown actor field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0]["actor"].update(unexpected=True),
+        ),
+        "unknown surface field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0]["surface"].update(unexpected=True),
+        ),
+        "unknown target field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["targets"][0].update(unexpected=True),
+        ),
+        "unknown context field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["context"].update(unexpected=True),
+        ),
+        "false recovered marker": lambda tx: update_json(
+            tx / "commit.json",
+            lambda record: record.update(recovered=False),
+        ),
+    }
+    for label, mutate in mutations.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = audit_mod.AuditTransactionManager(root)
+            receipt = manager.commit(
+                operation="strict_schema_probe",
+                targets={"history.json": b'{}\n'},
+                events=[event],
+                context=context,
+            )
+            manager.close()
+            transaction_dir = next(
+                (root / "audit" / "transactions").glob(
+                    f"*/{receipt['transaction_id']}"
+                )
+            )
+            mutate(transaction_dir)
+            before = (root / "history.json").read_bytes()
+            reader = audit_mod.AuditTransactionManager(root)
+            try:
+                reader.list_events(limit=10)
+                rejected = False
+            except audit_mod.AuditConflictError:
+                rejected = True
+            finally:
+                reader.close()
+            check(f"canonical audit rejects {label}", (
+                rejected and (root / "history.json").read_bytes() == before
+            ))
+
+
+def test_audit_conflict_marker_and_transaction_namespace_are_corpus_wide():
+    print("\n-- audit conflict marker and transaction namespace --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "namespace"},
+        "payload": {},
+    }
+    context = {
+        "actor": {"type": "test"},
+        "surface": {"kind": "test"},
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        target = root / "history.json"
+        target.write_bytes(b'{"state":"before"}\n')
+
+        def stop_after_prepare(stage):
+            if stage == "after_prepare":
+                raise RuntimeError("prepared")
+
+        writer = audit_mod.AuditTransactionManager(
+            root, fault_injector=stop_after_prepare
+        )
+        try:
+            writer.commit(
+                operation="sticky_conflict_probe",
+                targets={"history.json": b'{"state":"after"}\n'},
+                events=[event],
+                context=context,
+            )
+        except RuntimeError:
+            pass
+        transaction_id = writer.last_transaction_id
+        writer.close()
+        target.write_bytes(b'{"state":"unknown"}\n')
+        detector = audit_mod.AuditTransactionManager(root)
+        try:
+            detector.recover()
+        except audit_mod.AuditConflictError:
+            pass
+        detector.close()
+        transaction_dir = next(
+            (root / "audit" / "transactions").glob(f"*/{transaction_id}")
+        )
+        check("unknown state persisted a conflict marker", (
+            (transaction_dir / "conflict.json").is_file()
+        ))
+        (transaction_dir / "prepare.json").unlink()
+        poisoned = audit_mod.AuditTransactionManager(root)
+        outcomes = []
+        for action in (
+            lambda: poisoned.recover(),
+            lambda: poisoned.commit(
+                operation="must_remain_poisoned",
+                targets={"history.json": b'{"state":"new"}\n'},
+                events=[event],
+                context=context,
+            ),
+        ):
+            try:
+                action()
+                outcomes.append(False)
+            except audit_mod.AuditConflictError:
+                outcomes.append(True)
+        poisoned.close()
+        check("deleting prepare cannot erase conflict poison", (
+            all(outcomes)
+            and target.read_bytes() == b'{"state":"unknown"}\n'
+            and (transaction_dir / "conflict.json").is_file()
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        receipt = manager.commit(
+            operation="global_transaction_id_probe",
+            targets={"history.json": b'{}\n'},
+            events=[event],
+            context=context,
+        )
+        manager.close()
+        original = next(
+            (root / "audit" / "transactions").glob(
+                f"*/{receipt['transaction_id']}"
+            )
+        )
+        duplicate = (
+            root / "audit" / "transactions" / "2026-09"
+            / receipt["transaction_id"]
+        )
+        duplicate.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(original, duplicate)
+        prepare_path = duplicate / "prepare.json"
+        prepare = json.loads(prepare_path.read_text(encoding="utf-8"))
+        prepare["prepared_at"] = "2026-09-01T00:00:00Z"
+        for item in prepare["events"]:
+            item["occurred_at"] = "2026-09-01T00:00:00Z"
+        prepare_path.write_text(json.dumps(prepare), encoding="utf-8")
+        (duplicate / "commit.json").unlink()
+        (duplicate / "abort.json").write_text(json.dumps({
+            "schema_version": 1,
+            "transaction_id": receipt["transaction_id"],
+            "state": "aborted",
+            "aborted_at": "2026-09-01T00:00:01Z",
+            "recovered": True,
+        }), encoding="utf-8")
+        reader = audit_mod.AuditTransactionManager(root)
+        try:
+            reader.recover()
+            rejected = False
+        except audit_mod.AuditConflictError:
+            rejected = True
+        finally:
+            reader.close()
+        check("transaction IDs are unique across committed and aborted corpus", (
+            rejected and (root / "history.json").read_bytes() == b'{}\n'
+        ))
+
+
+def test_audit_recovery_parent_substitution_and_fifo_reads_fail_closed():
+    print("\n-- audit recovery parent identity and FIFO reads --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    core_mod = importlib.import_module(".src", _PLUGIN_DIR.name)
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "identity"},
+        "payload": {},
+    }
+    context = {"actor": {"type": "test"}, "surface": {"kind": "test"}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plans = root / "plans"
+        plans.mkdir()
+        (root / "history.json").write_bytes(b'{"v":"before"}\n')
+        (plans / "2026-W33.json").write_bytes(b'{"p":"before"}\n')
+
+        def stop_after_prepare(stage):
+            if stage == "after_prepare":
+                raise RuntimeError("prepared")
+
+        writer = audit_mod.AuditTransactionManager(
+            root, fault_injector=stop_after_prepare
+        )
+        try:
+            writer.commit(
+                operation="parent_identity_probe",
+                targets={
+                    "history.json": b'{"v":"after"}\n',
+                    "plans/2026-W33.json": b'{"p":"after"}\n',
+                },
+                events=[event],
+                context=context,
+            )
+        except RuntimeError:
+            pass
+        writer.close()
+        original = root / "plans-original"
+        plans.rename(original)
+        plans.mkdir()
+        substitute = plans / "2026-W33.json"
+        substitute.write_bytes(b'{"p":"after"}\n')
+        reader = audit_mod.AuditTransactionManager(root)
+        try:
+            reader.recover()
+            rejected = False
+        except audit_mod.AuditConflictError:
+            rejected = True
+        finally:
+            reader.close()
+        check("recovery rejects substituted target parent directory", (
+            rejected
+            and substitute.read_bytes() == b'{"p":"after"}\n'
+            and (original / "2026-W33.json").read_bytes() == b'{"p":"before"}\n'
+        ))
+
+    def read_target_in_process(root, relative, queue):
+        manager = audit_mod.AuditTransactionManager(root)
+        try:
+            queue.put(manager._read_target(relative))
+        except Exception as exc:
+            queue.put(type(exc).__name__)
+        finally:
+            manager.close()
+
+    def read_unscoped_in_process(root, queue):
+        try:
+            queue.put(core_mod.read_json_file(root / "history.json", missing=None))
+        except Exception as exc:
+            queue.put(type(exc).__name__)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        os.mkfifo(root / "history.json")
+        outcomes = {}
+        for label, runner in (
+            ("audited", read_target_in_process),
+            ("unscoped", read_unscoped_in_process),
+        ):
+            ctx = multiprocessing.get_context("fork")
+            queue = ctx.Queue()
+            process = ctx.Process(
+                target=runner, args=(root, "history.json", queue)
+                if label == "audited" else (root, queue)
+            )
+            process.start()
+            process.join(5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+                outcomes[label] = "HUNG"
+            else:
+                outcomes[label] = (
+                    queue.get() if not queue.empty() else "CRASHED"
+                )
+        check("FIFO-substituted targets fail fast on every read path", (
+            outcomes == {
+                "audited": "AuditConflictError",
+                "unscoped": "ValueError",
+            }
+        ))
+
+
+def test_correction_rejects_unverified_legacy_tombstones_until_acknowledged():
+    print("\n-- correction legacy tombstone acknowledgment --")
+    plan_mod = importlib.import_module(".src.plan", _PLUGIN_DIR.name)
+    hist_mod = importlib.import_module(
+        ".src.repositories.json_history", _PLUGIN_DIR.name
+    )
+    cook_mod = importlib.import_module(".src.cooking", _PLUGIN_DIR.name)
+    dish_repo_mod = importlib.import_module(
+        ".src.repositories.json_dish", _PLUGIN_DIR.name
+    )
+    fridge_repo_mod = importlib.import_module(
+        ".src.repositories.json_fridge", _PLUGIN_DIR.name
+    )
+    plan_repo_mod = importlib.import_module(
+        ".src.repositories.json_plan", _PLUGIN_DIR.name
+    )
+    prep_repo_mod = importlib.import_module(
+        ".src.repositories.json_prep_item", _PLUGIN_DIR.name
+    )
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+
+    def event(identifier, active):
+        return hist_mod.CookingEvent(
+            id=identifier,
+            dish_name_snapshot="soup",
+            cooked_on="2026-08-11",
+            time_precision="date",
+            recorded_at="2026-08-11T10:00:00Z",
+            plan_occurrence_id="mealocc_probe",
+            retracted_at=None if active else "2026-08-11T11:00:00Z",
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp)
+        history = hist_mod.JsonHistoryRepository(data / "history.json")
+        plans = plan_repo_mod.JsonPlanRepository(data / "plans")
+        dishes = dish_repo_mod.JsonDishRepository(data / "dishes.json")
+        fridge = fridge_repo_mod.JsonFridgeRepository(data / "fridge.json")
+        prep = prep_repo_mod.JsonPrepItemRepository(data / "prep_items.json")
+        manager = audit_mod.AuditTransactionManager(data)
+        old = event("cook_" + "a" * 24, False)
+        current = event("cook_" + "b" * 24, True)
+        history.save_events([old, current])
+        meal = plan_mod.MealEntry(
+            dish="soup",
+            occurrence_id="mealocc_probe",
+            root_occurrence_id="mealocc_probe",
+            status="cooked",
+            planned_for="2026-08-10",
+            revision=2,
+            cooked_on="2026-08-11",
+            cooked_time_precision="date",
+            cook_event_id=current.id,
+        )
+        plan = plan_mod.WeekPlan(
+            week_id="2026-W33",
+            status="active",
+            days={"mon": plan_mod.DayPlan(meals=[meal])},
+        )
+        plans.save(plan)
+        current_id = current.id
+        old_id = old.id
+        try:
+            cook_mod.register_cooked(
+                dish_name="soup",
+                occurrence_id="mealocc_probe",
+                expected_revision=2,
+                replaces_event_id=current_id,
+                dish_repository=dishes,
+                fridge_repository=fridge,
+                history_repository=history,
+                plan_repository=plans,
+                prep_repository=prep,
+                audit_transaction_manager=manager,
+            )
+        except ValueError as exc:
+            rejected = "acknowledge_legacy_tombstones" in str(exc)
+        else:
+            rejected = False
+        check("correction fails closed on unverified legacy tombstones", rejected)
+        result = cook_mod.register_cooked(
+            dish_name="soup",
+            occurrence_id="mealocc_probe",
+            expected_revision=2,
+            replaces_event_id=current_id,
+            acknowledge_legacy_tombstones=[old_id],
+            dish_repository=dishes,
+            fridge_repository=fridge,
+            history_repository=history,
+            plan_repository=plans,
+            prep_repository=prep,
+            audit_transaction_manager=manager,
+        )
+        events = history.load_events(strict=True)
+        check("acknowledged correction commits exactly one active event", (
+            result["corrected"] is True
+            and sum(item.active for item in events) == 1
+            and result["replaces_event_id"] == current_id
+        ))
+
+
 def test_audit_conflict_journal_projection_and_identity_regressions():
     print("\n-- audit conflict/journal/projection identity regressions --")
     audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
@@ -5946,6 +6372,10 @@ def main():
         test_audit_recovery_exports_committed_event_after_export_crash()
         test_audit_hardening_rejects_symlinks_and_repairs_projection()
         test_audit_hardening_blocks_parent_swap_and_corrupt_proof()
+        test_audit_canonical_records_are_closed_and_exactly_typed()
+        test_audit_conflict_marker_and_transaction_namespace_are_corpus_wide()
+        test_audit_recovery_parent_substitution_and_fifo_reads_fail_closed()
+        test_correction_rejects_unverified_legacy_tombstones_until_acknowledged()
         test_audit_conflict_journal_projection_and_identity_regressions()
         test_pinned_audit_lock_fork_and_poison_regressions()
         test_unscoped_repository_reads_and_awareness_fail_closed()
