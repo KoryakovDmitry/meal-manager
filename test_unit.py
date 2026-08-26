@@ -755,9 +755,13 @@ def test_json_file_lock_cleans_up_after_unlock_failure():
 # ── Weekly plan model tests ──
 
 _plan_mod = importlib.import_module(".src.plan", _PLUGIN_DIR.name)
+_history_mod = importlib.import_module(
+    ".src.repositories.json_history", _PLUGIN_DIR.name
+)
 MealEntry = _plan_mod.MealEntry
 DayPlan = _plan_mod.DayPlan
 WeekPlan = _plan_mod.WeekPlan
+CookingEvent = _history_mod.CookingEvent
 
 
 def test_meal_entry_validation():
@@ -775,6 +779,48 @@ def test_meal_entry_validation():
         check("rejects blank dish reference", False)
     except ValueError:
         check("rejects blank dish reference", True)
+
+
+def test_known_yield_cannot_be_below_served_in_canonical_models():
+    for label, factory in (
+        (
+            "history event",
+            lambda: CookingEvent(
+                id="cook_test_yield",
+                dish_name_snapshot="soup",
+                cooked_on="2026-08-12",
+                time_precision="date",
+                recorded_at="2026-08-12T20:00:00Z",
+                actual_portions=5,
+                actual_yield_portions=2,
+            ),
+        ),
+        (
+            "plan occurrence",
+            lambda: MealEntry(
+                dish="soup",
+                actual_portions=5,
+                actual_yield_portions=2,
+            ),
+        ),
+    ):
+        try:
+            factory()
+            check(f"{label} rejects yield below served", False)
+        except ValueError:
+            check(f"{label} rejects yield below served", True)
+
+    CookingEvent(
+        id="cook_unknown_yield",
+        dish_name_snapshot="soup",
+        cooked_on="2026-08-12",
+        time_precision="date",
+        recorded_at="2026-08-12T20:00:00Z",
+        actual_portions=5,
+        actual_yield_portions=None,
+    )
+    MealEntry(dish="soup", actual_portions=None, actual_yield_portions=2)
+    check("unknown served or yield remains valid", True)
 
 
 def test_week_plan_defaults_all_days():
@@ -812,6 +858,153 @@ def test_week_plan_roundtrip():
     check("plan prep normalized", restored.prep == ["hybrid meatballs"])
     check("plan leftovers retained", restored.leftovers["soup"]["remaining"] == 2)
     check("plan shopping retained", restored.shopping["items"][0]["ingredient"] == "carrot")
+
+
+def test_week_plan_rejects_malformed_leftover_projection():
+    structured = {
+        "dish": "soup",
+        "portions": 2,
+        "consumed_portions": 1,
+        "source_occurrence_id": "mealocc_test",
+        "source_cook_event_id": "cook_test",
+        "created_at": "2026-08-11T00:00:00Z",
+    }
+    meal = MealEntry(
+        "soup",
+        occurrence_id="mealocc_test",
+        root_occurrence_id="mealocc_test",
+        status="cooked",
+        planned_for="2026-07-20",
+        revision=1,
+        cooked_on="2026-08-11",
+        cooked_time_precision="date",
+        cook_event_id="cook_test",
+        leftover_lot_ids=["leftover_test"],
+    )
+    valid = WeekPlan(
+        week_id="2026-W30",
+        days={"mon": DayPlan(meals=[meal])},
+        leftovers={"leftover_test": structured},
+    ).to_dict()
+    WeekPlan.from_dict(valid)
+    corruptions = {
+        "non-object leftovers": lambda raw: raw.update(leftovers=[]),
+        "consumed above produced": lambda raw: raw["leftovers"]["leftover_test"].update(
+            consumed_portions=3
+        ),
+        "wrong lot source event": lambda raw: raw["leftovers"]["leftover_test"].update(
+            source_cook_event_id="cook_other"
+        ),
+        "duplicate linked lot ID": lambda raw: raw["days"]["mon"]["meals"][0].update(
+            leftover_lot_ids=["leftover_test", "leftover_test"]
+        ),
+        "multiple structured lots for one occurrence": lambda raw: (
+            raw["leftovers"].update({"leftover_second": {
+                **raw["leftovers"]["leftover_test"],
+            }}),
+            raw["days"]["mon"]["meals"][0].update(
+                leftover_lot_ids=["leftover_test", "leftover_second"]
+            ),
+        ),
+    }
+    for label, mutate in corruptions.items():
+        raw = copy.deepcopy(valid)
+        mutate(raw)
+        try:
+            WeekPlan.from_dict(raw)
+            check(f"rejects {label}", False)
+        except ValueError:
+            check(f"rejects {label}", True)
+
+
+def test_current_cooking_persistence_rejects_noncanonical_ids_and_fields():
+    print("\n-- strict current cooking persistence --")
+
+    def rejects(label, factory):
+        try:
+            factory()
+            check(label, False)
+        except ValueError:
+            check(label, True)
+
+    for bad_id in ("cook_", "cook_" + "x" * 96):
+        rejects(
+            f"history rejects noncanonical event ID {len(bad_id)}",
+            lambda bad_id=bad_id: CookingEvent(
+                id=bad_id,
+                dish_name_snapshot="soup",
+                cooked_on="2026-08-12",
+                recorded_at="2026-08-12T20:00:00Z",
+            ),
+        )
+
+    for bad_id in ("mealocc_", "mealocc_" + "x" * 93):
+        rejects(
+            f"history rejects noncanonical occurrence ID {len(bad_id)}",
+            lambda bad_id=bad_id: CookingEvent(
+                id="cook_valid",
+                dish_name_snapshot="soup",
+                cooked_on="2026-08-12",
+                recorded_at="2026-08-12T20:00:00Z",
+                plan_occurrence_id=bad_id,
+            ),
+        )
+        rejects(
+            f"plan rejects noncanonical occurrence ID {len(bad_id)}",
+            lambda bad_id=bad_id: MealEntry(
+                dish="soup",
+                occurrence_id=bad_id,
+                root_occurrence_id=bad_id,
+            ),
+        )
+
+    predecessor = CookingEvent(
+        id="cook_predecessor",
+        dish_name_snapshot="soup",
+        cooked_on="2026-08-12",
+        recorded_at="2026-08-12T20:00:00Z",
+        retracted_at="2026-08-12T21:00:00Z",
+    )
+    correction = CookingEvent(
+        id="cook_replacement",
+        dish_name_snapshot="soup",
+        cooked_on="2026-08-12",
+        recorded_at="2026-08-12T21:00:00Z",
+        provenance={
+            "source": "cook_event_correction",
+            "replaces_event_id": predecessor.id,
+            "root_event_id": predecessor.id,
+            "effects_origin_event_id": predecessor.id,
+            "request_fingerprint": "sha256:" + "a" * 64,
+        },
+    )
+    rejects(
+        "correction provenance requires linked occurrence",
+        lambda: _history_mod.validate_event_lineage([predecessor, correction]),
+    )
+
+    valid_plan = WeekPlan(week_id="2026-W30").to_dict()
+    unknown_plan = copy.deepcopy(valid_plan)
+    unknown_plan["unexpected"] = True
+    rejects(
+        "current plan rejects unknown top-level fields",
+        lambda: WeekPlan.from_dict(unknown_plan),
+    )
+    unknown_day = copy.deepcopy(valid_plan)
+    unknown_day["days"]["mon"]["unexpected"] = True
+    rejects(
+        "current plan rejects unknown day fields",
+        lambda: WeekPlan.from_dict(unknown_day),
+    )
+    with_meal = WeekPlan(
+        week_id="2026-W30",
+        days={"mon": DayPlan(meals=[MealEntry("soup")])},
+    ).to_dict()
+    with_meal["days"]["mon"]["meals"][0]["unexpected"] = True
+    rejects(
+        "current plan rejects unknown meal fields",
+        lambda: WeekPlan.from_dict(with_meal),
+    )
 
 
 def test_week_plan_migrates_legacy_meal_to_stable_occurrence():
@@ -1070,7 +1263,13 @@ def test_build_plan_shopping_list_ignores_closed_occurrences():
     plan = WeekPlan(
         week_id="2026-W30",
         days={
-            "mon": DayPlan(meals=[MealEntry("soup", status="cooked")]),
+            "mon": DayPlan(meals=[MealEntry(
+                "soup",
+                status="cooked",
+                cooked_on="2026-07-13",
+                cooked_time_precision="date",
+                cook_event_id="cook_" + "1" * 24,
+            )]),
             "tue": DayPlan(meals=[MealEntry("soup", status="planned")]),
             "wed": DayPlan(meals=[MealEntry("soup", status="cancelled")]),
         },
@@ -1551,8 +1750,11 @@ def main():
     # ── Weekly plan model ──
     print("\n-- Weekly plan model --")
     test_meal_entry_validation()
+    test_known_yield_cannot_be_below_served_in_canonical_models()
     test_week_plan_defaults_all_days()
     test_week_plan_roundtrip()
+    test_week_plan_rejects_malformed_leftover_projection()
+    test_current_cooking_persistence_rejects_noncanonical_ids_and_fields()
     test_week_plan_migrates_legacy_meal_to_stable_occurrence()
     test_week_plan_invalid_status()
     test_week_plan_rejects_noncanonical_days()

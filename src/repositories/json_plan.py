@@ -10,10 +10,19 @@ import logging
 import threading
 from pathlib import Path
 
-from .. import atomic_delete_json, atomic_write_json
+from .. import (
+    atomic_delete_json,
+    atomic_write_json,
+    list_json_files,
+    read_json_file,
+)
 from ..plan import WeekPlan
 
 logger = logging.getLogger(__name__)
+
+
+class PlanDataError(ValueError):
+    """Raised when canonical weekly-plan storage is malformed."""
 
 
 class _PlanDirectoryLock:
@@ -75,18 +84,18 @@ class JsonPlanRepository:
 
     def load_strict(self, week_id: str) -> WeekPlan | None:
         path = self._path_for(week_id)
-        if not path.exists():
-            return None
+        missing = object()
         try:
-            with open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
+            data = read_json_file(path, missing=missing)
+            if data is missing:
+                return None
             plan = WeekPlan.from_dict(data)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError,
                 KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"invalid weekly plan '{week_id}': {exc}") from exc
+            raise PlanDataError(f"invalid weekly plan '{week_id}': {exc}") from exc
         expected_week = WeekPlan.normalize_week_id(week_id)
         if plan.week_id != expected_week:
-            raise ValueError(
+            raise PlanDataError(
                 f"weekly plan filename '{expected_week}' conflicts with '{plan.week_id}'"
             )
         return plan
@@ -94,13 +103,13 @@ class JsonPlanRepository:
     def load(self, week_id: str) -> WeekPlan | None:
         """Load a single week plan. Returns ``None`` if it doesn't exist."""
         path = self._path_for(week_id)
-        if not path.exists():
-            return None
+        missing = object()
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = read_json_file(path, missing=missing)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("Failed to load plan %s: %s", path.name, exc)
+            return None
+        if data is missing:
             return None
         try:
             plan = WeekPlan.from_dict(data)
@@ -130,17 +139,16 @@ class JsonPlanRepository:
             return atomic_delete_json(path)
 
     def list_weeks(self) -> list[dict]:
-        """List all week plans with their status, sorted by week_id descending."""
-        self.plans_dir.mkdir(parents=True, exist_ok=True)
+        """List all valid week plans, failing closed on semantic corruption."""
         result = []
-        for path in sorted(self.plans_dir.glob("*.json"), reverse=True):
+        for path in sorted(list_json_files(self.plans_dir), reverse=True):
             week_id = path.stem
             try:
                 WeekPlan.normalize_week_id(week_id)
             except ValueError:
                 logger.warning("Skipping non-ISO plan filename: %s", path.name)
                 continue
-            plan = self.load(week_id)
+            plan = self.load_strict(week_id)
             if plan is not None:
                 meal_count = sum(
                     len(plan.days[d].meals) for d in plan.days

@@ -2,7 +2,7 @@
 
 An intelligent meal planning and fridge inventory management system structured as an official Hermes plugin. It helps users decide what to cook for dinner and what to buy at the grocery store by analyzing their current fridge contents, recipe catalog, and cooking history.
 
-An AI assistant invokes the 47 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
+An AI assistant invokes the 50 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
 
 ---
 
@@ -144,7 +144,7 @@ Reply naturally — *"yes"*, *"skip"*, *"remove X"*, *"also add Y"*, or *"done"*
 
 ### As a Hermes Plugin
 
-The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 47 tools:
+The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 50 tools:
 
 | Tool | Purpose |
 |---|---|
@@ -161,8 +161,8 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `list_product_catalog` | Lists/searches all products by stock state and category, including recipe-only ingredients |
 | `set_product_category` | Assigns `product`, `prep`, or `ready_meal` without changing stock availability |
 | `replenish_product` | Returns an out-of-stock or recipe-only product to current inventory as a fresh categorized batch |
-| `register_cooked_meal` | Atomically records a stable cooking occurrence, completes a linked planned occurrence without deleting it, consumes stock/prep, and emits audit proof |
-| `delete_history_entry` | Retracts the latest active cooking occurrence while retaining immutable history and reopening a linked plan row |
+| `register_cooked_meal` | Atomically records a stable cooking occurrence, or replaces one physical cook's metadata via `replaces_event_id` without repeating stock/prep side effects |
+| `delete_history_entry` | Retracts an active cooking occurrence while retaining immutable history and reopening a linked plan row; it does not restore stock/prep |
 | `list_cooking_history` | Lists canonical cooking occurrences, stable IDs, plan links, yield, and corrections |
 | `list_audit_events` | Queries committed audit events by stable entity, event type, or time |
 | `list_fridge` | Returns the current fridge contents |

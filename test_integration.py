@@ -9,9 +9,15 @@ Usage:
     python3 test_integration.py
 """
 
+import gc
+import hashlib
 import importlib
 import json
+import multiprocessing
+import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -51,10 +57,11 @@ def _setup_tmp_data():
     """
     global _TMP_DATA_DIR
     _TMP_DATA_DIR = Path(tempfile.mkdtemp(prefix="meal_manager_test_"))
-    (_TMP_DATA_DIR / "sessions").mkdir(parents=True, exist_ok=True)
-    _repos_mod.configure(_TMP_DATA_DIR)
-    _dii_mod.configure(_TMP_DATA_DIR / "sessions")
     _seed()
+    _dii_mod.configure(_TMP_DATA_DIR / "sessions")
+    # Configure the repositories/audit manager last: audit lifetime pinning must
+    # observe the final sessions directory inode after fixture cleanup.
+    _repos_mod.configure(_TMP_DATA_DIR)
 
 
 def _teardown_tmp_data():
@@ -101,11 +108,15 @@ def _seed():
         encoding="utf-8",
     )
 
-    # Clean sessions on re-seed (single-test helpers may call _seed again).
+    # Clean sessions on re-seed without replacing the directory inode: the
+    # audit manager may already have pinned this domain directory for life.
     sessions = _TMP_DATA_DIR / "sessions"
-    if sessions.exists():
-        shutil.rmtree(sessions)
     sessions.mkdir(parents=True, exist_ok=True)
+    for child in sessions.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +142,23 @@ def check(label: str, condition: bool, detail: str = ""):
 
 def parse(raw: str) -> Any:
     return json.loads(raw)
+
+
+def audited_fixture(operation: str, callback):
+    """Run an intentional direct repository fixture write through audit."""
+    audit_context_mod = importlib.import_module(
+        ".src.audit.context", _PLUGIN_DIR.name
+    )
+    manager = importlib.import_module(
+        ".src.audit", _PLUGIN_DIR.name
+    ).audit_manager
+    with audit_context_mod.audit_scope(
+        operation=operation,
+        manager=manager,
+        actor_type="system",
+        surface_kind="test_fixture",
+    ):
+        return callback()
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +288,53 @@ def test_registered_update_fridge_schema_exposes_required_arguments():
         "registration does not mutate handler-owned schemas",
         discovered == originals,
     )
+    from jsonschema import Draft7Validator
+
+    correction_schema = ctx.tools["register_cooked_meal"]["parameters"]
+    validator = Draft7Validator(correction_schema)
+    valid_correction_shapes = [
+        {"dish_name": "dish"},
+        {
+            "dish_name": "dish",
+            "occurrence_id": "mealocc_x",
+            "expected_revision": 1,
+            "cooked_at": None,
+            "actual_portions": None,
+            "actual_yield_portions": None,
+            "replaces_event_id": None,
+        },
+        {
+            "dish_name": "dish",
+            "occurrence_id": "mealocc_x",
+            "expected_revision": 1,
+            "replaces_event_id": "cook_x",
+        },
+    ]
+    invalid_correction_shapes = [
+        {"dish_name": "dish", "replaces_event_id": "cook_x"},
+        {
+            "dish_name": "dish",
+            "occurrence_id": "mealocc_x",
+            "replaces_event_id": "cook_x",
+        },
+        {"dish_name": "dish", "occurrence_id": "mealocc_x"},
+        {"dish_name": "dish", "replaces_event_id": "cook_"},
+        {"dish_name": "dish", "replaces_event_id": "cook_" + "x" * 96},
+        {"dish_name": "dish", "occurrence_id": "mealocc_"},
+        {"dish_name": "dish", "occurrence_id": "mealocc_" + "x" * 93},
+        {"dish_name": "dish", "occurrence_id": "mealocc_x/path", "expected_revision": 1},
+        {"dish_name": "dish", "replaces_event_id": "cook_x/path"},
+        {"dish_name": "dish", "cooked_at": "x" * 101},
+        {"dish_name": "dish", "unexpected": True},
+    ]
+    check("native correction schema accepts valid ID/null shapes", all(
+        not list(validator.iter_errors(payload))
+        for payload in valid_correction_shapes
+    ))
+    check("native correction schema rejects malformed/overlong/unknown shapes", all(
+        list(validator.iter_errors(payload))
+        for payload in invalid_correction_shapes
+    ))
     check(
         "plugin registers inventory awareness before the LLM turn",
         "pre_llm_call" in ctx.hooks,
@@ -531,7 +606,12 @@ def test_structured_repository_integrity_and_compatibility():
             setattr(web_mod, "FRIDGE_PATH", Path(data_path))
             start.wait()
             for number in range(20):
-                web_mod.add_to_fridge(web_mod.FridgeAddRemove(ingredient=f"web-race-{number}"))
+                # This test isolates repository cross-process locking. Bypass
+                # only the outer audit decorator so direct repository peer
+                # writes are not intentionally classified as audit tampering.
+                web_mod.add_to_fridge.__wrapped__(
+                    web_mod.FridgeAddRemove(ingredient=f"web-race-{number}")
+                )
 
         def native_add_worker(data_path):
             worker_repo = repo_mod.JsonFridgeRepository(Path(data_path))
@@ -566,7 +646,7 @@ def test_structured_repository_integrity_and_compatibility():
             web_mod = importlib.import_module(f"{_PLUGIN_DIR.name}.web.main")
             setattr(web_mod, "FRIDGE_PATH", Path(data_path))
             catalog_start.wait()
-            web_mod.replenish_product(web_mod.ProductReplenish(
+            web_mod.replenish_product.__wrapped__(web_mod.ProductReplenish(
                 product_id=item_id, storage="pantry",
                 expected_updated_at=expected_updated_at,
             ))
@@ -1268,10 +1348,22 @@ def test_product_catalog_native_tools():
         "name": "catalog canonical broccoli", "quantity": "2", "unit": "pcs",
         "storage": "fridge", "comment": "keep target metadata",
     }))
-    merge_source_received = _repos_mod.fridge_repo.receive_product(
-        requested_name="catalog stale broccoli generic",
-        exact_name="catalog stale broccoli exact",
+    audit_context_mod = importlib.import_module(
+        ".src.audit.context", _PLUGIN_DIR.name
     )
+    audit_manager = importlib.import_module(
+        ".src.audit", _PLUGIN_DIR.name
+    ).audit_manager
+    with audit_context_mod.audit_scope(
+        operation="test_receive_product_fixture",
+        manager=audit_manager,
+        actor_type="system",
+        surface_kind="test_fixture",
+    ):
+        merge_source_received = _repos_mod.fridge_repo.receive_product(
+            requested_name="catalog stale broccoli generic",
+            exact_name="catalog stale broccoli exact",
+        )
     merge_source = parse(remove_item({"item_id": merge_source_received.id}))
     merged = parse(merge_identity({
         "source_item_id": merge_source["id"],
@@ -1323,8 +1415,8 @@ def test_product_catalog_native_tools():
         _repos_mod.fridge_repo.path.write_text("{broken", encoding="utf-8")
         storage_error = parse(list_catalog({}))
         check("catalog native storage errors are sanitized", storage_error == {
-            "error": "Inventory storage is temporarily unavailable"
-        })
+            "error": "Storage is temporarily unavailable"
+        }, storage_error)
     finally:
         _repos_mod.fridge_repo.path.write_bytes(raw_inventory)
 
@@ -1817,10 +1909,22 @@ def test_register_cooked_meal():
     generic = "alias-cycle milk"
     exact = "exact alias-cycle milk 1l"
     parse(add_dish({"name": alias_dish, "ingredients": [generic]}))
-    received = _repos_mod.fridge_repo.receive_product(
-        requested_name=generic,
-        exact_name=exact,
+    audit_context_mod = importlib.import_module(
+        ".src.audit.context", _PLUGIN_DIR.name
     )
+    audit_manager = importlib.import_module(
+        ".src.audit", _PLUGIN_DIR.name
+    ).audit_manager
+    with audit_context_mod.audit_scope(
+        operation="test_receive_alias_product_fixture",
+        manager=audit_manager,
+        actor_type="system",
+        surface_kind="test_fixture",
+    ):
+        received = _repos_mod.fridge_repo.receive_product(
+            requested_name=generic,
+            exact_name=exact,
+        )
     alias_result = parse(register_cooked_meal({"dish_name": alias_dish}))
     consumed_exact = next(
         item for item in _repos_mod.fridge_repo.load_catalog_items() if item.id == received.id
@@ -1862,6 +1966,823 @@ def test_register_cooked_meal_rollback():
         ))
     finally:
         audit_mod.audit_manager._fault_injector = None
+
+
+def test_register_cooked_meal_replaces_retracted_event_without_side_effects():
+    print("\n-- register_cooked_meal correction replacement --")
+    assert _TMP_DATA_DIR is not None
+    data_root = _TMP_DATA_DIR
+
+    def optional_bytes(path):
+        return path.read_bytes() if path.exists() else None
+
+    add_inventory = _load_handler("add_inventory_item")
+    item = parse(add_inventory({
+        "name": "correction soy sauce",
+        "quantity": "500",
+        "unit": "ml",
+    }))
+    item_id = item["id"]
+    parse(add_dish({
+        "name": "correction rice bowl",
+        "ingredients": {"correction soy sauce": True},
+    }))
+
+    prep_mod = importlib.import_module(".src.prep_item", _PLUGIN_DIR.name)
+    def seed_correction_dependencies():
+        with _repos_mod.dish_repo.lock:
+            dishes = _repos_mod.dish_repo.load()
+            dish = next(row for row in dishes if row.name == "correction rice bowl")
+            dish.prep_depends = ["correction rice base"]
+            _repos_mod.dish_repo.save(dishes)
+        with _repos_mod.prep_repo.lock:
+            prep_items = _repos_mod.prep_repo.load_strict()
+            prep_items.append(prep_mod.PrepItem(
+                name="correction rice base",
+                yield_qty=2,
+                remaining=2,
+            ))
+            _repos_mod.prep_repo.save(prep_items)
+
+    audited_fixture(
+        "test_seed_correction_dependencies", seed_correction_dependencies
+    )
+
+    parse(create_week_plan({"week": "2026-W40"}))
+    added = parse(add_meal_to_plan({
+        "week": "2026-W40",
+        "day": "mon",
+        "dish": "correction rice bowl",
+        "portions": 4,
+    }))
+    occurrence_id = added["meal"]["occurrence_id"]
+    parse(set_plan_status({"week": "2026-W40", "status": "approved"}))
+    parse(set_plan_status({"week": "2026-W40", "status": "active"}))
+
+    first = parse(register_cooked_meal({
+        "dish_name": "correction rice bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 1,
+        "cooked_at": "2026-08-11",
+        "actual_portions": 2,
+        "actual_yield_portions": 4,
+    }))
+    check("initial cook succeeds", isinstance(first, str), str(first))
+    first_event = next(
+        event for event in _repos_mod.history_repo.load_events(strict=True)
+        if event.plan_occurrence_id == occurrence_id and event.active
+    )
+    first_plan = parse(get_week_plan({"week": "2026-W40"}))
+    original_lot_id = first_plan["days"]["mon"]["meals"][0]["leftover_lot_ids"][0]
+    check("initial cook creates the reported leftover", (
+        len(first_plan["leftovers"]) == 1
+        and first_plan["leftovers"][original_lot_id]["portions"] == 2
+    ), str(first_plan["leftovers"]))
+    check("initial cook consumes prep exactly once", (
+        next(
+            prep for prep in _repos_mod.prep_repo.load_strict()
+            if prep.name == "correction rice base"
+        ).remaining == 1
+    ))
+
+    # Make duplicate consumption observable: the physical product is available
+    # again before correcting metadata for the same physical cook.
+    restored = audited_fixture(
+        "test_replenish_correction_side_effect_probe",
+        lambda: _repos_mod.fridge_repo.replenish_item(item_id=item_id),
+    )
+    stock_cycle_before_correction = restored.stock_cycle
+    side_effect_bytes = {
+        "fridge": _repos_mod.fridge_repo.path.read_bytes(),
+        "prep": _repos_mod.prep_repo.path.read_bytes(),
+        "tuning": optional_bytes(_repos_mod.tuning_repo.path),
+    }
+
+    # Recommended path: replace the still-active event atomically. Omitted
+    # date/portion fields inherit the predecessor instead of becoming today/null.
+    correction_handler = importlib.import_module(
+        ".src.handlers.register_cooked_meal", _PLUGIN_DIR.name
+    )
+    original_load_set = correction_handler.fridge_repo.load_set
+    original_days = correction_handler.days_since_last_cook
+    original_tuning_load = correction_handler.tuning_repo.load
+
+    def forbidden_correction_snapshot(*_args, **_kwargs):
+        raise AssertionError("correction attempted a new-cook side-effect snapshot")
+
+    try:
+        correction_handler.fridge_repo.load_set = forbidden_correction_snapshot
+        correction_handler.days_since_last_cook = forbidden_correction_snapshot
+        correction_handler.tuning_repo.load = forbidden_correction_snapshot
+        atomic = parse(register_cooked_meal({
+            "dish_name": "correction rice bowl",
+            "occurrence_id": occurrence_id,
+            "expected_revision": 2,
+            "replaces_event_id": first_event.id,
+        }))
+    finally:
+        correction_handler.fridge_repo.load_set = original_load_set
+        correction_handler.days_since_last_cook = original_days
+        correction_handler.tuning_repo.load = original_tuning_load
+    check("active correction returns committed structured lineage", (
+        isinstance(atomic, dict)
+        and atomic.get("status") == "ok"
+        and atomic.get("action") == "corrected"
+        and atomic.get("corrected") is True
+        and atomic.get("replaces_event_id") == first_event.id
+        and atomic.get("root_event_id") == first_event.id
+        and atomic.get("effects_origin_event_id") == first_event.id
+        and atomic.get("plan_occurrence_id") == occurrence_id
+        and atomic.get("occurrence_revision") == 3
+        and isinstance(atomic.get("transaction_id"), str)
+        and atomic.get("replayed") is False
+    ), str(atomic))
+    atomic_events = [
+        event for event in _repos_mod.history_repo.load_events(strict=True)
+        if event.plan_occurrence_id == occurrence_id
+    ]
+    atomic_active = [event for event in atomic_events if event.active]
+    atomic_replacement = atomic_active[0] if len(atomic_active) == 1 else None
+    check("atomic correction keeps one active event and predecessor audit row", (
+        len(atomic_events) == 2
+        and not next(event for event in atomic_events if event.id == first_event.id).active
+        and atomic_replacement is not None
+        and atomic_replacement.provenance.get("source")
+            == "cook_event_correction"
+        and atomic_replacement.provenance.get("replaces_event_id")
+            == first_event.id
+        and atomic_replacement.provenance.get("root_event_id")
+            == first_event.id
+        and atomic_replacement.provenance.get("effects_origin_event_id")
+            == first_event.id
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            atomic_replacement.provenance.get("request_fingerprint", ""),
+        ) is not None
+    ), str([event.to_dict() for event in atomic_events]))
+    check("omitted metadata inherits original date-only value and portions", (
+        atomic_replacement is not None
+        and atomic_replacement.cooked_on == "2026-08-11"
+        and atomic_replacement.cooked_at is None
+        and atomic_replacement.time_precision == "date"
+        and atomic_replacement.actual_portions == 2
+        and atomic_replacement.actual_yield_portions == 4
+    ), str(atomic_replacement.to_dict() if atomic_replacement else None))
+    atomic_plan = parse(get_week_plan({"week": "2026-W40"}))
+    atomic_occurrence = atomic_plan["days"]["mon"]["meals"][0]
+    check("atomic correction preserves stable leftover lot and relinks its source", (
+        atomic_occurrence["revision"] == 3
+        and atomic_occurrence["cook_event_id"] == atomic_replacement.id
+        and atomic_occurrence["leftover_lot_ids"] == [original_lot_id]
+        and atomic_plan["leftovers"][original_lot_id]["source_cook_event_id"]
+            == atomic_replacement.id
+        and atomic_plan["leftovers"][original_lot_id]["portions"] == 2
+    ), str(atomic_plan["leftovers"]))
+    current = next(
+        product for product in _repos_mod.fridge_repo.load_catalog_items()
+        if product.id == item_id
+    )
+    check("atomic correction repeats no inventory/prep/tuning side effects", (
+        current.available
+        and current.stock_cycle == stock_cycle_before_correction
+        and _repos_mod.fridge_repo.path.read_bytes() == side_effect_bytes["fridge"]
+        and _repos_mod.prep_repo.path.read_bytes() == side_effect_bytes["prep"]
+        and optional_bytes(_repos_mod.tuning_repo.path) == side_effect_bytes["tuning"]
+    ), str(current))
+
+    retry_before = {
+        path.relative_to(data_root).as_posix(): path.read_bytes()
+        for path in data_root.rglob("*")
+        if path.is_file()
+    }
+    exact_retry = parse(register_cooked_meal({
+        "dish_name": "correction rice bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 2,
+        "replaces_event_id": first_event.id,
+    }))
+    retry_after = {
+        path.relative_to(data_root).as_posix(): path.read_bytes()
+        for path in data_root.rglob("*")
+        if path.is_file()
+    }
+    check("exact correction retry returns committed result without new writes", (
+        isinstance(exact_retry, dict)
+        and exact_retry.get("cook_event_id") == atomic.get("cook_event_id")
+        and exact_retry.get("transaction_id") == atomic.get("transaction_id")
+        and exact_retry.get("occurrence_revision") == atomic.get("occurrence_revision")
+        and exact_retry.get("replayed") is True
+        and retry_after == retry_before
+    ), str(exact_retry))
+
+    branch_before = {
+        "history": _repos_mod.history_repo.path.read_bytes(),
+        "plan": (_TMP_DATA_DIR / "plans" / "2026-W40.json").read_bytes(),
+        "fridge": _repos_mod.fridge_repo.path.read_bytes(),
+        "prep": _repos_mod.prep_repo.path.read_bytes(),
+    }
+    branched = parse(register_cooked_meal({
+        "dish_name": "correction rice bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 3,
+        "replaces_event_id": first_event.id,
+    }))
+    check("correction cannot branch from a superseded predecessor", (
+        isinstance(branched, dict)
+        and "latest event" in branched.get("error", "")
+        and branch_before["history"] == _repos_mod.history_repo.path.read_bytes()
+        and branch_before["plan"]
+            == (_TMP_DATA_DIR / "plans" / "2026-W40.json").read_bytes()
+        and branch_before["fridge"] == _repos_mod.fridge_repo.path.read_bytes()
+        and branch_before["prep"] == _repos_mod.prep_repo.path.read_bytes()
+    ), str(branched))
+
+    # Recovery path for the production sequence that had already retracted the
+    # active event. The old ambiguous re-register call must fail before writes.
+    retracted = parse(delete_history_entry({"event_id": atomic_replacement.id}))
+    check("predecessor retract reopens occurrence", (
+        isinstance(retracted, str) and "reopened" in retracted.lower()
+    ), str(retracted))
+    no_lineage_before = {
+        "history": _repos_mod.history_repo.path.read_bytes(),
+        "plan": (_TMP_DATA_DIR / "plans" / "2026-W40.json").read_bytes(),
+        "fridge": _repos_mod.fridge_repo.path.read_bytes(),
+        "prep": _repos_mod.prep_repo.path.read_bytes(),
+        "tuning": optional_bytes(_repos_mod.tuning_repo.path),
+    }
+    ambiguous = parse(register_cooked_meal({
+        "dish_name": "correction rice bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 4,
+    }))
+    check("legacy re-register without lineage fails closed", (
+        isinstance(ambiguous, dict)
+        and "replaces_event_id" in ambiguous.get("error", "")
+        and no_lineage_before["history"] == _repos_mod.history_repo.path.read_bytes()
+        and no_lineage_before["plan"]
+            == (_TMP_DATA_DIR / "plans" / "2026-W40.json").read_bytes()
+        and no_lineage_before["fridge"] == _repos_mod.fridge_repo.path.read_bytes()
+        and no_lineage_before["prep"] == _repos_mod.prep_repo.path.read_bytes()
+        and no_lineage_before["tuning"] == optional_bytes(_repos_mod.tuning_repo.path)
+    ), str(ambiguous))
+
+    # Explicit null is distinct from omission and clears the incorrect 2/4
+    # metadata and its unconsumed leftover without repeating cook side effects.
+    corrected = parse(register_cooked_meal({
+        "dish_name": "correction rice bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 4,
+        "replaces_event_id": atomic_replacement.id,
+        "actual_portions": None,
+        "actual_yield_portions": None,
+    }))
+    check("retracted predecessor replacement succeeds", (
+        isinstance(corrected, dict) and corrected.get("action") == "corrected"
+    ), str(corrected))
+
+    linked = [
+        event for event in _repos_mod.history_repo.load_events(strict=True)
+        if event.plan_occurrence_id == occurrence_id
+    ]
+    active = [event for event in linked if event.active]
+    replacement = active[0] if len(active) == 1 else None
+    check("history retains all predecessors and exactly one active replacement", (
+        len(linked) == 3
+        and {first_event.id, atomic_replacement.id}.issubset(
+            {event.id for event in linked if not event.active}
+        )
+        and replacement is not None
+        and replacement.provenance.get("source") == "cook_event_correction"
+        and replacement.provenance.get("replaces_event_id")
+            == atomic_replacement.id
+        and replacement.provenance.get("root_event_id") == first_event.id
+        and replacement.provenance.get("effects_origin_event_id")
+            == first_event.id
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            replacement.provenance.get("request_fingerprint", ""),
+        ) is not None
+    ), str([event.to_dict() for event in linked]))
+    check("date-only correction preserves intended date and explicit null clears portions", (
+        replacement is not None
+        and replacement.cooked_on == "2026-08-11"
+        and replacement.cooked_at is None
+        and replacement.time_precision == "date"
+        and replacement.actual_portions is None
+        and replacement.actual_yield_portions is None
+    ), str(replacement.to_dict() if replacement else None))
+
+    final_plan = parse(get_week_plan({"week": "2026-W40"}))
+    occurrence = final_plan["days"]["mon"]["meals"][0]
+    check("corrected occurrence points at active replacement", (
+        replacement is not None
+        and occurrence["status"] == "cooked"
+        and occurrence["revision"] == 5
+        and occurrence["cook_event_id"] == replacement.id
+        and occurrence["cooked_on"] == "2026-08-11"
+        and occurrence["actual_portions"] is None
+        and occurrence["actual_yield_portions"] is None
+    ), str(occurrence))
+    check("explicit null correction removes superseded unconsumed leftover", (
+        occurrence["leftover_lot_ids"] == [] and final_plan["leftovers"] == {}
+    ), str(final_plan["leftovers"]))
+    check("retracted-event correction repeats no side effects", (
+        _repos_mod.fridge_repo.path.read_bytes() == side_effect_bytes["fridge"]
+        and _repos_mod.prep_repo.path.read_bytes() == side_effect_bytes["prep"]
+        and optional_bytes(_repos_mod.tuning_repo.path) == side_effect_bytes["tuning"]
+    ))
+
+    # A failed active replacement must restore both history and plan after-images.
+    rollback_before = {
+        "history": _repos_mod.history_repo.path.read_bytes(),
+        "plan": (_TMP_DATA_DIR / "plans" / "2026-W40.json").read_bytes(),
+        "fridge": _repos_mod.fridge_repo.path.read_bytes(),
+        "prep": _repos_mod.prep_repo.path.read_bytes(),
+    }
+    audit_mod = importlib.import_module(".src.audit", _PLUGIN_DIR.name)
+
+    def fail_after_first_correction_target(stage):
+        if stage == "after_target:0":
+            raise RuntimeError("correction fault")
+
+    try:
+        audit_mod.audit_manager._fault_injector = fail_after_first_correction_target
+        failed = parse(register_cooked_meal({
+            "dish_name": "correction rice bowl",
+            "occurrence_id": occurrence_id,
+            "expected_revision": 5,
+            "replaces_event_id": replacement.id,
+            "cooked_at": "2026-08-12",
+        }))
+        check("failed active correction returns an error", (
+            isinstance(failed, dict) and "error" in failed
+        ), str(failed))
+        check("failed active correction rolls back history/plan and side effects", (
+            rollback_before["history"] == _repos_mod.history_repo.path.read_bytes()
+            and rollback_before["plan"]
+                == (_TMP_DATA_DIR / "plans" / "2026-W40.json").read_bytes()
+            and rollback_before["fridge"] == _repos_mod.fridge_repo.path.read_bytes()
+            and rollback_before["prep"] == _repos_mod.prep_repo.path.read_bytes()
+        ))
+    finally:
+        audit_mod.audit_manager._fault_injector = None
+
+    audit_events = [
+        json.loads(line)
+        for path in _TMP_DATA_DIR.joinpath("audit/events").glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    corrected_audit = [
+        event for event in audit_events
+        if event.get("event_type") == "meal.cook_corrected.v1"
+        and event.get("payload", {}).get("replaces_event_id")
+            in {first_event.id, atomic_replacement.id}
+    ]
+    check("successful corrections emit linear lineage-aware audit events", (
+        len(corrected_audit) == 2
+        and {event["payload"]["replaces_event_id"] for event in corrected_audit}
+            == {first_event.id, atomic_replacement.id}
+        and all(
+            event["payload"]["root_event_id"] == first_event.id
+            and event["payload"]["effects_origin_event_id"] == first_event.id
+            and event["payload"]["inventory_effect"] == "retained"
+            and event["payload"]["prep_effect"] == "retained"
+            and event["payload"]["inventory_consumed"] == []
+            and event["payload"]["prep_consumed"] == []
+            for event in corrected_audit
+        )
+    ), str(corrected_audit))
+    atomic_audit = next(
+        event for event in corrected_audit
+        if event["payload"]["replaces_event_id"] == first_event.id
+    )["payload"]
+    recovered_audit = next(
+        event for event in corrected_audit
+        if event["payload"]["replaces_event_id"] == atomic_replacement.id
+    )["payload"]
+    check("correction audit proves omitted request intent and committed before/after", (
+        atomic_audit["request_fingerprint"]
+            == atomic_replacement.provenance["request_fingerprint"]
+        and atomic_audit["request_fields"] == {
+            "cooked_at": {"state": "omitted"},
+            "actual_portions": {"state": "omitted"},
+            "actual_yield_portions": {"state": "omitted"},
+        }
+        and atomic_audit["occurrence_revision"] == {"before": 2, "after": 3}
+        and atomic_audit["metadata_before"]["actual_portions"] == 2
+        and atomic_audit["metadata_after"]["actual_portions"] == 2
+        and atomic_audit["leftover_before"]["lot_id"] == original_lot_id
+        and atomic_audit["leftover_after"]["lot_id"] == original_lot_id
+    ), str(atomic_audit))
+    check("correction audit distinguishes explicit null and leftover removal", (
+        recovered_audit["request_fields"]["cooked_at"] == {"state": "omitted"}
+        and recovered_audit["request_fields"]["actual_portions"]
+            == {"state": "value", "value": None}
+        and recovered_audit["request_fields"]["actual_yield_portions"]
+            == {"state": "value", "value": None}
+        and recovered_audit["metadata_before"]["actual_portions"] == 2
+        and recovered_audit["metadata_after"]["actual_portions"] is None
+        and recovered_audit["leftover_before"]["lot_id"] == original_lot_id
+        and recovered_audit["leftover_after"] is None
+    ), str(recovered_audit))
+
+
+def test_legacy_dish_retraction_selector_fails_closed_when_ambiguous():
+    print("\n-- legacy dish retraction selector ambiguity --")
+    history_mod = importlib.import_module(
+        ".src.repositories.json_history", _PLUGIN_DIR.name
+    )
+    handler_mod = importlib.import_module(
+        ".src.handlers.delete_history_entry", _PLUGIN_DIR.name
+    )
+    events = [
+        history_mod.CookingEvent(
+            id="cook_" + "a" * 32,
+            dish_name_snapshot="repeat bowl",
+            cooked_on="2026-08-11",
+            time_precision="date",
+            recorded_at="2026-08-11T20:00:00Z",
+        ),
+        history_mod.CookingEvent(
+            id="cook_" + "b" * 32,
+            dish_name_snapshot="repeat bowl",
+            cooked_on="2026-08-12",
+            time_precision="date",
+            recorded_at="2026-08-12T20:00:00Z",
+        ),
+    ]
+
+    class FakeHistoryRepository:
+        @staticmethod
+        def load_events(*, strict=False):
+            assert strict is True
+            return list(reversed(events))
+
+    retracted = []
+
+    def fake_retract_cooked(*, event_id):
+        retracted.append(event_id)
+        return {"plan_reopened": False}
+
+    original_repo = handler_mod.history_repo
+    original_retract = handler_mod.retract_cooked
+    try:
+        handler_mod.history_repo = FakeHistoryRepository()
+        handler_mod.retract_cooked = fake_retract_cooked
+        result = parse(handler_mod.HANDLER({"dish_name": "repeat bowl"}))
+    finally:
+        handler_mod.history_repo = original_repo
+        handler_mod.retract_cooked = original_retract
+
+    message = result.get("error", "") if isinstance(result, dict) else ""
+    check("ambiguous legacy dish selector fails before retraction", (
+        isinstance(result, dict)
+        and not retracted
+        and "cook_" + "a" * 32 in message
+        and "cook_" + "b" * 32 in message
+        and "event_id" in message
+    ), str(result))
+
+
+def test_retracted_backfilled_cook_without_recorded_at_can_be_corrected():
+    print("\n-- retracted backfilled correction without recorded_at --")
+    assert _TMP_DATA_DIR is not None
+    parse(add_dish({
+        "name": "backfilled correction bowl",
+        "ingredients": {"backfilled optional garnish": False},
+    }))
+    parse(create_week_plan({"week": "2026-W42"}))
+    added = parse(add_meal_to_plan({
+        "week": "2026-W42",
+        "day": "mon",
+        "dish": "backfilled correction bowl",
+        "portions": 2,
+    }))
+    occurrence_id = added["meal"]["occurrence_id"]
+    parse(set_plan_status({"week": "2026-W42", "status": "approved"}))
+    parse(set_plan_status({"week": "2026-W42", "status": "active"}))
+    parse(register_cooked_meal({
+        "dish_name": "backfilled correction bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 1,
+        "cooked_at": "2026-08-12",
+        "actual_portions": 2,
+        "actual_yield_portions": 2,
+    }))
+    event = next(
+        item for item in _repos_mod.history_repo.load_events(strict=True)
+        if item.plan_occurrence_id == occurrence_id and item.active
+    )
+    parse(delete_history_entry({"event_id": event.id}))
+
+    history_path = _repos_mod.history_repo.path
+    history_payload = json.loads(history_path.read_text(encoding="utf-8"))
+    persisted = next(
+        item for item in history_payload["entries"] if item["id"] == event.id
+    )
+    persisted["recorded_at"] = None
+    persisted["backfilled"] = True
+    persisted["provenance"] = {"source": "audit1a_evidence"}
+    src_mod = importlib.import_module(".src", _PLUGIN_DIR.name)
+    audited_fixture(
+        "test_backfill_history_fixture",
+        lambda: src_mod.atomic_write_json(history_path, history_payload),
+    )
+    _repos_mod.history_repo.load_events(strict=True)
+
+    before = {
+        path.relative_to(_TMP_DATA_DIR).as_posix(): path.read_bytes()
+        for path in _TMP_DATA_DIR.rglob("*") if path.is_file()
+    }
+    result = parse(register_cooked_meal({
+        "dish_name": "backfilled correction bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 3,
+        "replaces_event_id": event.id,
+    }))
+    active = [
+        item for item in _repos_mod.history_repo.load_events(strict=True)
+        if item.plan_occurrence_id == occurrence_id and item.active
+    ]
+    check("sole retracted backfilled lineage is correctable without timestamp evidence", (
+        isinstance(result, dict)
+        and result.get("action") == "corrected"
+        and len(active) == 1
+        and active[0].provenance.get("replaces_event_id") == event.id
+        and active[0].cooked_on == "2026-08-12"
+    ), str(result))
+    check("backfilled correction does not add physical side-effect targets", (
+        _repos_mod.fridge_repo.path.read_bytes()
+            == before[_repos_mod.fridge_repo.path.relative_to(_TMP_DATA_DIR).as_posix()]
+        and (
+            not _repos_mod.prep_repo.path.exists()
+            or _repos_mod.prep_repo.path.read_bytes()
+                == before[_repos_mod.prep_repo.path.relative_to(_TMP_DATA_DIR).as_posix()]
+        )
+    ))
+
+
+def test_cooking_rejects_total_yield_below_served_portions():
+    print("\n-- cooking rejects total yield below served portions --")
+    assert _TMP_DATA_DIR is not None
+    parse(add_dish({
+        "name": "impossible yield bowl",
+        "ingredients": {"impossible optional garnish": False},
+    }))
+    before = {
+        path.relative_to(_TMP_DATA_DIR).as_posix(): path.read_bytes()
+        for path in _TMP_DATA_DIR.rglob("*") if path.is_file()
+    }
+    result = parse(register_cooked_meal({
+        "dish_name": "impossible yield bowl",
+        "cooked_at": "2026-08-12",
+        "actual_portions": 5,
+        "actual_yield_portions": 2,
+    }))
+    after = {
+        path.relative_to(_TMP_DATA_DIR).as_posix(): path.read_bytes()
+        for path in _TMP_DATA_DIR.rglob("*") if path.is_file()
+    }
+    check("numeric total yield below served portions is rejected", (
+        isinstance(result, dict)
+        and "yield" in result.get("error", "").lower()
+        and "portions" in result.get("error", "").lower()
+    ), str(result))
+    check("impossible yield rejection is byte-for-byte no-write", after == before)
+
+
+def test_correction_distinguishes_omitted_and_null_cooked_at():
+    print("\n-- correction omitted versus null cooked_at --")
+    assert _TMP_DATA_DIR is not None
+    parse(add_dish({
+        "name": "timed correction soup",
+        "ingredients": {"water": True},
+    }))
+    created = parse(create_week_plan({"week": "2026-W46"}))
+    for day in ("mon", "tue"):
+        created = parse(add_meal_to_plan({
+            "week": "2026-W46",
+            "day": day,
+            "dish": "timed correction soup",
+            "portions": 1,
+        }))
+    parse(set_plan_status({"week": "2026-W46", "status": "approved"}))
+    parse(set_plan_status({"week": "2026-W46", "status": "active"}))
+    plan = parse(get_week_plan({"week": "2026-W46"}))
+    occurrences = [
+        plan["days"][day]["meals"][0]
+        for day in ("mon", "tue")
+    ]
+    originals = []
+    for occurrence in occurrences:
+        parse(register_cooked_meal({
+            "dish_name": "timed correction soup",
+            "occurrence_id": occurrence["occurrence_id"],
+            "expected_revision": occurrence["revision"],
+            "cooked_at": "2026-08-12T19:45:00+02:00",
+        }))
+        originals.append(next(
+            event for event in _repos_mod.history_repo.load_events(strict=True)
+            if event.plan_occurrence_id == occurrence["occurrence_id"] and event.active
+        ))
+
+    parse(register_cooked_meal({
+        "dish_name": "timed correction soup",
+        "occurrence_id": occurrences[0]["occurrence_id"],
+        "expected_revision": occurrences[0]["revision"] + 1,
+        "replaces_event_id": originals[0].id,
+    }))
+    parse(register_cooked_meal({
+        "dish_name": "timed correction soup",
+        "occurrence_id": occurrences[1]["occurrence_id"],
+        "expected_revision": occurrences[1]["revision"] + 1,
+        "replaces_event_id": originals[1].id,
+        "cooked_at": None,
+    }))
+    events = _repos_mod.history_repo.load_events(strict=True)
+    inherited = next(
+        event for event in events
+        if event.plan_occurrence_id == occurrences[0]["occurrence_id"] and event.active
+    )
+    date_only = next(
+        event for event in events
+        if event.plan_occurrence_id == occurrences[1]["occurrence_id"] and event.active
+    )
+    check("omitted cooked_at inherits full datetime tuple", (
+        inherited.cooked_at == "2026-08-12T19:45:00+02:00"
+        and inherited.cooked_on == "2026-08-12"
+        and inherited.time_precision == "datetime"
+    ), str(inherited.to_dict()))
+    check("explicit null cooked_at clears time precision but retains day", (
+        date_only.cooked_at is None
+        and date_only.cooked_on == "2026-08-12"
+        and date_only.time_precision == "date"
+    ), str(date_only.to_dict()))
+    cooking_mod = importlib.import_module(".src.cooking", _PLUGIN_DIR.name)
+    fingerprint_base = {
+        "dish_name": "timed correction soup",
+        "occurrence_id": "mealocc_same",
+        "expected_revision": 2,
+        "actual_portions": cooking_mod.UNSET,
+        "actual_yield_portions": cooking_mod.UNSET,
+        "replaces_event_id": "cook_same",
+    }
+    check("omitted and null correction fingerprints are distinct", (
+        cooking_mod._correction_request_fingerprint(
+            cooked_at=cooking_mod.UNSET, **fingerprint_base
+        )
+        != cooking_mod._correction_request_fingerprint(
+            cooked_at=None, **fingerprint_base
+        )
+    ))
+
+
+def test_cooking_correction_preserves_consumed_leftover_boundary():
+    print("\n-- cooking correction consumed-leftover boundary --")
+    assert _TMP_DATA_DIR is not None
+    data_root = _TMP_DATA_DIR
+
+    def data_tree():
+        return {
+            path.relative_to(data_root).as_posix(): path.read_bytes()
+            for path in data_root.rglob("*")
+            if path.is_file()
+        }
+
+    def occurrence_in(plan, target_id):
+        return next(
+            meal
+            for day in plan.days.values()
+            for meal in day.meals
+            if meal.occurrence_id == target_id
+        )
+
+    parse(add_dish({
+        "name": "consumed leftover boundary bowl",
+        "ingredients": {"boundary optional garnish": False},
+    }))
+    parse(create_week_plan({"week": "2026-W41"}))
+    added = parse(add_meal_to_plan({
+        "week": "2026-W41",
+        "day": "mon",
+        "dish": "consumed leftover boundary bowl",
+        "portions": 3,
+    }))
+    occurrence_id = added["meal"]["occurrence_id"]
+    parse(set_plan_status({"week": "2026-W41", "status": "approved"}))
+    parse(set_plan_status({"week": "2026-W41", "status": "active"}))
+    parse(register_cooked_meal({
+        "dish_name": "consumed leftover boundary bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 1,
+        "cooked_at": "2026-08-11",
+        "actual_portions": 1,
+        "actual_yield_portions": 3,
+    }))
+    original = next(
+        event for event in _repos_mod.history_repo.load_events(strict=True)
+        if event.plan_occurrence_id == occurrence_id and event.active
+    )
+    plan = _repos_mod.plan_repo.load("2026-W41")
+    occurrence = occurrence_in(plan, occurrence_id)
+    lot_id = occurrence.leftover_lot_ids[0]
+    created_at = plan.leftovers[lot_id]["created_at"]
+    plan.leftovers[lot_id]["consumed_portions"] = 1
+    audited_fixture(
+        "test_consume_leftover_fixture",
+        lambda: _repos_mod.plan_repo.save(plan),
+    )
+
+    above = parse(register_cooked_meal({
+        "dish_name": "consumed leftover boundary bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 2,
+        "replaces_event_id": original.id,
+        "actual_portions": 1,
+        "actual_yield_portions": 4,
+    }))
+    check("correction above consumed leftover boundary succeeds", (
+        isinstance(above, dict) and above.get("action") == "corrected"
+    ), str(above))
+    above_event = next(
+        event for event in _repos_mod.history_repo.load_events(strict=True)
+        if event.plan_occurrence_id == occurrence_id and event.active
+    )
+    above_plan = _repos_mod.plan_repo.load("2026-W41")
+    above_occurrence = occurrence_in(above_plan, occurrence_id)
+    check("above-boundary correction reuses lot and consumed quantity", (
+        above_occurrence.leftover_lot_ids == [lot_id]
+        and above_plan.leftovers[lot_id]["portions"] == 3
+        and above_plan.leftovers[lot_id]["consumed_portions"] == 1
+        and above_plan.leftovers[lot_id]["created_at"] == created_at
+        and above_plan.leftovers[lot_id]["source_cook_event_id"] == above_event.id
+    ), str(above_plan.leftovers))
+
+    # Storage order is not lineage, and historical metadata must remain
+    # correctable after the live catalog recipe has been deleted.
+    reordered = list(reversed(_repos_mod.history_repo.load_events(strict=True)))
+    def reorder_history_and_delete_recipe():
+        _repos_mod.history_repo.save_events(reordered)
+        with _repos_mod.dish_repo.lock:
+            catalog = _repos_mod.dish_repo.load_strict()
+            _repos_mod.dish_repo.save([
+                dish for dish in catalog
+                if dish.name != "consumed leftover boundary bowl"
+            ])
+
+    audited_fixture(
+        "test_reorder_history_and_delete_recipe_fixture",
+        reorder_history_and_delete_recipe,
+    )
+    catalog_after_delete = _repos_mod.dish_repo.path.read_bytes()
+
+    equal = parse(register_cooked_meal({
+        "dish_name": "consumed leftover boundary bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 3,
+        "replaces_event_id": above_event.id,
+        "actual_portions": 1,
+        "actual_yield_portions": 2,
+    }))
+    check("correction equal to consumed leftover boundary succeeds", (
+        isinstance(equal, dict) and equal.get("action") == "corrected"
+    ), str(equal))
+    equal_event = next(
+        event for event in _repos_mod.history_repo.load_events(strict=True)
+        if event.plan_occurrence_id == occurrence_id and event.active
+    )
+    equal_plan = _repos_mod.plan_repo.load("2026-W41")
+    equal_occurrence = occurrence_in(equal_plan, occurrence_id)
+    check("equal-boundary correction retains consumed-only lot", (
+        equal_occurrence.leftover_lot_ids == [lot_id]
+        and equal_plan.leftovers[lot_id]["portions"] == 1
+        and equal_plan.leftovers[lot_id]["consumed_portions"] == 1
+        and equal_plan.leftovers[lot_id]["created_at"] == created_at
+        and equal_plan.leftovers[lot_id]["source_cook_event_id"] == equal_event.id
+        and _repos_mod.dish_repo.path.read_bytes() == catalog_after_delete
+    ), str(equal_plan.leftovers))
+    equal_lineage = equal_event.provenance or {}
+    check("reordered/deleted-recipe correction preserves root/effects lineage", (
+        equal_lineage.get("replaces_event_id") == above_event.id
+        and equal_lineage.get("root_event_id") == original.id
+        and equal_lineage.get("effects_origin_event_id") == original.id
+    ), str(equal_lineage))
+
+    before_rejection = data_tree()
+    below = parse(register_cooked_meal({
+        "dish_name": "consumed leftover boundary bowl",
+        "occurrence_id": occurrence_id,
+        "expected_revision": 4,
+        "replaces_event_id": equal_event.id,
+        "actual_portions": 1,
+        "actual_yield_portions": 1,
+    }))
+    check("correction below consumed leftover boundary fails closed", (
+        isinstance(below, dict)
+        and "below already consumed portions" in below.get("error", "")
+        and data_tree() == before_rejection
+    ), str(below))
 
 
 def test_delete_history_entry():
@@ -1992,6 +2913,9 @@ def test_dish_repository_lock_is_cross_process():
     def web_writer():
         web_module = importlib.import_module(f"{_PLUGIN_DIR.name}.web.main")
         web_module.DISHES_PATH = path
+        # Coherent Web reads anchor the descriptor-pinned data root through
+        # HISTORY_PATH; keep the temporary root internally consistent.
+        setattr(web_module, "HISTORY_PATH", path.parent / "history.json")
         start.wait()
         for number in range(12):
             while True:
@@ -2474,13 +3398,13 @@ def test_dii_store_ttl_and_recovery():
 
 def test_dii_session_id_traversal_rejected():
     print("\n-- security: session_id path traversal cannot touch other files --")
-    (_TMP_DATA_DIR / "dishes.json").write_text(
-        json.dumps({"dishes": [{"name": "safe", "ingredients": {"a": True}}]}),
-        encoding="utf-8")
+    assert _TMP_DATA_DIR is not None
+    catalog_path = _TMP_DATA_DIR / "dishes.json"
+    catalog_before = catalog_path.read_bytes()
     res = parse(dii_get_state({"session_id": "../dishes"}))
     check("traversing session_id returns an error", "error" in res, f"got: {res}")
     check("catalog file untouched by traversal read",
-          (_TMP_DATA_DIR / "dishes.json").exists())
+          catalog_path.read_bytes() == catalog_before)
     res2 = parse(init_ingredient_session({
         "dish_name": "x", "ingredients": ["a"], "is_essential": [True],
         "session_id": "../evil",
@@ -2492,11 +3416,19 @@ def test_dii_session_id_traversal_rejected():
 
 def test_dish_load_preserves_malformed():
     print("\n-- data integrity: unparseable dish entry preserved across writes --")
-    (_TMP_DATA_DIR / "dishes.json").write_text(json.dumps({"dishes": [
+    assert _TMP_DATA_DIR is not None
+    malformed_fixture = {"dishes": [
         {"name": "keeper", "ingredients": {"a": True}},
         {"name": "victim", "ingredients": {"b": True}},
         {"name": "legacy", "ingredients": {"c": "yes"}},  # non-bool -> unparseable
-    ]}), encoding="utf-8")
+    ]}
+    src_mod = importlib.import_module(".src", _PLUGIN_DIR.name)
+    audited_fixture(
+        "test_seed_malformed_dish_fixture",
+        lambda: src_mod.atomic_write_json(
+            _TMP_DATA_DIR / "dishes.json", malformed_fixture
+        ),
+    )
     res = parse(delete_dish({"dish_name": "victim"}))
     check("deleted the targeted dish",
           isinstance(res, str) and "deleted" in res.lower(), f"got: {res}")
@@ -2603,30 +3535,32 @@ def test_week_plan_lifecycle_and_repeat():
         "ingredients": {"beans": True},
     })
     dish_repo = _repos_mod.dish_repo
-    with dish_repo.lock:
-        dishes = dish_repo.load()
-        weekly_soup = next(d for d in dishes if d.name == "weekly soup")
-        weekly_soup.prep_depends = ["planned stock", "depleted garnish"]
-        weekly_stew = next(d for d in dishes if d.name == "weekly stew")
-        weekly_stew.prep_depends = ["depleted garnish"]
-        dish_repo.save(dishes)
-
     prep_mod = importlib.import_module(".src.prep_item", _PLUGIN_DIR.name)
-    with _repos_mod.prep_repo.lock:
-        _repos_mod.prep_repo.save([
-            prep_mod.PrepItem(
-                name="planned stock",
-                ingredients={"bones": True},
-                yield_qty=4,
-                remaining=0,
-            ),
-            prep_mod.PrepItem(
-                name="depleted garnish",
-                ingredients={"herbs": True},
-                yield_qty=4,
-                remaining=1,
-            ),
-        ])
+    def seed_weekly_dependencies():
+        with dish_repo.lock:
+            dishes = dish_repo.load()
+            weekly_soup = next(d for d in dishes if d.name == "weekly soup")
+            weekly_soup.prep_depends = ["planned stock", "depleted garnish"]
+            weekly_stew = next(d for d in dishes if d.name == "weekly stew")
+            weekly_stew.prep_depends = ["depleted garnish"]
+            dish_repo.save(dishes)
+        with _repos_mod.prep_repo.lock:
+            _repos_mod.prep_repo.save([
+                prep_mod.PrepItem(
+                    name="planned stock",
+                    ingredients={"bones": True},
+                    yield_qty=4,
+                    remaining=0,
+                ),
+                prep_mod.PrepItem(
+                    name="depleted garnish",
+                    ingredients={"herbs": True},
+                    yield_qty=4,
+                    remaining=1,
+                ),
+            ])
+
+    audited_fixture("test_seed_weekly_dependencies", seed_weekly_dependencies)
 
     bad_week = parse(create_week_plan({"week": "2026-W99"}))
     check("invalid ISO week rejected", "error" in bad_week, f"got: {bad_week}")
@@ -2640,7 +3574,8 @@ def test_week_plan_lifecycle_and_repeat():
     plans_dir = _TMP_DATA_DIR / "plans"
     plans_dir.mkdir(parents=True, exist_ok=True)
     plan_mod = importlib.import_module(".src.plan", _PLUGIN_DIR.name)
-    (plans_dir / "2026-W29.json").write_text(
+    mismatched_plan_path = plans_dir / "2026-W29.json"
+    mismatched_plan_path.write_text(
         json.dumps(plan_mod.WeekPlan(week_id="2026-W28").to_dict()),
         encoding="utf-8",
     )
@@ -2648,6 +3583,7 @@ def test_week_plan_lifecycle_and_repeat():
         "plan repository rejects filename/embedded-week mismatch",
         _repos_mod.plan_repo.load("2026-W29") is None,
     )
+    mismatched_plan_path.unlink()
 
     created = parse(create_week_plan({
         "week": "2026-W30", "prep": ["planned stock"],
@@ -2761,8 +3697,13 @@ def test_week_plan_lifecycle_and_repeat():
 
 def test_phase3_shopping_budget_flow():
     print("\n-- Phase 3: shopping and soft budget --")
-    with _repos_mod.fridge_repo.lock:
-        _repos_mod.fridge_repo.save(["water"])
+    def seed_phase3_inventory():
+        with _repos_mod.fridge_repo.lock:
+            _repos_mod.fridge_repo.save(["water"])
+
+    audited_fixture(
+        "test_seed_phase3_inventory", seed_phase3_inventory
+    )
 
     generated = parse(generate_shopping_list({"week": "2026-W31"}))
     items = {item["ingredient"]: item for item in generated.get("items", [])}
@@ -2872,14 +3813,20 @@ def test_phase3_shopping_budget_flow():
         if item.id == repurchase_target["product_id"]
     )
     repurchase_exact = f"новый товар {derived_target['ingredient']}"
-    shopping_request_repo_local.reserve_receipt(
-        repurchase_target["id"],
-        week="2026-W31",
-        requested_name=repurchase_target["ingredient"],
-        exact_name=repurchase_exact,
-    )
-    fridge_repo_local.set_product_category(
-        None, "prep", item_id=repurchase_target["product_id"]
+    def seed_pending_repurchase_metadata():
+        shopping_request_repo_local.reserve_receipt(
+            repurchase_target["id"],
+            week="2026-W31",
+            requested_name=repurchase_target["ingredient"],
+            exact_name=repurchase_exact,
+        )
+        fridge_repo_local.set_product_category(
+            None, "prep", item_id=repurchase_target["product_id"]
+        )
+
+    audited_fixture(
+        "test_seed_pending_repurchase_metadata",
+        seed_pending_repurchase_metadata,
     )
     after_metadata_plan = parse(get_week_plan({"week": "2026-W31"}))
     after_metadata_rows = [
@@ -2993,7 +3940,10 @@ def test_phase3_shopping_budget_flow():
         item.get("id") != manual_id
         for item in after_receipt.get("current_shopping", {}).get("items", [])
     ))
-    fridge_repo_local.remove_items(["растительный йогурт"])
+    audited_fixture(
+        "test_consume_generic_recipe_alias",
+        lambda: fridge_repo_local.remove_items(["растительный йогурт"]),
+    )
     exact_after_alias_consumption = next(
         item for item in fridge_repo_local.load_catalog_items()
         if item.id == received_product.get("id")
@@ -3085,10 +4035,8 @@ def test_phase3_shopping_budget_flow():
         dish_repo_local.path.write_text("{broken", encoding="utf-8")
         corrupt_projection = parse(get_week_plan({"week": "2026-W31"}))
         check("corrupt shopping dependency exposes no stale current items", (
-            corrupt_projection.get("current_shopping", {}).get("items") == []
-            and corrupt_projection.get("shopping_stale") is True
-            and "invalid dish catalog" in corrupt_projection.get("shopping_projection_error", "")
-        ))
+            corrupt_projection == {"error": "Storage is temporarily unavailable"}
+        ), str(corrupt_projection))
     finally:
         dish_repo_local.path.write_bytes(dish_bytes_before_corruption)
 
@@ -3138,6 +4086,483 @@ def test_audit_transaction_commits_state_and_proof():
             len(queried) == 1
             and queried[0]["event_id"] == exported[0]["event_id"]
         ))
+
+
+def test_correction_audit_descriptor_and_storage_hardening():
+    print("\n-- cooking correction audit/storage hardening --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    file_lock_mod = importlib.import_module(
+        ".src.repositories.file_lock", _PLUGIN_DIR.name
+    )
+    repositories = importlib.import_module(".src.repositories", _PLUGIN_DIR.name)
+
+    def event_payload():
+        return [{
+            "event_type": "meal.hardening_test.v1",
+            "entity": {"type": "cook_occurrence", "id": "cook_hardening"},
+            "payload": {"test": True},
+        }]
+
+    def context():
+        return {"actor": {"type": "test"}, "surface": {"kind": "test"}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "fresh-data"
+        manager = audit_mod.AuditTransactionManager(missing)
+        check("audit manager creates a clean data root safely", (
+            missing.is_dir() and (missing / "audit" / ".txn.lock").is_file()
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp) / "data"
+        manager = audit_mod.AuditTransactionManager(data_dir)
+        lock_path = data_dir / "audit" / ".txn.lock"
+        original_inode = lock_path.stat().st_ino
+        lock_path.unlink()
+        lock_path.write_text("replacement", encoding="utf-8")
+        before = {path: path.read_bytes() for path in data_dir.rglob("*") if path.is_file()}
+        try:
+            manager.commit(
+                operation="lock_swap",
+                targets={"history.json": b'{}\n'},
+                events=event_payload(),
+                context=context(),
+            )
+            lock_rejected = False
+        except OSError:
+            lock_rejected = True
+        check("lock inode substitution fails closed before domain writes", (
+            lock_rejected
+            and lock_path.stat().st_ino != original_inode
+            and not (data_dir / "history.json").exists()
+            and all(path.read_bytes() == payload for path, payload in before.items())
+        ))
+
+    for swap_kind in ("target_parent", "data_root"):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            data_dir = base / "data"
+            (data_dir / "plans").mkdir(parents=True)
+            old_plan = data_dir / "plans" / "2026-W30.json"
+            old_plan.write_bytes(b'{"state":"before"}\n')
+            moved = base / (swap_kind + "-moved")
+
+            def swap(stage):
+                if stage != "after_prepare":
+                    return
+                if swap_kind == "target_parent":
+                    os.rename(data_dir / "plans", moved)
+                    (data_dir / "plans").mkdir()
+                else:
+                    os.rename(data_dir, moved)
+                    data_dir.mkdir()
+
+            manager = audit_mod.AuditTransactionManager(
+                data_dir, fault_injector=swap
+            )
+            try:
+                manager.commit(
+                    operation=swap_kind,
+                    targets={"plans/2026-W30.json": b'{"state":"after"}\n'},
+                    events=event_payload(),
+                    context=context(),
+                )
+                swap_rejected = False
+            except audit_mod.AuditConflictError:
+                swap_rejected = True
+            visible_target = data_dir / "plans" / "2026-W30.json"
+            check(f"{swap_kind} substitution fails closed", (
+                swap_rejected and not visible_target.exists()
+            ))
+
+    for stage in (
+        "after_prepare", "after_all_targets", "after_commit", "after_export"
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            data_dir = base / "data"
+            (data_dir / "plans").mkdir(parents=True)
+            (data_dir / "plans" / "2026-W30.json").write_bytes(
+                b'{"state":"before"}\n'
+            )
+            moved = base / ("late-domain-" + stage)
+
+            def swap_domain(observed_stage):
+                if observed_stage == stage:
+                    os.rename(data_dir / "plans", moved)
+                    (data_dir / "plans").mkdir()
+
+            manager = audit_mod.AuditTransactionManager(
+                data_dir, fault_injector=swap_domain
+            )
+            try:
+                manager.commit(
+                    operation="late_domain_swap",
+                    targets={
+                        "plans/2026-W30.json": b'{"state":"after"}\n'
+                    },
+                    events=event_payload(),
+                    context=context(),
+                )
+                rejected = False
+            except audit_mod.AuditConflictError:
+                rejected = True
+            check(f"domain swap at {stage} cannot return committed", rejected)
+
+    for stage in (
+        "after_prepare", "after_all_targets", "after_commit", "after_export"
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            data_dir = base / "data"
+            data_dir.mkdir()
+            moved = base / ("late-transaction-" + stage)
+            holder = {}
+
+            def swap_transaction(observed_stage):
+                if observed_stage == stage:
+                    transaction_id = holder["manager"].last_transaction_id
+                    transaction_dir = next(
+                        (data_dir / "audit" / "transactions").glob(
+                            f"*/{transaction_id}"
+                        )
+                    )
+                    os.rename(transaction_dir, moved)
+                    transaction_dir.mkdir()
+
+            manager = audit_mod.AuditTransactionManager(
+                data_dir, fault_injector=swap_transaction
+            )
+            holder["manager"] = manager
+            try:
+                manager.commit(
+                    operation="late_transaction_swap",
+                    targets={"history.json": b'{}\n'},
+                    events=event_payload(),
+                    context=context(),
+                )
+                rejected = False
+            except audit_mod.AuditConflictError:
+                rejected = True
+            check(
+                f"transaction directory swap at {stage} cannot return committed",
+                rejected,
+            )
+
+    for stage in (
+        "after_prepare", "after_all_targets", "after_commit", "after_export"
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            data_dir = base / "data"
+            data_dir.mkdir()
+            moved = base / ("moved-month-" + stage)
+            holder = {}
+
+            def relocate_transaction_month(observed_stage):
+                if observed_stage == stage:
+                    transaction_id = holder["manager"].last_transaction_id
+                    month_dir = next(
+                        (data_dir / "audit" / "transactions").iterdir()
+                    )
+                    transaction_dir = month_dir / transaction_id
+                    os.rename(month_dir, moved)
+                    month_dir.mkdir()
+                    os.rename(moved / transaction_id, transaction_dir)
+
+            manager = audit_mod.AuditTransactionManager(
+                data_dir, fault_injector=relocate_transaction_month
+            )
+            holder["manager"] = manager
+            try:
+                manager.commit(
+                    operation="transaction_month_relocation",
+                    targets={"history.json": b'{}\n'},
+                    events=event_payload(),
+                    context=context(),
+                )
+                rejected = False
+            except audit_mod.AuditConflictError:
+                rejected = True
+            check(
+                f"transaction month relocation at {stage} cannot return committed",
+                rejected,
+            )
+
+    for stage in (
+        "after_prepare", "after_all_targets", "after_commit", "after_export"
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp)
+            canonical_parent = outer / "canonical-parent"
+            data_dir = canonical_parent / "data"
+            data_dir.mkdir(parents=True)
+            moved = outer / ("moved-parent-" + stage)
+
+            def swap_root_parent(observed_stage):
+                if observed_stage == stage:
+                    os.rename(canonical_parent, moved)
+                    canonical_parent.mkdir()
+
+            manager = audit_mod.AuditTransactionManager(
+                data_dir, fault_injector=swap_root_parent
+            )
+            try:
+                manager.commit(
+                    operation="root_parent_swap",
+                    targets={"history.json": b'{}\n'},
+                    events=event_payload(),
+                    context=context(),
+                )
+                rejected = False
+            except (audit_mod.AuditConflictError, OSError):
+                rejected = True
+            check(
+                f"data-root ancestor swap at {stage} cannot return committed",
+                rejected,
+            )
+
+    for swap_kind in ("month", "transaction"):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            data_dir = base / "data"
+            data_dir.mkdir()
+
+            def stop_before_terminal(stage):
+                if stage == "after_all_targets":
+                    raise RuntimeError("simulated recovery boundary")
+
+            writer = audit_mod.AuditTransactionManager(
+                data_dir, fault_injector=stop_before_terminal
+            )
+            try:
+                writer.commit(
+                    operation="recovery_identity_probe",
+                    targets={"history.json": b'{}\n'},
+                    events=event_payload(),
+                    context=context(),
+                )
+            except RuntimeError:
+                pass
+            transaction_id = writer.last_transaction_id
+            writer.close()
+
+            recovery = audit_mod.AuditTransactionManager(data_dir)
+            original_current_state = recovery._current_target_state
+            swapped = {"done": False}
+
+            def detach_recovery_journal(target, *, pinned=None):
+                state = original_current_state(target, pinned=pinned)
+                if not swapped["done"]:
+                    month_dir = next(
+                        (data_dir / "audit" / "transactions").iterdir()
+                    )
+                    transaction_dir = month_dir / transaction_id
+                    if swap_kind == "month":
+                        os.rename(month_dir, base / "detached-month")
+                        month_dir.mkdir()
+                    else:
+                        os.rename(
+                            transaction_dir, base / "detached-transaction"
+                        )
+                        transaction_dir.mkdir()
+                    swapped["done"] = True
+                return state
+
+            recovery._current_target_state = detach_recovery_journal
+            try:
+                recovery.recover()
+                rejected = False
+            except audit_mod.AuditConflictError:
+                rejected = True
+            check(
+                f"recovery rejects detached {swap_kind} journal",
+                rejected,
+            )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        (data_dir / "history.json").write_bytes(b'{"before":1}\n')
+        (data_dir / "plans").mkdir()
+        (data_dir / "plans" / "2026-W30.json").write_bytes(b'{"before":2}\n')
+
+        def crash(stage):
+            if stage == "after_target:0":
+                raise RuntimeError("reader recovery crash")
+
+        manager = audit_mod.AuditTransactionManager(
+            data_dir, fault_injector=crash
+        )
+        try:
+            manager.commit(
+                operation="reader_recovery",
+                targets={
+                    "history.json": b'{"after":1}\n',
+                    "plans/2026-W30.json": b'{"after":2}\n',
+                },
+                events=event_payload(),
+                context=context(),
+            )
+        except RuntimeError:
+            pass
+        manager._fault_injector = None
+        with manager.consistent_read():
+            coherent = (
+                (data_dir / "history.json").read_bytes() == b'{"before":1}\n'
+                and (data_dir / "plans" / "2026-W30.json").read_bytes()
+                    == b'{"before":2}\n'
+            )
+        check("read-only boundary recovers mixed transaction before exposure", coherent)
+
+    with tempfile.TemporaryDirectory() as root_a, tempfile.TemporaryDirectory() as root_b:
+        data_a = Path(root_a)
+        data_b = Path(root_b)
+        for root in (data_a, data_b):
+            (root / "plans").mkdir()
+        manager = audit_mod.AuditTransactionManager(data_a)
+        foreign = repositories.JsonHistoryRepository(data_b / "history.json")
+        try:
+            manager.assert_repository_path(foreign.path, "history.json")
+            foreign_rejected = False
+        except ValueError:
+            foreign_rejected = True
+        check("foreign injected repository root is rejected", foreign_rejected)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(data_dir)
+        original_flock = file_lock_mod.fcntl.flock
+        calls = {"unlock": 0}
+
+        def fail_first_unlock(descriptor, operation):
+            if operation == file_lock_mod.fcntl.LOCK_UN and calls["unlock"] == 0:
+                calls["unlock"] += 1
+                raise OSError("simulated unlock failure")
+            return original_flock(descriptor, operation)
+
+        file_lock_mod.fcntl.flock = fail_first_unlock
+        try:
+            committed = manager.commit(
+                operation="post_commit_unlock",
+                targets={"history.json": b'{}\n'},
+                events=event_payload(),
+                context=context(),
+            )
+        finally:
+            file_lock_mod.fcntl.flock = original_flock
+        try:
+            with manager.consistent_read():
+                pass
+            poisoned = False
+        except OSError:
+            poisoned = True
+        check("post-commit unlock fault preserves success and poisons manager", (
+            committed["status"] == "committed"
+            and (data_dir / "history.json").read_bytes() == b'{}\n'
+            and poisoned
+        ))
+        child_code = (
+            "import importlib,pathlib,sys;"
+            f"root=pathlib.Path({str(_PLUGIN_DIR)!r});"
+            "sys.path.insert(0,str(root.parent));"
+            "audit=importlib.import_module('.src.audit.transaction',root.name);"
+            f"manager=audit.AuditTransactionManager(pathlib.Path({str(data_dir)!r}));"
+            "manager.recover();print('acquired')"
+        )
+        try:
+            child = subprocess.run(
+                [sys.executable, "-c", child_code],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            child_acquired = (
+                child.returncode == 0 and child.stdout.strip() == "acquired"
+            )
+        except subprocess.TimeoutExpired:
+            child_acquired = False
+        check(
+            "post-commit unlock fault does not strand cross-process flock",
+            child_acquired,
+        )
+
+
+def test_correction_history_lineage_corruption_fails_closed():
+    print("\n-- cooking correction history lineage integrity --")
+    history_mod = importlib.import_module(
+        ".src.repositories.json_history", _PLUGIN_DIR.name
+    )
+    base = [
+        {
+            "id": "cook_root",
+            "dish_name_snapshot": "soup",
+            "cooked_at": None,
+            "cooked_on": "2026-08-11",
+            "time_precision": "date",
+            "recorded_at": "2026-08-11T10:00:00Z",
+            "plan_occurrence_id": "mealocc_test",
+            "actual_portions": None,
+            "actual_yield_portions": None,
+            "retracted_at": "2026-08-11T11:00:00Z",
+            "backfilled": False,
+            "provenance": None,
+        },
+        {
+            "id": "cook_child",
+            "dish_name_snapshot": "soup",
+            "cooked_at": None,
+            "cooked_on": "2026-08-11",
+            "time_precision": "date",
+            "recorded_at": "2026-08-11T11:00:00Z",
+            "plan_occurrence_id": "mealocc_test",
+            "actual_portions": None,
+            "actual_yield_portions": None,
+            "retracted_at": None,
+            "backfilled": False,
+            "provenance": {
+                "source": "cook_event_correction",
+                "replaces_event_id": "cook_root",
+                "root_event_id": "cook_root",
+                "effects_origin_event_id": "cook_root",
+                "request_fingerprint": "sha256:" + "a" * 64,
+            },
+        },
+    ]
+    corruptions = {
+        "duplicate event ID": lambda rows: rows[1].update(id="cook_root"),
+        "two active linked events": lambda rows: rows[0].update(retracted_at=None),
+        "missing predecessor": lambda rows: rows[1]["provenance"].update(
+            replaces_event_id="cook_missing"
+        ),
+        "changed root": lambda rows: rows[1]["provenance"].update(
+            root_event_id="cook_other"
+        ),
+        "changed effects origin": lambda rows: rows[1]["provenance"].update(
+            effects_origin_event_id="cook_other"
+        ),
+        "invalid request fingerprint": lambda rows: rows[1]["provenance"].update(
+            request_fingerprint="sha256:not-a-digest"
+        ),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "history.json"
+        repository = history_mod.JsonHistoryRepository(path)
+        for label, mutate in corruptions.items():
+            rows = json.loads(json.dumps(base))
+            mutate(rows)
+            path.write_text(json.dumps({
+                "schema_version": 2,
+                "entries": rows,
+            }), encoding="utf-8")
+            before = path.read_bytes()
+            try:
+                repository.load_events(strict=True)
+                rejected = False
+            except history_mod.HistoryDataError:
+                rejected = True
+            check(f"history rejects {label} without rewrite", (
+                rejected and path.read_bytes() == before
+            ))
 
 
 def test_audit_transaction_recovers_mixed_state_to_before_images():
@@ -3236,6 +4661,115 @@ def test_audit_transaction_recovers_all_after_as_committed():
                 for line in path.read_text(encoding="utf-8").splitlines()
                 if line
             ]) == 1
+        ))
+
+
+def test_audit_recovery_accepts_legacy_receipt_proof_without_enabling_writes():
+    """Keep old receipt journals readable without shipping RECEIPT-1 writers."""
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(data_dir)
+        receipt_id = "receipt_" + "c" * 32
+        before = b'{"schema_version":1,"receipts":[]}\n'
+        after = (
+            json.dumps(
+                {"schema_version": 1, "receipts": [{"receipt_id": receipt_id}]},
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        receipt_path = data_dir / "receipts.json"
+        receipt_path.write_bytes(after)
+
+        transaction_id = "tx_" + "a" * 32
+        occurred_at = "2026-08-13T17:56:10.000000Z"
+        transaction_dir = (
+            data_dir / "audit" / "transactions" / "2026-08" / transaction_id
+        )
+        targets_dir = transaction_dir / "targets"
+        targets_dir.mkdir(parents=True)
+        (targets_dir / "000.before").write_bytes(before)
+        (targets_dir / "000.after").write_bytes(after)
+        event = {
+            "schema_version": 1,
+            "event_id": "evt_" + "b" * 32,
+            "transaction_id": transaction_id,
+            "operation_id": transaction_id,
+            "sequence": 1,
+            "operation": "record_purchase_receipt",
+            "occurred_at": occurred_at,
+            "actor": {"type": "agent"},
+            "surface": {"kind": "native_tool"},
+            "correlation_id": transaction_id,
+            "causation_id": None,
+            "redaction_policy": "meal-audit-v1",
+            "event_type": "purchase_receipt.recorded.v1",
+            "entity": {"type": "purchase_receipt", "id": receipt_id},
+            "payload": {"receipt_id": receipt_id},
+        }
+        prepare = {
+            "schema_version": 1,
+            "transaction_id": transaction_id,
+            "state": "prepared",
+            "prepared_at": occurred_at,
+            "operation": "record_purchase_receipt",
+            "context": {
+                "actor": {"type": "agent"},
+                "surface": {"kind": "native_tool"},
+            },
+            "targets": [{
+                "relative_path": "receipts.json",
+                "before_exists": True,
+                "before_sha256": hashlib.sha256(before).hexdigest(),
+                "before_blob": "targets/000.before",
+                "after_exists": True,
+                "after_sha256": hashlib.sha256(after).hexdigest(),
+                "after_blob": "targets/000.after",
+            }],
+            "events": [event],
+        }
+        (transaction_dir / "prepare.json").write_text(
+            json.dumps(prepare, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        recovered = manager.recover()
+        check("legacy receipt proof recovers from canonical after-image", (
+            recovered == [(transaction_id, "committed")]
+            and (transaction_dir / "commit.json").is_file()
+            and receipt_path.read_bytes() == after
+        ))
+        exported = [
+            json.loads(line)
+            for path in (data_dir / "audit" / "events").glob("*.jsonl")
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        check("legacy receipt proof remains queryable after projection rebuild", (
+            len(exported) == 1
+            and exported[0]["event_type"] == "purchase_receipt.recorded.v1"
+        ))
+
+        try:
+            manager.commit(
+                operation="unsupported_receipt_write",
+                targets={"receipts.json": b'{}\n'},
+                events=[{
+                    "event_type": "purchase_receipt.unsupported.v1",
+                    "entity": {"type": "purchase_receipt", "id": "receipt_new"},
+                    "payload": {"test": True},
+                }],
+                context={
+                    "actor": {"type": "test"},
+                    "surface": {"kind": "test"},
+                },
+            )
+            write_rejected = False
+        except ValueError:
+            write_rejected = True
+        check("COOK-1 does not enable new receipt audit writes", (
+            write_rejected and receipt_path.read_bytes() == after
         ))
 
 
@@ -3464,7 +4998,7 @@ def test_audit_hardening_rejects_symlinks_and_repairs_projection():
                 context={"actor": {"type": "test"}, "surface": {"kind": "test"}},
             )
             check("audit rejects symlink target", False)
-        except ValueError:
+        except (ValueError, audit_mod.AuditConflictError):
             check("audit rejects symlink target", True)
         check("symlink victim remains unchanged", victim.read_text() == '{"safe": true}')
 
@@ -3617,6 +5151,945 @@ def test_audit_hardening_blocks_parent_swap_and_corrupt_proof():
         check("partial terminal marker fails closed", partial_terminal_rejected)
 
 
+def test_audit_canonical_records_are_closed_and_exactly_typed():
+    print("\n-- strict canonical audit record schema --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "strict-schema"},
+        "payload": {},
+    }
+    context = {
+        "actor": {"type": "test"},
+        "surface": {"kind": "test"},
+    }
+
+    def update_json(path, mutate):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        mutate(record)
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+    mutations = {
+        "float prepare version": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record.update(schema_version=2.0),
+        ),
+        "boolean prepare version": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record.update(schema_version=True),
+        ),
+        "float event version": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0].update(schema_version=1.0),
+        ),
+        "float event sequence": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0].update(sequence=1.0),
+        ),
+        "float terminal version": lambda tx: update_json(
+            tx / "commit.json",
+            lambda record: record.update(schema_version=1.0),
+        ),
+        "unknown event field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0].update(unexpected=True),
+        ),
+        "unknown entity field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0]["entity"].update(unexpected=True),
+        ),
+        "unknown actor field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0]["actor"].update(unexpected=True),
+        ),
+        "unknown surface field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["events"][0]["surface"].update(unexpected=True),
+        ),
+        "unknown target field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["targets"][0].update(unexpected=True),
+        ),
+        "unknown context field": lambda tx: update_json(
+            tx / "prepare.json",
+            lambda record: record["context"].update(unexpected=True),
+        ),
+        "false recovered marker": lambda tx: update_json(
+            tx / "commit.json",
+            lambda record: record.update(recovered=False),
+        ),
+    }
+    for label, mutate in mutations.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = audit_mod.AuditTransactionManager(root)
+            receipt = manager.commit(
+                operation="strict_schema_probe",
+                targets={"history.json": b'{}\n'},
+                events=[event],
+                context=context,
+            )
+            manager.close()
+            transaction_dir = next(
+                (root / "audit" / "transactions").glob(
+                    f"*/{receipt['transaction_id']}"
+                )
+            )
+            mutate(transaction_dir)
+            before = (root / "history.json").read_bytes()
+            reader = audit_mod.AuditTransactionManager(root)
+            try:
+                reader.list_events(limit=10)
+                rejected = False
+            except audit_mod.AuditConflictError:
+                rejected = True
+            finally:
+                reader.close()
+            check(f"canonical audit rejects {label}", (
+                rejected and (root / "history.json").read_bytes() == before
+            ))
+
+
+def test_audit_conflict_marker_and_transaction_namespace_are_corpus_wide():
+    print("\n-- audit conflict marker and transaction namespace --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "namespace"},
+        "payload": {},
+    }
+    context = {
+        "actor": {"type": "test"},
+        "surface": {"kind": "test"},
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        target = root / "history.json"
+        target.write_bytes(b'{"state":"before"}\n')
+
+        def stop_after_prepare(stage):
+            if stage == "after_prepare":
+                raise RuntimeError("prepared")
+
+        writer = audit_mod.AuditTransactionManager(
+            root, fault_injector=stop_after_prepare
+        )
+        try:
+            writer.commit(
+                operation="sticky_conflict_probe",
+                targets={"history.json": b'{"state":"after"}\n'},
+                events=[event],
+                context=context,
+            )
+        except RuntimeError:
+            pass
+        transaction_id = writer.last_transaction_id
+        writer.close()
+        target.write_bytes(b'{"state":"unknown"}\n')
+        detector = audit_mod.AuditTransactionManager(root)
+        try:
+            detector.recover()
+        except audit_mod.AuditConflictError:
+            pass
+        detector.close()
+        transaction_dir = next(
+            (root / "audit" / "transactions").glob(f"*/{transaction_id}")
+        )
+        check("unknown state persisted a conflict marker", (
+            (transaction_dir / "conflict.json").is_file()
+        ))
+        (transaction_dir / "prepare.json").unlink()
+        poisoned = audit_mod.AuditTransactionManager(root)
+        outcomes = []
+        for action in (
+            lambda: poisoned.recover(),
+            lambda: poisoned.commit(
+                operation="must_remain_poisoned",
+                targets={"history.json": b'{"state":"new"}\n'},
+                events=[event],
+                context=context,
+            ),
+        ):
+            try:
+                action()
+                outcomes.append(False)
+            except audit_mod.AuditConflictError:
+                outcomes.append(True)
+        poisoned.close()
+        check("deleting prepare cannot erase conflict poison", (
+            all(outcomes)
+            and target.read_bytes() == b'{"state":"unknown"}\n'
+            and (transaction_dir / "conflict.json").is_file()
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        receipt = manager.commit(
+            operation="global_transaction_id_probe",
+            targets={"history.json": b'{}\n'},
+            events=[event],
+            context=context,
+        )
+        manager.close()
+        original = next(
+            (root / "audit" / "transactions").glob(
+                f"*/{receipt['transaction_id']}"
+            )
+        )
+        duplicate = (
+            root / "audit" / "transactions" / "2026-09"
+            / receipt["transaction_id"]
+        )
+        duplicate.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(original, duplicate)
+        prepare_path = duplicate / "prepare.json"
+        prepare = json.loads(prepare_path.read_text(encoding="utf-8"))
+        prepare["prepared_at"] = "2026-09-01T00:00:00Z"
+        for item in prepare["events"]:
+            item["occurred_at"] = "2026-09-01T00:00:00Z"
+        prepare_path.write_text(json.dumps(prepare), encoding="utf-8")
+        (duplicate / "commit.json").unlink()
+        (duplicate / "abort.json").write_text(json.dumps({
+            "schema_version": 1,
+            "transaction_id": receipt["transaction_id"],
+            "state": "aborted",
+            "aborted_at": "2026-09-01T00:00:01Z",
+            "recovered": True,
+        }), encoding="utf-8")
+        reader = audit_mod.AuditTransactionManager(root)
+        try:
+            reader.recover()
+            rejected = False
+        except audit_mod.AuditConflictError:
+            rejected = True
+        finally:
+            reader.close()
+        check("transaction IDs are unique across committed and aborted corpus", (
+            rejected and (root / "history.json").read_bytes() == b'{}\n'
+        ))
+
+
+def test_audit_recovery_parent_substitution_and_fifo_reads_fail_closed():
+    print("\n-- audit recovery parent identity and FIFO reads --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    core_mod = importlib.import_module(".src", _PLUGIN_DIR.name)
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "identity"},
+        "payload": {},
+    }
+    context = {"actor": {"type": "test"}, "surface": {"kind": "test"}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        plans = root / "plans"
+        plans.mkdir()
+        (root / "history.json").write_bytes(b'{"v":"before"}\n')
+        (plans / "2026-W33.json").write_bytes(b'{"p":"before"}\n')
+
+        def stop_after_prepare(stage):
+            if stage == "after_prepare":
+                raise RuntimeError("prepared")
+
+        writer = audit_mod.AuditTransactionManager(
+            root, fault_injector=stop_after_prepare
+        )
+        try:
+            writer.commit(
+                operation="parent_identity_probe",
+                targets={
+                    "history.json": b'{"v":"after"}\n',
+                    "plans/2026-W33.json": b'{"p":"after"}\n',
+                },
+                events=[event],
+                context=context,
+            )
+        except RuntimeError:
+            pass
+        writer.close()
+        original = root / "plans-original"
+        plans.rename(original)
+        plans.mkdir()
+        substitute = plans / "2026-W33.json"
+        substitute.write_bytes(b'{"p":"after"}\n')
+        reader = audit_mod.AuditTransactionManager(root)
+        try:
+            reader.recover()
+            rejected = False
+        except audit_mod.AuditConflictError:
+            rejected = True
+        finally:
+            reader.close()
+        check("recovery rejects substituted target parent directory", (
+            rejected
+            and substitute.read_bytes() == b'{"p":"after"}\n'
+            and (original / "2026-W33.json").read_bytes() == b'{"p":"before"}\n'
+        ))
+
+    def read_target_in_process(root, relative, queue):
+        manager = audit_mod.AuditTransactionManager(root)
+        try:
+            queue.put(manager._read_target(relative))
+        except Exception as exc:
+            queue.put(type(exc).__name__)
+        finally:
+            manager.close()
+
+    def read_unscoped_in_process(root, queue):
+        try:
+            queue.put(core_mod.read_json_file(root / "history.json", missing=None))
+        except Exception as exc:
+            queue.put(type(exc).__name__)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        os.mkfifo(root / "history.json")
+        outcomes = {}
+        for label, runner in (
+            ("audited", read_target_in_process),
+            ("unscoped", read_unscoped_in_process),
+        ):
+            ctx = multiprocessing.get_context("fork")
+            queue = ctx.Queue()
+            process = ctx.Process(
+                target=runner, args=(root, "history.json", queue)
+                if label == "audited" else (root, queue)
+            )
+            process.start()
+            process.join(5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+                outcomes[label] = "HUNG"
+            else:
+                outcomes[label] = (
+                    queue.get() if not queue.empty() else "CRASHED"
+                )
+        check("FIFO-substituted targets fail fast on every read path", (
+            outcomes == {
+                "audited": "AuditConflictError",
+                "unscoped": "ValueError",
+            }
+        ))
+
+
+def test_correction_rejects_unverified_legacy_tombstones_until_acknowledged():
+    print("\n-- correction legacy tombstone acknowledgment --")
+    plan_mod = importlib.import_module(".src.plan", _PLUGIN_DIR.name)
+    hist_mod = importlib.import_module(
+        ".src.repositories.json_history", _PLUGIN_DIR.name
+    )
+    cook_mod = importlib.import_module(".src.cooking", _PLUGIN_DIR.name)
+    dish_repo_mod = importlib.import_module(
+        ".src.repositories.json_dish", _PLUGIN_DIR.name
+    )
+    fridge_repo_mod = importlib.import_module(
+        ".src.repositories.json_fridge", _PLUGIN_DIR.name
+    )
+    plan_repo_mod = importlib.import_module(
+        ".src.repositories.json_plan", _PLUGIN_DIR.name
+    )
+    prep_repo_mod = importlib.import_module(
+        ".src.repositories.json_prep_item", _PLUGIN_DIR.name
+    )
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+
+    def event(identifier, active):
+        return hist_mod.CookingEvent(
+            id=identifier,
+            dish_name_snapshot="soup",
+            cooked_on="2026-08-11",
+            time_precision="date",
+            recorded_at="2026-08-11T10:00:00Z",
+            plan_occurrence_id="mealocc_probe",
+            retracted_at=None if active else "2026-08-11T11:00:00Z",
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp)
+        history = hist_mod.JsonHistoryRepository(data / "history.json")
+        plans = plan_repo_mod.JsonPlanRepository(data / "plans")
+        dishes = dish_repo_mod.JsonDishRepository(data / "dishes.json")
+        fridge = fridge_repo_mod.JsonFridgeRepository(data / "fridge.json")
+        prep = prep_repo_mod.JsonPrepItemRepository(data / "prep_items.json")
+        manager = audit_mod.AuditTransactionManager(data)
+        old = event("cook_" + "a" * 24, False)
+        current = event("cook_" + "b" * 24, True)
+        history.save_events([old, current])
+        meal = plan_mod.MealEntry(
+            dish="soup",
+            occurrence_id="mealocc_probe",
+            root_occurrence_id="mealocc_probe",
+            status="cooked",
+            planned_for="2026-08-10",
+            revision=2,
+            cooked_on="2026-08-11",
+            cooked_time_precision="date",
+            cook_event_id=current.id,
+        )
+        plan = plan_mod.WeekPlan(
+            week_id="2026-W33",
+            status="active",
+            days={"mon": plan_mod.DayPlan(meals=[meal])},
+        )
+        plans.save(plan)
+        current_id = current.id
+        old_id = old.id
+        try:
+            cook_mod.register_cooked(
+                dish_name="soup",
+                occurrence_id="mealocc_probe",
+                expected_revision=2,
+                replaces_event_id=current_id,
+                dish_repository=dishes,
+                fridge_repository=fridge,
+                history_repository=history,
+                plan_repository=plans,
+                prep_repository=prep,
+                audit_transaction_manager=manager,
+            )
+        except ValueError as exc:
+            rejected = "acknowledge_legacy_tombstones" in str(exc)
+        else:
+            rejected = False
+        check("correction fails closed on unverified legacy tombstones", rejected)
+        result = cook_mod.register_cooked(
+            dish_name="soup",
+            occurrence_id="mealocc_probe",
+            expected_revision=2,
+            replaces_event_id=current_id,
+            acknowledge_legacy_tombstones=[old_id],
+            dish_repository=dishes,
+            fridge_repository=fridge,
+            history_repository=history,
+            plan_repository=plans,
+            prep_repository=prep,
+            audit_transaction_manager=manager,
+        )
+        events = history.load_events(strict=True)
+        check("acknowledged correction commits exactly one active event", (
+            result["corrected"] is True
+            and sum(item.active for item in events) == 1
+            and result["replaces_event_id"] == current_id
+        ))
+
+
+def test_audit_conflict_journal_projection_and_identity_regressions():
+    print("\n-- audit conflict/journal/projection identity regressions --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+
+    event = {
+        "event_type": "probe.v1",
+        "entity": {"type": "probe", "id": "audit-regression"},
+        "payload": {},
+    }
+    context = {
+        "actor": {"type": "test"},
+        "surface": {"kind": "test"},
+    }
+
+    def make_conflict(root):
+        target = root / "history.json"
+        target.write_bytes(b'{"state":"before"}\n')
+
+        def stop_after_prepare(stage):
+            if stage == "after_prepare":
+                raise RuntimeError("prepared")
+
+        writer = audit_mod.AuditTransactionManager(
+            root, fault_injector=stop_after_prepare
+        )
+        try:
+            writer.commit(
+                operation="conflict_probe",
+                targets={"history.json": b'{"state":"after"}\n'},
+                events=[event],
+                context=context,
+            )
+        except RuntimeError:
+            pass
+        transaction_id = writer.last_transaction_id
+        writer.close()
+        target.write_bytes(b'{"state":"unknown"}\n')
+        recovery = audit_mod.AuditTransactionManager(root)
+        try:
+            recovery.recover()
+        except audit_mod.AuditConflictError:
+            pass
+        transaction_dir = next(
+            (root / "audit" / "transactions").glob(f"*/{transaction_id}")
+        )
+        return recovery, transaction_id, transaction_dir
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        recovery, transaction_id, transaction_dir = make_conflict(root)
+        outcomes = []
+
+        def attempt_read():
+            with recovery.consistent_read():
+                pass
+
+        for action in (
+            lambda: recovery.recover(),
+            attempt_read,
+            lambda: recovery.commit(
+                operation="blocked_after_conflict",
+                targets={"history.json": b'{}\n'},
+                events=[event],
+                context=context,
+            ),
+        ):
+            try:
+                action()
+                outcomes.append(False)
+            except audit_mod.AuditConflictError as exc:
+                outcomes.append("unresolved" in str(exc).lower())
+        check("persisted conflict poisons every later read and write", all(outcomes))
+        check("conflict poison preserves unknown target bytes", (
+            (root / "history.json").read_bytes() == b'{"state":"unknown"}\n'
+            and (transaction_dir / "conflict.json").is_file()
+            and recovery.last_transaction_id is None
+        ))
+
+    malformed_conflicts = {
+        "missing states": lambda marker: marker.pop("target_states"),
+        "wrong cardinality": lambda marker: marker.update(target_states=[]),
+        "invalid state": lambda marker: marker.update(target_states=["maybe"]),
+    }
+    for label, mutate in malformed_conflicts.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            recovery, _transaction_id, transaction_dir = make_conflict(root)
+            marker_path = transaction_dir / "conflict.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            mutate(marker)
+            marker_path.write_text(json.dumps(marker), encoding="utf-8")
+            try:
+                audit_mod.AuditTransactionManager(root).recover()
+                rejected = False
+            except audit_mod.AuditConflictError as exc:
+                rejected = "terminal" in str(exc).lower()
+            check(f"conflict terminal rejects {label}", rejected)
+            recovery.close()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        month_dir = root / "audit" / "transactions" / "2026-08"
+        transaction_dir = month_dir / ("tx_" + "a" * 32)
+        transaction_dir.mkdir(parents=True)
+        (transaction_dir / "prepare.json").symlink_to(
+            root / "missing-prepare.json"
+        )
+        try:
+            manager.recover()
+            rejected = False
+        except audit_mod.AuditConflictError:
+            rejected = True
+        check("dangling prepare symlink fails closed", rejected)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        import multiprocessing
+
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        transaction_dir = (
+            root / "audit" / "transactions" / "2026-08"
+            / ("tx_" + "d" * 32)
+        )
+        transaction_dir.mkdir(parents=True)
+        os.mkfifo(transaction_dir / "prepare.json")
+        ctx = multiprocessing.get_context("fork")
+        rejected_event = ctx.Event()
+
+        def recover_fifo_prepare():
+            try:
+                manager.recover()
+            except audit_mod.AuditConflictError:
+                rejected_event.set()
+
+        reader = ctx.Process(target=recover_fifo_prepare)
+        reader.start()
+        reader.join(timeout=0.5)
+        hung = reader.is_alive()
+        if hung:
+            reader.terminate()
+            reader.join(timeout=2)
+        check("FIFO prepare is rejected without blocking recovery", (
+            not hung and reader.exitcode == 0 and rejected_event.is_set()
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        spoof = Path(outside) / "spoof.jsonl"
+        spoof.write_text(json.dumps({
+            "event_id": "evt_" + "b" * 32,
+            "entity": {"type": "probe", "id": "spoof"},
+        }) + "\n", encoding="utf-8")
+        (root / "audit" / "events" / "2026-08.jsonl").symlink_to(spoof)
+        try:
+            manager.list_events(entity_id="spoof")
+            rejected = False
+        except audit_mod.AuditConflictError:
+            rejected = True
+        check("zero-commit projection symlink fails closed", rejected)
+        check("projection symlink cannot alter external file", spoof.is_file())
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        stale = root / "audit" / "events" / "2026-08.jsonl"
+        stale.write_text('{"stale":true}\n', encoding="utf-8")
+        try:
+            events = manager.list_events()
+            reconciled = events == [] and not stale.exists()
+        except audit_mod.AuditConflictError:
+            reconciled = False
+        check("zero-commit stale regular projection is reconciled", reconciled)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        first = manager.commit(
+            operation="event_one",
+            targets={"history.json": b'{"v":1}\n'},
+            events=[event],
+            context=context,
+        )
+        second = manager.commit(
+            operation="event_two",
+            targets={"history.json": b'{"v":2}\n'},
+            events=[event],
+            context=context,
+        )
+        first_prepare = next(
+            (root / "audit" / "transactions").glob(
+                f"*/{first['transaction_id']}/prepare.json"
+            )
+        )
+        second_prepare = next(
+            (root / "audit" / "transactions").glob(
+                f"*/{second['transaction_id']}/prepare.json"
+            )
+        )
+        first_event_id = json.loads(
+            first_prepare.read_text(encoding="utf-8")
+        )["events"][0]["event_id"]
+        second_record = json.loads(second_prepare.read_text(encoding="utf-8"))
+        second_record["events"][0]["event_id"] = first_event_id
+        second_prepare.write_text(json.dumps(second_record), encoding="utf-8")
+        try:
+            manager.recover()
+            rejected = False
+        except audit_mod.AuditConflictError:
+            rejected = True
+        check("duplicate event ID across committed corpus fails closed", rejected)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        clock = iter((
+            "2026-08-24T12:00:00.000000Z",
+            "2026-08-24T12:00:01.000000Z",
+            "2026-08-24T12:00:02.000000Z",
+            "2026-08-23T12:00:00.000000Z",
+            "2026-08-23T12:00:01.000000Z",
+            "2026-08-23T12:00:02.000000Z",
+        ))
+        original_now = audit_mod._utc_now
+        setattr(audit_mod, "_utc_now", lambda: next(clock))
+        try:
+            first = manager.commit(
+                operation="clock_one",
+                targets={"history.json": b'{"version":1}\n'},
+                events=[event],
+                context=context,
+            )
+            second = manager.commit(
+                operation="clock_two",
+                targets={"history.json": b'{"version":2}\n'},
+                events=[event],
+                context=context,
+            )
+        finally:
+            setattr(audit_mod, "_utc_now", original_now)
+        try:
+            manager.recover()
+            recovered = True
+        except audit_mod.AuditConflictError:
+            recovered = False
+        check("committed chain is independent of backwards wall clock", (
+            first["status"] == second["status"] == "committed"
+            and recovered
+            and (root / "history.json").read_bytes() == b'{"version":2}\n'
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        fixed_hex = "c" * 32
+        month = audit_mod._month(audit_mod._utc_now())
+        collision = root / "audit" / "transactions" / month / f"tx_{fixed_hex}"
+        collision.mkdir(parents=True)
+        sentinel = collision / "sentinel"
+        sentinel.write_bytes(b"preserve")
+
+        class FixedUuid:
+            hex = fixed_hex
+
+        original_uuid4 = audit_mod.uuid.uuid4
+        audit_mod.uuid.uuid4 = lambda: FixedUuid()
+        try:
+            try:
+                manager.commit(
+                    operation="transaction_collision",
+                    targets={"history.json": b'{}\n'},
+                    events=[event],
+                    context=context,
+                )
+                rejected = False
+            except audit_mod.AuditConflictError:
+                rejected = True
+        finally:
+            audit_mod.uuid.uuid4 = original_uuid4
+        check("transaction ID collision is exclusive and non-mutating", (
+            rejected
+            and sentinel.read_bytes() == b"preserve"
+            and not (root / "history.json").exists()
+            and not (collision / "prepare.json").exists()
+        ))
+
+
+def test_pinned_audit_lock_fork_and_poison_regressions():
+    print("\n-- pinned audit lock fork/poison regressions --")
+    import multiprocessing
+    import time
+
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    file_lock_mod = importlib.import_module(
+        ".src.repositories.file_lock", _PLUGIN_DIR.name
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        ctx = multiprocessing.get_context("fork")
+        acquired = ctx.Event()
+
+        def acquire_in_child():
+            with manager.lock:
+                acquired.set()
+
+        with manager.lock:
+            child = ctx.Process(target=acquire_in_child)
+            child.start()
+            bypassed = acquired.wait(0.25)
+        acquired_after_release = acquired.wait(5)
+        child.join(timeout=5)
+        check("forked pinned lock uses an independent flock OFD", (
+            not bypassed and acquired_after_release
+            and child.exitcode == 0 and not child.is_alive()
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manager = audit_mod.AuditTransactionManager(root)
+        lock_path = root / "audit" / ".txn.lock"
+        original = root / "audit" / ".txn.lock.original"
+        lock_path.rename(original)
+        lock_path.write_text("replacement", encoding="utf-8")
+        try:
+            manager.recover()
+        except OSError:
+            first_rejected = True
+        else:
+            first_rejected = False
+        lock_path.unlink()
+        original.rename(lock_path)
+        try:
+            manager.recover()
+        except OSError:
+            still_poisoned = True
+        else:
+            still_poisoned = False
+        check("restoring substituted lock pathname cannot revive manager", (
+            first_rejected and still_poisoned
+        ))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        manager = audit_mod.AuditTransactionManager(Path(tmp))
+        original_flock = file_lock_mod.fcntl.flock
+        original_poison = manager.lock._poison
+        poison_started = threading.Event()
+        allow_poison = threading.Event()
+        waiter_entered = threading.Event()
+        waiter_rejected = threading.Event()
+        unlock_failed = {"done": False}
+
+        def fail_first_unlock(descriptor, operation):
+            if (
+                operation == file_lock_mod.fcntl.LOCK_UN
+                and not unlock_failed["done"]
+            ):
+                unlock_failed["done"] = True
+                raise OSError("simulated unlock failure")
+            return original_flock(descriptor, operation)
+
+        def delayed_poison(exc):
+            poison_started.set()
+            allow_poison.wait(2)
+            original_poison(exc)
+
+        def owner():
+            try:
+                with manager.lock:
+                    pass
+            except OSError:
+                pass
+
+        def waiter():
+            poison_started.wait(2)
+            try:
+                with manager.lock:
+                    waiter_entered.set()
+            except OSError:
+                waiter_rejected.set()
+
+        file_lock_mod.fcntl.flock = fail_first_unlock
+        manager.lock._poison = delayed_poison
+        first = threading.Thread(target=owner)
+        second = threading.Thread(target=waiter)
+        try:
+            first.start()
+            second.start()
+            poison_started.wait(2)
+            time.sleep(0.05)
+            entered_before_poison = waiter_entered.is_set()
+            allow_poison.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+        finally:
+            manager.lock._poison = original_poison
+            file_lock_mod.fcntl.flock = original_flock
+        check("unlock poison is atomic against waiting threads", (
+            not entered_before_poison
+            and not waiter_entered.is_set()
+            and waiter_rejected.is_set()
+            and not first.is_alive() and not second.is_alive()
+        ))
+
+
+def test_unscoped_repository_reads_and_awareness_fail_closed():
+    print("\n-- unscoped repository read/awareness hardening --")
+    src_mod = importlib.import_module(".src", _PLUGIN_DIR.name)
+    awareness_mod = importlib.import_module(".src.awareness", _PLUGIN_DIR.name)
+    repositories = importlib.import_module(".src.repositories", _PLUGIN_DIR.name)
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+        root = Path(tmp)
+        external = Path(outside) / "external.json"
+        external.write_text('{"schema_version":4,"items":[]}', encoding="utf-8")
+        linked = root / "fridge.json"
+        linked.symlink_to(external)
+        try:
+            src_mod.read_json_file(linked)
+            symlink_rejected = False
+        except (OSError, ValueError):
+            symlink_rejected = True
+        check("unscoped repository read rejects final symlink", symlink_rejected)
+
+        fifo = root / "history.json"
+        os.mkfifo(fifo)
+        import multiprocessing
+        ctx = multiprocessing.get_context("fork")
+        fifo_rejected_event = ctx.Event()
+
+        def read_fifo():
+            try:
+                src_mod.read_json_file(fifo)
+            except (OSError, ValueError):
+                fifo_rejected_event.set()
+
+        fifo_reader = ctx.Process(target=read_fifo)
+        fifo_reader.start()
+        fifo_reader.join(timeout=0.5)
+        fifo_hung = fifo_reader.is_alive()
+        if fifo_hung:
+            fifo_reader.terminate()
+            fifo_reader.join(timeout=2)
+        check("unscoped repository read rejects FIFO before open", (
+            not fifo_hung and fifo_reader.exitcode == 0
+            and fifo_rejected_event.is_set()
+        ))
+
+        plans = root / "plans"
+        plans.mkdir()
+        (plans / "2026-W30.json").symlink_to(external)
+        try:
+            src_mod.list_json_files(plans)
+            listing_rejected = False
+        except (OSError, ValueError):
+            listing_rejected = True
+        check("unscoped JSON listing rejects symlink entry", listing_rejected)
+
+        config = root / "awareness_targets.json"
+        config.write_text(json.dumps({
+            "schema_version": 1,
+            "targets": [{
+                "platform": "telegram",
+                "chat_id": "chat",
+                "thread_id": "thread",
+            }],
+        }), encoding="utf-8")
+        repo = repositories.JsonFridgeRepository(linked)
+
+        def session_value(name, default=""):
+            return {
+                "HERMES_SESSION_CHAT_ID": "chat",
+                "HERMES_SESSION_THREAD_ID": "thread",
+            }.get(name, default)
+
+        hook = awareness_mod.build_pre_llm_hook(
+            repo, config, get_session_value=session_value
+        )
+        notice = hook(platform="telegram")
+        check("awareness hook fails closed on repository symlink", (
+            isinstance(notice, dict)
+            and "authoritative state unavailable" in notice.get("context", "")
+        ))
+
+
+def test_history_dependent_recommendations_fail_closed():
+    print("\n-- corrupt history recommendation dependencies --")
+    common_mod = importlib.import_module(
+        ".src.handlers._common", _PLUGIN_DIR.name
+    )
+    history_mod = importlib.import_module(
+        ".src.repositories.json_history", _PLUGIN_DIR.name
+    )
+    original_path = _repos_mod.history_repo.path
+    with tempfile.TemporaryDirectory() as tmp:
+        corrupt = Path(tmp) / "history.json"
+        corrupt.write_text(json.dumps({
+            "schema_version": 2,
+            "entries": "bad",
+        }), encoding="utf-8")
+        _repos_mod.history_repo.path = corrupt
+        try:
+            try:
+                common_mod.days_since_last_cook()
+                rejected = False
+            except history_mod.HistoryDataError:
+                rejected = True
+        finally:
+            _repos_mod.history_repo.path = original_path
+        check("recommendation history dependency is strict", rejected)
+
+
 def test_audit_attempt_identity_metadata_and_fd_cleanup():
     audit_mod = importlib.import_module(
         ".src.audit.transaction", _PLUGIN_DIR.name
@@ -3631,6 +6104,28 @@ def test_audit_attempt_identity_metadata_and_fd_cleanup():
         "actor": {"type": "test"},
         "surface": {"kind": "test"},
     }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_mod = importlib.import_module(
+            ".src.audit.context", _PLUGIN_DIR.name
+        )
+        manager = audit_mod.AuditTransactionManager(Path(tmp))
+        baseline_fds = len(list(Path("/proc/self/fd").iterdir()))
+        with manager.consistent_read():
+            outer = context_mod.current_audit_manager()
+            try:
+                with manager.consistent_read():
+                    assert context_mod.current_audit_manager() is manager
+                    raise RuntimeError("nested reader probe")
+            except RuntimeError:
+                pass
+            restored = context_mod.current_audit_manager() is manager
+        after = context_mod.current_audit_manager()
+        after_fds = len(list(Path("/proc/self/fd").iterdir()))
+        check("nested consistent read restores outer context after exception", (
+            outer is manager and restored and after is None
+            and after_fds == baseline_fds
+        ))
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -3719,6 +6214,22 @@ def test_audit_attempt_identity_metadata_and_fd_cleanup():
                 pass
         after_count = len(list(Path("/proc/self/fd").iterdir()))
         check("failed audit configuration releases descriptors", after_count == before_count)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        def create_temporary_managers():
+            for index in range(20):
+                audit_mod.AuditTransactionManager(root / f"manager-{index}")
+
+        gc.collect()
+        before_count = len(list(Path("/proc/self/fd").iterdir()))
+        create_temporary_managers()
+        gc.collect()
+        after_count = len(list(Path("/proc/self/fd").iterdir()))
+        check("discarded audit managers release pinned descriptors", (
+            after_count == before_count
+        ))
 
 
 def test_audit1a_migration_reconstructs_w29_idempotently():
@@ -3853,11 +6364,22 @@ def main():
     _setup_tmp_data()
     try:
         test_audit_transaction_commits_state_and_proof()
+        test_correction_audit_descriptor_and_storage_hardening()
+        test_correction_history_lineage_corruption_fails_closed()
         test_audit_transaction_recovers_mixed_state_to_before_images()
         test_audit_transaction_recovers_all_after_as_committed()
+        test_audit_recovery_accepts_legacy_receipt_proof_without_enabling_writes()
         test_audit_recovery_exports_committed_event_after_export_crash()
         test_audit_hardening_rejects_symlinks_and_repairs_projection()
         test_audit_hardening_blocks_parent_swap_and_corrupt_proof()
+        test_audit_canonical_records_are_closed_and_exactly_typed()
+        test_audit_conflict_marker_and_transaction_namespace_are_corpus_wide()
+        test_audit_recovery_parent_substitution_and_fifo_reads_fail_closed()
+        test_correction_rejects_unverified_legacy_tombstones_until_acknowledged()
+        test_audit_conflict_journal_projection_and_identity_regressions()
+        test_pinned_audit_lock_fork_and_poison_regressions()
+        test_unscoped_repository_reads_and_awareness_fail_closed()
+        test_history_dependent_recommendations_fail_closed()
         test_audit_attempt_identity_metadata_and_fd_cleanup()
         test_audit1a_migration_reconstructs_w29_idempotently()
         test_history_migrates_to_stable_cooking_occurrences()
@@ -3887,6 +6409,12 @@ def main():
         test_register_cooked_meal()
         test_register_cooked_meal_bogus()
         test_register_cooked_meal_rollback()
+        test_register_cooked_meal_replaces_retracted_event_without_side_effects()
+        test_legacy_dish_retraction_selector_fails_closed_when_ambiguous()
+        test_retracted_backfilled_cook_without_recorded_at_can_be_corrected()
+        test_cooking_rejects_total_yield_below_served_portions()
+        test_correction_distinguishes_omitted_and_null_cooked_at()
+        test_cooking_correction_preserves_consumed_leftover_boundary()
         test_delete_history_entry()
         test_delete_history_entry_bogus()
         test_add_dish_dict()

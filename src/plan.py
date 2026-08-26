@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
 from .dish import Dish
+from .identifiers import (
+    validate_cook_event_id,
+    validate_leftover_lot_id,
+    validate_meal_occurrence_id,
+)
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -46,6 +51,88 @@ def _planned_date(week_id, day_code):
     return date.fromisocalendar(
         int(match.group(1)), int(match.group(2)), weekday
     ).isoformat()
+
+
+def _canonical_utc_timestamp(value, label):
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError(f"{label} must be a canonical UTC timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must be timezone-aware")
+
+
+def _validate_leftovers(leftovers, occurrences):
+    if not isinstance(leftovers, dict):
+        raise ValueError("leftovers must be a dict")
+    occurrence_by_id = {meal.occurrence_id: meal for meal in occurrences}
+    structured = {}
+    for lot_id, lot in leftovers.items():
+        if not isinstance(lot_id, str) or not lot_id:
+            raise ValueError("leftover lot IDs must be non-empty strings")
+        if not isinstance(lot, dict):
+            raise ValueError("leftover lots must be objects")
+        if set(lot) == {"remaining"}:
+            remaining = lot["remaining"]
+            if (
+                not isinstance(remaining, int)
+                or isinstance(remaining, bool)
+                or remaining < 0
+            ):
+                raise ValueError("legacy leftover remaining must be non-negative")
+            continue
+        validate_leftover_lot_id(lot_id)
+        expected = {
+            "dish",
+            "portions",
+            "source_cook_event_id",
+            "source_occurrence_id",
+            "created_at",
+            "consumed_portions",
+        }
+        if set(lot) != expected:
+            raise ValueError("structured leftover lot fields are invalid")
+        dish = Dish.normalize_name(lot["dish"])
+        if not dish or dish != lot["dish"]:
+            raise ValueError("leftover lot dish must be normalized")
+        portions = lot["portions"]
+        consumed = lot["consumed_portions"]
+        if (
+            not isinstance(portions, int)
+            or isinstance(portions, bool)
+            or portions < 1
+            or not isinstance(consumed, int)
+            or isinstance(consumed, bool)
+            or consumed < 0
+            or consumed > portions
+        ):
+            raise ValueError("leftover lot portions/consumed_portions are invalid")
+        source_event = lot["source_cook_event_id"]
+        source_occurrence = lot["source_occurrence_id"]
+        validate_cook_event_id(source_event, "leftover source cook event id")
+        validate_meal_occurrence_id(
+            source_occurrence, "leftover source occurrence id"
+        )
+        _canonical_utc_timestamp(lot["created_at"], "leftover created_at")
+        occurrence = occurrence_by_id.get(source_occurrence)
+        if occurrence is None or lot_id not in occurrence.leftover_lot_ids:
+            raise ValueError("leftover lot source occurrence/link is missing")
+        if occurrence.dish != dish:
+            raise ValueError("leftover lot dish disagrees with its occurrence")
+        if (
+            occurrence.status == "cooked"
+            and occurrence.cook_event_id != source_event
+        ):
+            raise ValueError("leftover lot source event disagrees with cooked occurrence")
+        structured[lot_id] = source_occurrence
+
+    for occurrence in occurrences:
+        if len(occurrence.leftover_lot_ids) > 1:
+            raise ValueError("meal occurrence may link at most one structured leftover lot")
+        if len(occurrence.leftover_lot_ids) != len(set(occurrence.leftover_lot_ids)):
+            raise ValueError("meal occurrence leftover links must be unique")
+        for lot_id in occurrence.leftover_lot_ids:
+            if structured.get(lot_id) != occurrence.occurrence_id:
+                raise ValueError("meal occurrence links an invalid leftover lot")
 
 
 @dataclass
@@ -81,26 +168,31 @@ class MealEntry:
             raise ValueError("portions must be an integer")
         if self.portions < 1:
             raise ValueError("portions must be >= 1")
-        if (
-            not isinstance(self.occurrence_id, str)
-            or not self.occurrence_id.startswith("mealocc_")
-        ):
-            raise ValueError("occurrence_id must start with mealocc_")
+        validate_meal_occurrence_id(self.occurrence_id, "occurrence_id")
         if self.root_occurrence_id is None:
             self.root_occurrence_id = self.occurrence_id
-        if (
-            not isinstance(self.root_occurrence_id, str)
-            or not self.root_occurrence_id.startswith("mealocc_")
-        ):
-            raise ValueError("root_occurrence_id must start with mealocc_")
+        validate_meal_occurrence_id(self.root_occurrence_id, "root_occurrence_id")
+        validate_meal_occurrence_id(
+            self.predecessor_occurrence_id,
+            "predecessor_occurrence_id",
+            optional=True,
+        )
+        validate_meal_occurrence_id(
+            self.replacement_occurrence_id,
+            "replacement_occurrence_id",
+            optional=True,
+        )
+        validate_cook_event_id(self.cook_event_id, "cook_event_id", optional=True)
         if self.status not in MEAL_STATUSES:
             raise ValueError(f"meal status must be one of {MEAL_STATUSES}")
         if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1:
             raise ValueError("meal revision must be a positive integer")
-        if not isinstance(self.leftover_lot_ids, list) or not all(
-            isinstance(item, str) and item for item in self.leftover_lot_ids
-        ):
-            raise ValueError("leftover_lot_ids must be a list of non-empty strings")
+        if not isinstance(self.leftover_lot_ids, list):
+            raise ValueError("leftover_lot_ids must be a list")
+        if len(self.leftover_lot_ids) > 1:
+            raise ValueError("leftover_lot_ids may contain at most one lot")
+        for item in self.leftover_lot_ids:
+            validate_leftover_lot_id(item)
         for value, label in (
             (self.actual_portions, "actual_portions"),
             (self.actual_yield_portions, "actual_yield_portions"),
@@ -109,6 +201,34 @@ class MealEntry:
                 not isinstance(value, int) or isinstance(value, bool) or value < 0
             ):
                 raise ValueError(f"{label} must be a non-negative integer or null")
+        if (
+            self.actual_portions is not None
+            and self.actual_yield_portions is not None
+            and self.actual_yield_portions < self.actual_portions
+        ):
+            raise ValueError(
+                "actual_yield_portions cannot be below actual_portions served"
+            )
+        if self.status == "cooked":
+            if (
+                self.cook_event_id is None
+                or self.cooked_on is None
+                or self.cooked_time_precision not in ("date", "datetime")
+                or (self.cooked_time_precision == "datetime"
+                    and self.cooked_at is None)
+            ):
+                raise ValueError(
+                    "cooked meal occurrences require canonical cook linkage"
+                )
+        elif (
+            self.cook_event_id is not None
+            or self.cooked_at is not None
+            or self.cooked_on is not None
+            or self.cooked_time_precision is not None
+        ):
+            raise ValueError(
+                "non-cooked meal occurrences cannot carry cooked state"
+            )
 
     @property
     def portions_planned(self):
@@ -200,6 +320,16 @@ class MealEntry:
                 status_changed_at=None,
                 provenance={"source": "legacy_plan_migration", "backfilled": True},
             )
+        expected = {
+            "occurrence_id", "root_occurrence_id", "predecessor_occurrence_id",
+            "dish", "portions_planned", "status", "planned_for", "revision",
+            "created_at", "updated_at", "status_changed_at", "cooked_at",
+            "cooked_on", "cooked_time_precision", "actual_portions",
+            "actual_yield_portions", "replacement_occurrence_id", "cook_event_id",
+            "leftover_lot_ids", "provenance",
+        }
+        if set(data) != expected:
+            raise ValueError("current meal entry fields do not match schema v2")
         return cls(
             dish=data["dish"],
             portions=portions,
@@ -241,9 +371,14 @@ class DayPlan:
     def from_dict(cls, data, *, week_id=None, day_code=None, legacy=False):
         if not isinstance(data, dict):
             raise ValueError("day plan must be a dict")
+        if not legacy and set(data) not in ({"meals"}, {"meals", "note"}):
+            raise ValueError("current day plan fields do not match schema v2")
         raw_meals = data.get("meals", [])
         if not isinstance(raw_meals, list):
             raise ValueError("day meals must be a list")
+        note = data.get("note", "")
+        if not isinstance(note, str):
+            raise ValueError("day note must be a string")
         return cls(
             meals=[
                 MealEntry.from_dict(
@@ -255,7 +390,7 @@ class DayPlan:
                 )
                 for index, meal in enumerate(raw_meals)
             ],
-            note=data.get("note", ""),
+            note=note,
         )
 
 
@@ -287,6 +422,7 @@ class WeekPlan:
             validate_shopping_snapshot(self.shopping)
         # Ensure all days exist and bind new in-memory occurrences to dates.
         occurrence_ids = set()
+        occurrences = []
         for day_code in DAYS:
             if day_code not in self.days:
                 self.days[day_code] = DayPlan()
@@ -296,6 +432,8 @@ class WeekPlan:
                 if meal.occurrence_id in occurrence_ids:
                     raise ValueError("meal occurrence IDs must be unique within a plan")
                 occurrence_ids.add(meal.occurrence_id)
+                occurrences.append(meal)
+        _validate_leftovers(self.leftovers, occurrences)
 
     def to_dict(self):
         return {
@@ -325,14 +463,23 @@ class WeekPlan:
             raise ValueError(f"unsupported plan schema_version {schema_version!r}")
         else:
             legacy = False
+            expected = {
+                "schema_version", "week", "status", "prep", "days",
+                "leftovers", "shopping",
+            }
+            if set(data) != expected:
+                raise ValueError("current week plan fields do not match schema v2")
         status = data.get("status", "draft")
         prep = data.get("prep", [])
         if not isinstance(prep, list):
-            prep = []
+            if legacy:
+                prep = []
+            else:
+                raise ValueError("prep must be a list")
 
         raw_leftovers = data.get("leftovers", {})
         if not isinstance(raw_leftovers, dict):
-            raw_leftovers = {}
+            raise ValueError("leftovers must be a dict")
 
         raw_shopping = data.get("shopping", {})
         if not isinstance(raw_shopping, dict):

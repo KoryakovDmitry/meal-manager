@@ -29,6 +29,14 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
+### COOK-1 — Atomic cooking-history metadata correction 🔨
+
+**Production bug.** Штатный flow `register linked occurrence → delete_history_entry → register_cooked_meal` моделировал исправление metadata как вторую физическую готовку: essential inventory и prep списывались повторно, omitted `cooked_at` становился текущей датой, а retract не откатывал side effects. Реальный инцидент с chirashi повторно списал соевый соус и заменил фактическую date-only дату `2026-08-11` на `2026-08-13`.
+
+**Контракт исправления.** `register_cooked_meal` принимает explicit `replaces_event_id` вместе с linked `occurrence_id` и current `expected_revision`. Для active predecessor команда одним audit transaction помечает его retracted, добавляет replacement и оставляет ровно одно active canonical event. Уже retracted predecessor поддержан как recovery-path. Omitted date/portion metadata наследуется; explicit `null` очищает ошибочные portions; inventory, prep и tuning не запускаются второй раз. Старый ambiguous re-register occurrence с prior cooking history fail-closed до записи. Unconsumed leftover lot сохраняет stable ID и relinks source; correction ниже уже consumed portions запрещена.
+
+**Release gate.** RED/GREEN на active atomic replacement и production `retract → replacement`; inventory/prep/tuning byte-for-byte; date-only preservation; omitted-vs-null; linear lineage; exactly one active event; leftover reconciliation; fault-injected rollback; native/Web schema parity; full unit/integration/Web/a11y/compile/diff gate; independent review; isolated commit/deploy/live disposable QA. Web retract больше не называется correction и явно предупреждает, что запас автоматически не восстановлен.
+
 ### AUDIT-1 — Domain audit trail and meal occurrence history 🔨
 
 **Production problem.** Приготовленные блюда исчезли из active weekly plan: после `register_cooked_meal` агент вызывал `remove_meal_from_plan`, поэтому Web показывает завершённый день как обычное `свободно`. Фактические calls подтверждают удаление W29 Wed ramen (`3` planned portions) и Thu pasta (`5` planned portions). Одновременно native history хранит только последнюю дату на dish, а Web использует несовместимый event-list envelope — повторные готовки и аналитика уже сейчас теряются.
