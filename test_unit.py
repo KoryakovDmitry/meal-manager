@@ -1263,7 +1263,13 @@ def test_build_plan_shopping_list_ignores_closed_occurrences():
     plan = WeekPlan(
         week_id="2026-W30",
         days={
-            "mon": DayPlan(meals=[MealEntry("soup", status="cooked")]),
+            "mon": DayPlan(meals=[MealEntry(
+                "soup",
+                status="cooked",
+                cooked_on="2026-07-13",
+                cooked_time_precision="date",
+                cook_event_id="cook_" + "1" * 24,
+            )]),
             "tue": DayPlan(meals=[MealEntry("soup", status="planned")]),
             "wed": DayPlan(meals=[MealEntry("soup", status="cancelled")]),
         },
