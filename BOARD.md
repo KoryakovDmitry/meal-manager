@@ -29,13 +29,13 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
-### RECEIPT-1 — Receipt ledger and purchase analytics 🔨
+### RECEIPT-1 — Receipt ledger and purchase analytics ✅
 
 **Production regression — 2026-09-06.** После временной live-проверки native MVP 13.08.2026 receipt-tools не были доведены до `main`: реализация осталась сохранённым WIP на базе `d6fec26`. Последующий COOK-1 rollout перезапустил Gateway с release-tree, где `plugin.yaml` и auto-discovery содержат 50 tools без `record_purchase_receipt`. Существующий `data/receipts.json` сохранён, но недоступен через штатную поверхность; новые чеки пришлось временно дублировать в inventory comments.
 
 **Recovery scope.** Перенести сохранённый native receipt-ledger поверх текущего hardened AUDIT/COOK-1 дерева без отката поздних гарантий, восстановить `record/get/list/correct/link/retract` и purchase analytics, проверить schema↔handler↔manifest parity, строгую загрузку существующего ledger, crash/replay safety и отсутствие побочных inventory/shopping mutations.
 
-**Release gate.** RED на отсутствие полного receipt tool surface; перенос только в чистой ветке от текущего `main`; focused adversarial receipt tests плюс полный unit/integration/Web/a11y/compile/diff gate; exact-tree independent review; locked production-data backup и rehearsal на копии; commit/push, coordinated Web/Gateway reload и live read/write/replay QA.
+**Результат.** Восстановлено в `792d4dc` (2026-09-08) после регрессии 24.08: WIP 13.08 не был закоммичен, и COOK-1 rollout потерял receipt tool surface. Native surface — 57 tools: `record/correct/link/retract/get/list_purchase_receipts` + `get_purchase_analytics`. Gate: RED surface-тест; 299 unit, 654 integration, Web plans и Chromium a11y PASS; compileall, diff-check и static security scan чисто; independent exact-tree review — `GO`. Legacy schema-v1 receipt journal recovery сохранён read-only (`receipts.json`), новые транзакции идут через hardened audit schema v2 с pinned parents и descriptor-pinned blobs. Locked backup `receipt-restore-20260908T152044Z`, rehearsal на копии production `data/` (чек 13.08 читается, list/get/analytics PASS), post-deploy live read-проба PASS; `meal-web` перезапущен. Receipt Web surface остаётся отложенным.
 
 Подробный ticket: [`docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md`](docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md).
 
