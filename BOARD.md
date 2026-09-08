@@ -29,6 +29,16 @@
 
 ## 🔨 ACTIVE INTERMEDIATE ISSUES
 
+### RECEIPT-1 — Receipt ledger and purchase analytics 🔨
+
+**Production regression — 2026-09-06.** После временной live-проверки native MVP 13.08.2026 receipt-tools не были доведены до `main`: реализация осталась сохранённым WIP на базе `d6fec26`. Последующий COOK-1 rollout перезапустил Gateway с release-tree, где `plugin.yaml` и auto-discovery содержат 50 tools без `record_purchase_receipt`. Существующий `data/receipts.json` сохранён, но недоступен через штатную поверхность; новые чеки пришлось временно дублировать в inventory comments.
+
+**Recovery scope.** Перенести сохранённый native receipt-ledger поверх текущего hardened AUDIT/COOK-1 дерева без отката поздних гарантий, восстановить `record/get/list/correct/link/retract` и purchase analytics, проверить schema↔handler↔manifest parity, строгую загрузку существующего ledger, crash/replay safety и отсутствие побочных inventory/shopping mutations.
+
+**Release gate.** RED на отсутствие полного receipt tool surface; перенос только в чистой ветке от текущего `main`; focused adversarial receipt tests плюс полный unit/integration/Web/a11y/compile/diff gate; exact-tree independent review; locked production-data backup и rehearsal на копии; commit/push, coordinated Web/Gateway reload и live read/write/replay QA.
+
+Подробный ticket: [`docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md`](docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md).
+
 ### COOK-1 — Atomic cooking-history metadata correction 🔨
 
 **Production bug.** Штатный flow `register linked occurrence → delete_history_entry → register_cooked_meal` моделировал исправление metadata как вторую физическую готовку: essential inventory и prep списывались повторно, omitted `cooked_at` становился текущей датой, а retract не откатывал side effects. Реальный инцидент с chirashi повторно списал соевый соус и заменил фактическую date-only дату `2026-08-11` на `2026-08-13`.
@@ -91,19 +101,7 @@
 
 ## 📐 READY INTERMEDIATE ISSUES
 
-### RECEIPT-1 — Receipt ledger and purchase analytics 📐
-
-**Проблема.** Сейчас чек читается как одноразовое evidence для конкретного inventory/shopping действия, но его содержимое не остаётся в системе. Из-за этого теряются магазин, дата, полный список строк, фактические цены, скидки и total; анализ расходов и динамики цен невозможен.
-
-**Продуктовый контракт.** Каждый присланный читаемый чек сохраняется в отдельный versioned receipt ledger независимо от холодильника: merchant/branch, purchase date/time, currency, ordered raw lines, quantity/unit, unit/line prices, discounts/returns/deposits, printed totals, source и confidence. Неизвестные значения остаются `null`, неоднозначные строки — raw-only со статусом `needs_review`; correction сохраняет исходную расшифровку, retraction исключает запись из аналитики без физического удаления.
-
-**Явная граница.** Запись чека не добавляет продукты в inventory, не меняет availability и не закрывает shopping request. `receive_shopping_item` остаётся отдельной явной операцией. Optional links receipt line → catalog/shopping нужны только для аналитики. В ledger сохраняются также бытовые товары, тара и покупки вне плана.
-
-**MVP и аналитика.** Native flow: `record/list/get/correct/retract_purchase_receipt`; vision/OCR выполняет агент, а canonical structured result обязательно записывается. Money хранится exact integer cents, quantity — lossless decimal. Read model даёт расходы по period/store, список покупок, price history, скидки, reconciliation gaps и coverage/confidence. Web upload/review/history строится следующей поверхностью над тем же repository.
-
-**Acceptance gate.** Idempotent evidence replay и duplicate conflict; ordered raw-line round trip; no hallucinated quantity/price; mismatch→review; append-preserving corrections; byte-for-byte доказательство, что receipt-only workflow не меняет inventory/plans/shopping; AUDIT coverage, malformed-data fail-closed, native/Web parity, full test/review/release gate.
-
-Подробный ticket: [`docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md`](docs/issues/RECEIPT-1-receipt-ledger-and-purchase-analytics.md).
+Готовых промежуточных issues сейчас нет.
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
 

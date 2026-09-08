@@ -230,6 +230,20 @@ def test_registered_update_fridge_schema_exposes_required_arguments():
         name: schema
         for name, schema, _handler in _handlers_mod.iter_tools()
     }
+    required_receipt_tools = {
+        "record_purchase_receipt",
+        "correct_purchase_receipt",
+        "link_purchase_receipt_line",
+        "retract_purchase_receipt",
+        "get_purchase_receipt",
+        "list_purchase_receipts",
+        "get_purchase_analytics",
+    }
+    check(
+        "registration exposes the complete native purchase-receipt surface",
+        required_receipt_tools <= set(discovered),
+        f"missing={sorted(required_receipt_tools - set(discovered))}",
+    )
     originals = json.loads(json.dumps(discovered))
     ctx = CaptureContext()
     _pkg.register(ctx)
