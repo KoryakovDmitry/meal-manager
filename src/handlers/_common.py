@@ -16,6 +16,8 @@ from ..repositories import history_repo
 from ..repositories.json_fridge import InventoryDataError
 from ..repositories.json_history import HistoryDataError
 from ..repositories.json_plan import PlanDataError
+from ..repositories.json_receipt import ReceiptDataError
+from ..repositories.json_shopping_request import ShoppingRequestDataError
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,8 @@ _MUTATING_TOOLS = {
     "remove_meal_from_plan", "set_plan_status", "repeat_week_plan",
     "generate_shopping_list", "add_manual_shopping_item",
     "receive_shopping_item", "estimate_plan_cost", "split_shopping_list",
+    "record_purchase_receipt", "correct_purchase_receipt",
+    "link_purchase_receipt_line", "retract_purchase_receipt",
 }
 
 
@@ -87,7 +91,11 @@ def tool_handler(name: str):
                 if isinstance(exc, InventoryDataError):
                     message = "Inventory storage is temporarily unavailable"
                 elif isinstance(exc, (
-                    AuditConflictError, HistoryDataError, PlanDataError
+                    AuditConflictError,
+                    HistoryDataError,
+                    PlanDataError,
+                    ReceiptDataError,
+                    ShoppingRequestDataError,
                 )):
                     message = "Storage is temporarily unavailable"
                 elif isinstance(exc, OSError):

@@ -66,7 +66,22 @@ Use `replenish_product` only after the user confirms that a product is physicall
 
 Removing, consuming, or clearing current stock marks catalog identities as unavailable instead of forgetting them. The catalog states are `in_stock`, `out_of_stock`, and `recipe_only`.
 
-Use `merge_product_identity` only as a destructive maintenance operation for a confirmed duplicate identity. It requires stable source/target IDs and both current `updated_at` versions. The source must be out of stock, the target must be in stock, and categories must match. The operation preserves the target record and batch metadata, transfers the source name/aliases, and physically removes the source. It fails closed when the source has a completed or pending receipt reference. Never use ordinary `remove_inventory_item` as identity cleanup: that operation only marks stock unavailable.
+Use `merge_product_identity` only as a destructive maintenance operation for a confirmed duplicate identity. It requires stable source/target IDs and both current `updated_at` versions. The source must be out of stock, the target must be in stock, and categories must match. The operation preserves the target record and batch metadata, transfers the source name/aliases, and physically removes the source. It fails closed when the source has a completed or pending shopping receipt reference or appears in any append-only purchase-receipt analytical link. Never use ordinary stock removal to repair duplicate identity.
+
+### Purchase receipt ledger
+
+Whenever the user sends a readable grocery/shop receipt or asks to process one, persist the complete transcription with `record_purchase_receipt`; reading it aloud or using selected lines for inventory reconciliation is not a substitute for ledger intake. Record merchant/branch, purchase date/time and precision, currency, every ordered raw line, signed discounts/returns/deposits, printed totals, source hash/reference, confidence, and explicit `null` for unknown structured values. Never infer an unreadable quantity, unit price, category, or total.
+
+Receipt intake is intentionally independent from kitchen state: it must not add inventory, change availability, or complete shopping requests. If the user separately asks to reconcile bought goods, finish the receipt-ledger call first and then use the appropriate explicit inventory or `receive_shopping_item` operations.
+
+- `record_purchase_receipt` — create or idempotently replay a receipt. Use `needs_review` when any material line or arithmetic is ambiguous. A similar merchant/date/total candidate requires explicit `allow_similar: true`; never bypass that check silently. If identical semantics arrive with a new evidence hash, attach that source through an explicit `correct_purchase_receipt` revision; the record tool fails closed rather than discarding the new evidence.
+- `get_purchase_receipt` / `list_purchase_receipts` — retrieve complete raw lines, exact integer cents, review state, and optionally all immutable revisions.
+- `correct_purchase_receipt` — append a reasoned correction using the current `expected_revision`; never overwrite or delete the original recognition. When replacing `lines`, call `get_purchase_receipt` first and carry forward every unchanged `receipt_line_id`; omit the ID only for a genuinely new line. Initial IDs are server-assigned.
+- `link_purchase_receipt_line` — add/remove analytical links to inventory, catalog, or shopping identities without mutating those domains.
+- `retract_purchase_receipt` — append a retraction so an erroneous receipt remains evidenced but leaves default analytics.
+- `get_purchase_analytics` — return spend by period/store, purchases, price history, discounts, reconciliation gaps, and normalization coverage. `price_history` keys use explicit `normalized:` or `raw:` namespaces so a raw fallback cannot collide with a canonical product label. Monetary aggregates are partitioned by currency; mixed-currency scalar totals are `null`. `needs_review` and `retracted` are excluded by default.
+
+Redact card numbers, loyalty identifiers, QR payloads, authorization/transaction references, terminal IDs, payment tokens, and unrelated payment identifiers from evidence metadata and correction/retraction reasons. Keep the raw merchandise labels and prices. If a tool reports a duplicate conflict, malformed storage, or stale revision, stop and surface the conflict; do not create a second ledger entry or retry with changed evidence.
 
 ### `register_cooked_meal`
 
@@ -204,7 +219,7 @@ When the catalog is empty or has fewer than 5 dishes:
 
 ### Proactivity
 
-- If the user says they bought ingredients, **first** run `update_fridge_inventory` with action "add" to save them, and **then** automatically run `get_meal_suggestions` to recommend what they can cook with what they have now.
+- If the user merely says they bought ingredients (without receipt evidence), **first** run `update_fridge_inventory` with action "add" to save them, and **then** automatically run `get_meal_suggestions`. If a receipt/photo/PDF is present, follow the receipt-ledger workflow above; never treat inventory mutation as receipt persistence.
 - If the user confirms they're going to cook a suggested dish, run `register_cooked_meal` without being explicitly asked.
 
 ### No hallucinations

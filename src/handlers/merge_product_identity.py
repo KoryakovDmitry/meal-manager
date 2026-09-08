@@ -1,7 +1,8 @@
 """Tool: merge_product_identity — absorb an unavailable duplicate identity."""
 
 from ..product_identity import merge_product_identity
-from ..repositories import fridge_repo, shopping_request_repo
+from ..audit import audit_manager
+from ..repositories import fridge_repo, receipt_repo, shopping_request_repo
 from ._common import reject_unknown_args, require_arg, tool_handler
 
 NAME = "merge_product_identity"
@@ -37,6 +38,8 @@ def HANDLER(args: dict, **kwargs):
     return merge_product_identity(
         fridge_repo=fridge_repo,
         shopping_request_repo=shopping_request_repo,
+        receipt_repo=receipt_repo,
+        audit_manager=audit_manager,
         source_item_id=require_arg(args, "source_item_id"),
         target_item_id=require_arg(args, "target_item_id"),
         expected_source_updated_at=require_arg(args, "expected_source_updated_at"),

@@ -1,5 +1,6 @@
 # Data files (user-specific)
-data/
+data/*
+!data/.gitkeep
 
 # Python
 __pycache__/

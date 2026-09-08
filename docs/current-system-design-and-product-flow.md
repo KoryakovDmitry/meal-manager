@@ -2,7 +2,7 @@
 
 > **Тип документа:** as-is overview — как система работает сейчас, а не целевая архитектура.
 >
-> **Проверенный snapshot:** ветка `main`, commit `20488b8` (`feat(inventory): add persistent product categories`).
+> **Проверенный snapshot:** текущий release candidate ветки `main`; exact staged fingerprint фиксируется обязательным release gate и связывается с итоговым commit.
 >
 > **Основной продуктовый принцип:** conversational shell + deterministic core. Пользователь говорит естественным языком, Hermes переводит намерение в типизированный tool call, а состояние изменяет обычный проверяемый Python-код.
 
@@ -82,7 +82,7 @@ flowchart LR
         T[Telegram]
         G[Hermes Gateway]
         L[LLM / intent translation]
-        H[43 meal_manager tool handlers]
+        H[57 meal_manager tool handlers]
     end
 
     subgraph WEB[Web surface]
@@ -160,7 +160,7 @@ Entry point: `meal_manager/__init__.py:register(ctx)`.
 4. регистрирует каждый handler как Hermes tool;
 5. инжектит `skill.md` с conversational правилами использования tools.
 
-Сейчас фактически присутствует **43 handler modules**.
+Сейчас фактически присутствует **57 handler modules**; manifest и runtime discovery обязаны совпадать по именам и количеству.
 
 ### 4.4 Handler layer
 
@@ -203,6 +203,7 @@ Persisted state находится в локальных JSON-файлах:
 | `data/shopping_requests.json` | schema v2 active requests, pending exact-name reservations, and completed receipt tombstones |
 | `data/dishes.json` | рецепты и ингредиенты |
 | `data/history.json` | история приготовленных блюд |
+| `data/receipts.json` | versioned ledger чеков: магазин/дата, ordered raw lines, exact cents, evidence, corrections/retractions |
 | `data/tuning.json` | состояние adaptive suggestion weights |
 | `data/prep_items.json` | определения и остатки заготовок |
 | `data/plans/YYYY-WXX.json` | один недельный план на ISO week |
@@ -521,7 +522,7 @@ Gateway и Web — разные процессы. Поэтому коррект�
 
 - leftovers и household calibration;
 - количественные recipe requirements;
-- receipt-derived price database;
+- Web upload/editor for canonical purchase receipts;
 - автоматическое plan generation с plate-ratio checking;
 - PWA/offline/installability;
 - HTTPS и Web auth hardening;

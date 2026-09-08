@@ -23,6 +23,13 @@ provides_tools:
   - delete_history_entry
   - list_cooking_history
   - list_audit_events
+  - record_purchase_receipt
+  - correct_purchase_receipt
+  - link_purchase_receipt_line
+  - retract_purchase_receipt
+  - get_purchase_receipt
+  - list_purchase_receipts
+  - get_purchase_analytics
   - list_fridge
   - add_dish
   - add_dishes_batch

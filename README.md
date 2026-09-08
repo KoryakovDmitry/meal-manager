@@ -2,7 +2,7 @@
 
 An intelligent meal planning and fridge inventory management system structured as an official Hermes plugin. It helps users decide what to cook for dinner and what to buy at the grocery store by analyzing their current fridge contents, recipe catalog, and cooking history.
 
-An AI assistant invokes the 50 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
+An AI assistant invokes the 57 tool handlers registered via `__init__.py:register(ctx)` to deliver personalized suggestions, generate plan-aware shopping lists, persist purchase receipts and analytics, estimate soft budgets, split shopping trips, manage fridge inventory and recipes, track cooked meals, manage prep items, build and repeat flexible weekly plans, and interactively build ingredient lists via the Dynamic Ingredient Interface (DII) — all with zero external dependencies.
 
 ---
 
@@ -30,6 +30,7 @@ The result is a system that offers the user the freedom of conversation while gu
 - **Adaptive Suggestion Weights** — The availability/recency blend self-adjusts with use. Each cooked meal feeds a bounded, deterministic online learner (no background job, no randomness) that nudges the weighting toward whatever has been ranking your actual choices best. The current blend and learning status are inspectable at any time via `get_tuning_state`, and a fresh install behaves exactly like the classic 60/40 blend until enough meals accumulate.
 - **One-Ingredient Shopping List** — Identifies single ingredients that, once purchased, unlock entirely new dishes. Prioritized by the projected score of the unlocked meal.
 - **Live Weekly Shopping & Receipts** — Projects current-week recipe/prep/manual needs from live inventory, keeps browser checkmarks local-only, and lets the agent reconcile a generic request to one exact product identity. Derived IDs are stable within one missing-stock occurrence but rotate when a consumed product is needed again, so repurchases do not collide with old tombstones. A durable exact-name reservation precedes inventory mutation; completion then records the generic alias and replay tombstone, so conflicting concurrent or post-crash retries within that occurrence fail closed.
+- **Purchase Receipt Ledger** — Stores a complete ordered receipt transcription, merchant/date, exact cents, signed discounts/returns/deposits, evidence hash, immutable corrections, and retractions independently from inventory. It supports idempotent ingestion, duplicate conflicts, review states, spend/store/time analytics, and price history without inventing unreadable values.
 - **Fridge Inventory Management** — Add or remove ingredients as you shop or cook. Ingredient and dish names are normalized to lowercase for consistent matching.
 - **Cooking History Tracking** — Logs cooked meals with ISO dates. History keys are normalized to lowercase on load, so comparisons are case-insensitive.
 - **Auto-Cleanup on Cook** — When a meal is registered as cooked, its essential ingredients are automatically removed from the fridge inventory.
@@ -144,7 +145,7 @@ Reply naturally — *"yes"*, *"skip"*, *"remove X"*, *"also add Y"*, or *"done"*
 
 ### As a Hermes Plugin
 
-The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 50 tools:
+The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `__init__.py`. It registers 57 tools:
 
 | Tool | Purpose |
 |---|---|
@@ -165,6 +166,14 @@ The plugin is loaded by a Hermes agent via the `register(ctx)` entry point in `_
 | `delete_history_entry` | Retracts an active cooking occurrence while retaining immutable history and reopening a linked plan row; it does not restore stock/prep |
 | `list_cooking_history` | Lists canonical cooking occurrences, stable IDs, plan links, yield, and corrections |
 | `list_audit_events` | Queries committed audit events by stable entity, event type, or time |
+| `sync_meal_manager_state` | Returns the authoritative inventory snapshot and stable state token |
+| `record_purchase_receipt` | Persists a standalone ordered purchase receipt without mutating inventory or shopping |
+| `correct_purchase_receipt` | Appends a reasoned correction revision with optimistic concurrency |
+| `link_purchase_receipt_line` | Adds/removes analytical identity links without cross-domain mutations |
+| `retract_purchase_receipt` | Retracts a receipt from analytics while retaining its evidence and revisions |
+| `get_purchase_receipt` | Returns one canonical receipt and optional full revision history |
+| `list_purchase_receipts` | Filters receipt summaries by status, store, and purchase date |
+| `get_purchase_analytics` | Derives spend, store/time aggregates, price history, discounts, gaps, and coverage |
 | `list_fridge` | Returns the current fridge contents |
 | `add_dish` | Adds a new recipe to the catalog |
 | `add_dishes_batch` | Adds multiple recipes in a single call |
@@ -278,6 +287,7 @@ meal-manager/
 │   │   ├── json_dish.py       # Recipe catalog persistence (data/dishes.json)
 │   │   ├── json_fridge.py     # Fridge inventory persistence (data/fridge.json)
 │   │   ├── json_history.py    # Cooking history persistence (data/history.json)
+│   │   ├── json_receipt.py    # Purchase receipt ledger persistence (data/receipts.json)
 │   │   ├── json_tuning.py     # Online-learner state persistence (data/tuning.json)
 │   │   ├── json_prep_item.py  # Prep-item persistence (data/prep_items.json)
 │   │   └── json_plan.py       # One-file-per-week persistence (data/plans/)
@@ -292,6 +302,7 @@ meal-manager/
 │   ├── dishes.json            # Recipe catalog (dishes with ingredients)
 │   ├── fridge.json            # Current fridge inventory (list of ingredients)
 │   ├── history.json           # Cooking history (dish name → last-cooked ISO date)
+│   ├── receipts.json          # Append-preserving receipt ledger and evidence metadata
 │   ├── tuning.json            # (created lazily) Online-learner state for the suggestion blend
 │   ├── prep_items.json        # (created lazily) Prep-item definitions and remaining quantities
 │   ├── plans/                 # (created lazily) One JSON file per ISO week

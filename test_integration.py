@@ -203,6 +203,13 @@ repeat_week_plan = _load_handler("repeat_week_plan")
 generate_shopping_list = _load_handler("generate_shopping_list")
 estimate_plan_cost = _load_handler("estimate_plan_cost")
 split_shopping_list = _load_handler("split_shopping_list")
+record_purchase_receipt = _load_handler("record_purchase_receipt")
+correct_purchase_receipt = _load_handler("correct_purchase_receipt")
+link_purchase_receipt_line = _load_handler("link_purchase_receipt_line")
+retract_purchase_receipt = _load_handler("retract_purchase_receipt")
+get_purchase_receipt = _load_handler("get_purchase_receipt")
+list_purchase_receipts = _load_handler("list_purchase_receipts")
+get_purchase_analytics = _load_handler("get_purchase_analytics")
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -2799,6 +2806,7 @@ def test_cooking_correction_preserves_consumed_leftover_boundary():
     ), str(below))
 
 
+
 def test_delete_history_entry():
     print("\n-- delete_history_entry --")
     before = _repos_mod.history_repo.load_events(strict=True)
@@ -4678,8 +4686,8 @@ def test_audit_transaction_recovers_all_after_as_committed():
         ))
 
 
-def test_audit_recovery_accepts_legacy_receipt_proof_without_enabling_writes():
-    """Keep old receipt journals readable without shipping RECEIPT-1 writers."""
+def test_audit_recovery_accepts_legacy_receipt_proof_and_current_writes():
+    """Keep schema-v1 receipt journals readable alongside current RECEIPT-1 writes."""
     audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = Path(tmp)
@@ -4765,25 +4773,33 @@ def test_audit_recovery_accepts_legacy_receipt_proof_without_enabling_writes():
             and exported[0]["event_type"] == "purchase_receipt.recorded.v1"
         ))
 
-        try:
-            manager.commit(
-                operation="unsupported_receipt_write",
-                targets={"receipts.json": b'{}\n'},
-                events=[{
-                    "event_type": "purchase_receipt.unsupported.v1",
-                    "entity": {"type": "purchase_receipt", "id": "receipt_new"},
-                    "payload": {"test": True},
-                }],
-                context={
-                    "actor": {"type": "test"},
-                    "surface": {"kind": "test"},
+        current_after = b'{"schema_version":1,"receipts":[]}\n'
+        current = manager.commit(
+            operation="record_purchase_receipt",
+            targets={"receipts.json": current_after},
+            events=[{
+                "event_type": "purchase_receipt_recorded",
+                "entity": {
+                    "type": "purchase_receipt",
+                    "id": "receipt_" + "d" * 32,
                 },
+                "payload": {"revision": 1},
+            }],
+            context={
+                "actor": {"type": "test"},
+                "surface": {"kind": "test"},
+            },
+        )
+        current_prepare = json.loads(
+            (Path(current["transaction_dir"]) / "prepare.json").read_text(
+                encoding="utf-8"
             )
-            write_rejected = False
-        except ValueError:
-            write_rejected = True
-        check("COOK-1 does not enable new receipt audit writes", (
-            write_rejected and receipt_path.read_bytes() == after
+        )
+        check("current receipt writes coexist with legacy recovery", (
+            current["status"] == "committed"
+            and current_prepare["schema_version"] == 2
+            and current_prepare["predecessor_transaction_id"] == transaction_id
+            and receipt_path.read_bytes() == current_after
         ))
 
 
@@ -5352,24 +5368,30 @@ def test_audit_conflict_marker_and_transaction_namespace_are_corpus_wide():
                 f"*/{receipt['transaction_id']}"
             )
         )
+        original_year, original_month = map(int, original.parent.name.split("-"))
+        if original_month == 12:
+            duplicate_month = f"{original_year + 1:04d}-01"
+        else:
+            duplicate_month = f"{original_year:04d}-{original_month + 1:02d}"
+        duplicate_timestamp = f"{duplicate_month}-01T00:00:00Z"
         duplicate = (
-            root / "audit" / "transactions" / "2026-09"
+            root / "audit" / "transactions" / duplicate_month
             / receipt["transaction_id"]
         )
         duplicate.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(original, duplicate)
         prepare_path = duplicate / "prepare.json"
         prepare = json.loads(prepare_path.read_text(encoding="utf-8"))
-        prepare["prepared_at"] = "2026-09-01T00:00:00Z"
+        prepare["prepared_at"] = duplicate_timestamp
         for item in prepare["events"]:
-            item["occurred_at"] = "2026-09-01T00:00:00Z"
+            item["occurred_at"] = duplicate_timestamp
         prepare_path.write_text(json.dumps(prepare), encoding="utf-8")
         (duplicate / "commit.json").unlink()
         (duplicate / "abort.json").write_text(json.dumps({
             "schema_version": 1,
             "transaction_id": receipt["transaction_id"],
             "state": "aborted",
-            "aborted_at": "2026-09-01T00:00:01Z",
+            "aborted_at": duplicate_timestamp,
             "recovered": True,
         }), encoding="utf-8")
         reader = audit_mod.AuditTransactionManager(root)
@@ -6374,6 +6396,1861 @@ def test_audit1a_migration_reconstructs_w29_idempotently():
             assert_collision(label, history_change=mutate)
 
 
+def test_purchase_receipt_ledger_native_lifecycle_and_analytics():
+    print("\n-- RECEIPT-1 native ledger lifecycle and analytics --")
+    assert _TMP_DATA_DIR is not None
+
+    link_inventory_id = importlib.import_module(
+        ".src.repositories", _PLUGIN_DIR.name
+    ).fridge_repo.load_catalog_items()[0].id
+
+    protected = {}
+    for relative in (
+        "fridge.json", "dishes.json", "history.json", "shopping_requests.json",
+    ):
+        path = _TMP_DATA_DIR / relative
+        protected[relative] = path.read_bytes() if path.exists() else None
+    plans_dir = _TMP_DATA_DIR / "plans"
+    protected_plans = {
+        path.name: path.read_bytes() for path in plans_dir.glob("*.json")
+    } if plans_dir.exists() else {}
+
+    evidence_hash = "a" * 64
+    payload = {
+        "merchant_name_raw": "Delhaize Niederkorn",
+        "branch": "Niederkorn",
+        "purchased_at": "2026-08-09T18:29:00+02:00",
+        "time_precision": "datetime",
+        "currency": "EUR",
+        "lines": [
+            {
+                "description_raw": "PDT GRENAILLE 1KG",
+                "kind": "product",
+                "quantity": "1.000",
+                "unit": "kg",
+                "unit_price_cents": 305,
+                "line_total_cents": 305,
+            },
+            {
+                "description_raw": "FRAIS 400GR",
+                "kind": "product",
+                "quantity": "400",
+                "unit": "g",
+                "line_total_cents": 549,
+                "ambiguity_note": "printed label is truncated",
+            },
+            {
+                "description_raw": "REDUCTION S/ARTICLE",
+                "kind": "discount",
+                "line_total_cents": -100,
+            },
+        ],
+        "subtotal_cents": 854,
+        "total_cents": 754,
+        "evidence": {
+            "source_kind": "image",
+            "source_reference": "telegram:receipt-photo-qa",
+            "content_sha256": evidence_hash,
+            "transcription_method": "agent_vision",
+            "confidence": "mixed",
+            "notes": "payment identifiers omitted",
+        },
+        "status": "confirmed",
+    }
+    created = parse(record_purchase_receipt(payload))
+    receipt_id = created.get("receipt_id") if isinstance(created, dict) else None
+    check("receipt create returns stable identity", (
+        isinstance(receipt_id, str) and receipt_id.startswith("receipt_")
+        and created.get("revision") == 1
+    ), str(created))
+    check("ambiguous transcription is stored as needs_review", (
+        created.get("status") == "needs_review"
+    ), str(created))
+    check("receipt arithmetic is exact integer cents", (
+        created.get("lines_total_cents") == 754
+        and created.get("reconciliation_delta_cents") == 0
+    ), str(created))
+
+    stored = parse(get_purchase_receipt({
+        "receipt_id": receipt_id, "include_revisions": True,
+    }))
+    check("ordered raw lines round-trip losslessly", (
+        [line.get("description_raw") for line in stored.get("lines", [])]
+        == ["PDT GRENAILLE 1KG", "FRAIS 400GR", "REDUCTION S/ARTICLE"]
+        and stored["lines"][0].get("quantity") == "1.000"
+    ), str(stored))
+    check("source evidence hash and initial revision are preserved", (
+        stored.get("evidence", {}).get("content_sha256") == evidence_hash
+        and len(stored.get("revisions", [])) == 1
+    ), str(stored))
+
+    repeated = parse(record_purchase_receipt(payload))
+    check("exact repeated receipt intake is idempotent", (
+        repeated.get("receipt_id") == receipt_id
+        and repeated.get("idempotent") is True
+        and len(parse(list_purchase_receipts({"include_retracted": True}))) == 1
+    ), str(repeated))
+
+    conflicting_payload = json.loads(json.dumps(payload))
+    conflicting_payload["total_cents"] = 755
+    conflicting = parse(record_purchase_receipt(conflicting_payload))
+    check("same evidence hash with conflicting semantics fails closed", (
+        isinstance(conflicting, dict) and "error" in conflicting
+        and len(parse(list_purchase_receipts({"include_retracted": True}))) == 1
+    ), str(conflicting))
+
+    corrected = parse(correct_purchase_receipt({
+        "receipt_id": receipt_id,
+        "expected_revision": 1,
+        "reason": "confirmed truncated label against source image",
+        "changes": {
+            "lines": [
+                {
+                    key: value for key, value in stored["lines"][0].items()
+                    if key not in {"position", "links"}
+                },
+                {
+                    **{
+                        key: value for key, value in stored["lines"][1].items()
+                        if key not in {"position", "links"}
+                    },
+                    "ambiguity_note": None,
+                    "normalized_label": "fresh product 400 g",
+                },
+                {
+                    key: value for key, value in stored["lines"][2].items()
+                    if key not in {"position", "links"}
+                },
+            ],
+        },
+    }))
+    check("correction appends a new immutable revision", (
+        corrected.get("revision") == 2 and corrected.get("status") == "corrected"
+    ), str(corrected))
+    corrected_stored = parse(get_purchase_receipt({
+        "receipt_id": receipt_id, "include_revisions": True,
+    }))
+    check("correction preserves original transcription", (
+        len(corrected_stored.get("revisions", [])) == 2
+        and corrected_stored["revisions"][0]["lines"][1]["ambiguity_note"]
+        == "printed label is truncated"
+        and corrected_stored["lines"][1]["normalized_label"]
+        == "fresh product 400 g"
+    ), str(corrected_stored))
+
+    line_id = corrected_stored["lines"][1]["receipt_line_id"]
+    linked = parse(link_purchase_receipt_line({
+        "receipt_id": receipt_id,
+        "receipt_line_id": line_id,
+        "expected_revision": 2,
+        "action": "link",
+        "inventory_item_id": link_inventory_id,
+    }))
+    check("analytical line linking is append-preserving", (
+        linked.get("revision") == 3
+        and link_inventory_id in linked["lines"][1]["links"]["inventory_item_ids"]
+    ), str(linked))
+
+    analytics = parse(get_purchase_analytics({
+        "from_date": "2026-08-01", "to_date": "2026-08-31",
+    }))
+    check("corrected receipt participates in spend analytics", (
+        analytics.get("receipt_count") == 1
+        and analytics.get("total_spend_cents") == 754
+        and analytics.get("by_merchant", {}).get("delhaize niederkorn", {}).get(
+            "spend_cents"
+        ) == 754
+    ), str(analytics))
+
+    retracted = parse(retract_purchase_receipt({
+        "receipt_id": receipt_id,
+        "expected_revision": 3,
+        "reason": "QA retraction",
+    }))
+    check("retraction remains visible as a revision", (
+        retracted.get("revision") == 4 and retracted.get("status") == "retracted"
+    ), str(retracted))
+    after_retraction = parse(get_purchase_analytics({}))
+    check("retracted receipt is excluded from analytics", (
+        after_retraction.get("receipt_count") == 0
+        and after_retraction.get("total_spend_cents") == 0
+    ), str(after_retraction))
+
+    audit_events = importlib.import_module(
+        ".src.audit", _PLUGIN_DIR.name
+    ).audit_manager.list_events(
+        entity_type="purchase_receipt", entity_id=receipt_id, limit=1000
+    )
+    check("receipt lifecycle emits stable-entity audit evidence", (
+        [event.get("event_type") for event in audit_events]
+        == [
+            "purchase_receipt.retracted.v1",
+            "purchase_receipt.line_linked.v1",
+            "purchase_receipt.corrected.v1",
+            "purchase_receipt.recorded.v1",
+        ]
+    ), str(audit_events))
+
+    check("receipt lifecycle never mutates inventory or shopping domains", all(
+        ((_TMP_DATA_DIR / relative).read_bytes() if (_TMP_DATA_DIR / relative).exists() else None)
+        == before
+        for relative, before in protected.items()
+    ) and ({path.name: path.read_bytes() for path in plans_dir.glob("*.json")}
+           if plans_dir.exists() else {}) == protected_plans)
+
+    receipt_path = _TMP_DATA_DIR / "receipts.json"
+    canonical_receipts = receipt_path.read_bytes()
+    receipt_path.write_text('{"schema_version":1,"receipts":"bad"}', encoding="utf-8")
+    malformed = parse(list_purchase_receipts({}))
+    check("malformed receipt storage fails closed with sanitized native error", (
+        malformed == {"error": "Storage is temporarily unavailable"}
+    ), str(malformed))
+    receipt_path.write_bytes(canonical_receipts)
+
+
+def test_purchase_receipt_edge_semantics_and_deduplication():
+    print("\n-- RECEIPT-1 partial dates, signed lines, review, and dedup --")
+    assert _TMP_DATA_DIR is not None
+
+    partial = {
+        "merchant_name_raw": "Market QA",
+        "purchased_at": "2026-08-08",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {
+                "description_raw": "PRODUCT",
+                "kind": "product",
+                "line_total_cents": 1000,
+            },
+            {
+                "description_raw": "BOTTLE DEPOSIT",
+                "kind": "deposit",
+                "line_total_cents": 25,
+            },
+            {
+                "description_raw": "RETURN",
+                "kind": "return",
+                "line_total_cents": -200,
+            },
+        ],
+        "subtotal_cents": 1025,
+        "total_cents": 825,
+        "evidence": {
+            "source_kind": "text",
+            "source_reference": "qa:partial-date",
+            "content_sha256": "b" * 64,
+            "confidence": "high",
+        },
+    }
+    created = parse(record_purchase_receipt(partial))
+    receipt_id = created.get("receipt_id")
+    check("date-precision receipt with deposit and return is confirmed", (
+        created.get("status") == "confirmed"
+        and created.get("purchased_on") == "2026-08-08"
+        and created.get("lines_total_cents") == 825
+    ), str(created))
+    signed_analytics = parse(get_purchase_analytics({}))
+    check("discounts, returns, deposits, and confidence remain distinct", (
+        signed_analytics.get("discount_savings_cents") == 0
+        and signed_analytics.get("return_credits_cents") == 200
+        and signed_analytics.get("deposit_and_fee_cents") == 25
+        and signed_analytics.get("coverage", {}).get("evidence_confidence") == {"high": 1}
+    ), str(signed_analytics))
+
+    invalid_signed = json.loads(json.dumps(partial))
+    invalid_signed["evidence"]["content_sha256"] = "a" * 64
+    invalid_signed["lines"][2]["line_total_cents"] = 200
+    invalid_signed_result = parse(record_purchase_receipt(invalid_signed))
+    check("positive return/discount semantics fail before persistence", (
+        "must be non-positive" in invalid_signed_result.get("error", "")
+    ), str(invalid_signed_result))
+
+    semantic_repeat = json.loads(json.dumps(partial))
+    semantic_repeat["evidence"]["content_sha256"] = "c" * 64
+    semantic_repeat["evidence"]["source_reference"] = "qa:second-scan"
+    repeated = parse(record_purchase_receipt(semantic_repeat))
+    check("semantic replay with new evidence fails closed instead of discarding evidence", (
+        "supplied evidence hash is new" in repeated.get("error", "")
+        and repeated.get("idempotent") is not True
+    ), str(repeated))
+    evidence_attached = parse(correct_purchase_receipt({
+        "receipt_id": receipt_id,
+        "expected_revision": 1,
+        "reason": "attach independently captured evidence",
+        "changes": {"evidence": semantic_repeat["evidence"]},
+    }))
+    repeated_after_attachment = parse(record_purchase_receipt(semantic_repeat))
+    check("explicit correction reserves new evidence before semantic replay is idempotent", (
+        evidence_attached.get("revision") == 2
+        and evidence_attached.get("evidence", {}).get("content_sha256") == "c" * 64
+        and repeated_after_attachment.get("receipt_id") == receipt_id
+        and repeated_after_attachment.get("idempotent") is True
+    ), str({
+        "attached": evidence_attached,
+        "repeated": repeated_after_attachment,
+    }))
+
+    similar = json.loads(json.dumps(partial))
+    similar["evidence"]["content_sha256"] = "d" * 64
+    similar["lines"][0]["description_raw"] = "DIFFERENT PRODUCT"
+    similar_result = parse(record_purchase_receipt(similar))
+    check("merchant/date/total similarity returns a fail-closed candidate", (
+        isinstance(similar_result, dict)
+        and receipt_id in similar_result.get("error", "")
+    ), str(similar_result))
+
+    mismatch = {
+        "merchant_name_raw": "Review QA",
+        "purchased_at": "2026-08-07T12:30:00Z",
+        "time_precision": "datetime",
+        "currency": "EUR",
+        "lines": [{
+            "description_raw": "PRINTED LINE",
+            "kind": "product",
+            "line_total_cents": 120,
+        }],
+        "total_cents": 100,
+        "evidence": {
+            "source_kind": "manual",
+            "source_reference": None,
+            "content_sha256": None,
+            "confidence": "low",
+        },
+    }
+    review = parse(record_purchase_receipt(mismatch))
+    check("total mismatch is preserved as a review signal", (
+        review.get("status") == "needs_review"
+        and review.get("reconciliation_delta_cents") == 20
+    ), str(review))
+    default_analytics = parse(get_purchase_analytics({}))
+    review_analytics = parse(get_purchase_analytics({"include_needs_review": True}))
+    check("needs_review is excluded from confirmed analytics by default", (
+        default_analytics.get("receipt_count") == 1
+        and review_analytics.get("receipt_count") == 2
+        and review_analytics.get("reconciliation_gaps", [{}])[0].get("delta_cents") == 20
+    ), str(review_analytics))
+
+    unknown = {
+        "merchant_name_raw": "Unknown Date QA",
+        "purchased_at": None,
+        "time_precision": "unknown",
+        "currency": "EUR",
+        "lines": [{
+            "description_raw": "UNREADABLE SKU",
+            "kind": "other",
+        }],
+        "evidence": {
+            "source_kind": "image",
+            "source_reference": "qa:raw-only",
+            "content_sha256": "e" * 64,
+            "confidence": "low",
+        },
+    }
+    raw_only = parse(record_purchase_receipt(unknown))
+    check("unknown fields remain null without invented defaults", (
+        raw_only.get("purchased_at") is None
+        and raw_only.get("total_cents") is None
+        and raw_only["lines"][0].get("quantity") is None
+        and raw_only["lines"][0].get("normalized_label") is None
+        and raw_only["lines"][0].get("line_total_cents") is None
+    ), str(raw_only))
+    incomplete_analytics = parse(get_purchase_analytics({}))
+    eur_bucket = incomplete_analytics.get("by_currency", {}).get("EUR", {})
+    check("unknown printed total never becomes zero spend", (
+        incomplete_analytics.get("total_spend_cents") is None
+        and eur_bucket.get("spend_cents") is None
+        and eur_bucket.get("known_spend_cents") == 825
+        and eur_bucket.get("unknown_total_count") == 1
+        and eur_bucket.get("complete") is False
+    ), str(incomplete_analytics))
+
+    stale = parse(correct_purchase_receipt({
+        "receipt_id": receipt_id,
+        "expected_revision": 999,
+        "reason": "stale QA",
+        "changes": {"branch": "should not persist"},
+    }))
+    unchanged = parse(get_purchase_receipt({
+        "receipt_id": receipt_id, "include_revisions": True,
+    }))
+    check("stale correction is rejected without appending a revision", (
+        "stale receipt revision" in stale.get("error", "")
+        and len(unchanged.get("revisions", [])) == 2
+    ), str(stale))
+
+    stable_payload = {
+        "merchant_name_raw": "Stable Line Store",
+        "purchased_at": "2026-08-06",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {"description_raw": "A", "line_total_cents": 100},
+            {"description_raw": "B", "line_total_cents": 200},
+        ],
+        "total_cents": 300,
+        "evidence": {"source_kind": "manual", "content_sha256": "1" * 64},
+    }
+    stable_created = parse(record_purchase_receipt(stable_payload))
+    stable_id = stable_created["receipt_id"]
+    original_ids = {
+        line["description_raw"]: line["receipt_line_id"]
+        for line in stable_created["lines"]
+    }
+    inserted = parse(correct_purchase_receipt({
+        "receipt_id": stable_id,
+        "expected_revision": 1,
+        "reason": "insert one omitted printed line",
+        "changes": {
+            "lines": [
+                {"description_raw": "INSERTED", "line_total_cents": 50},
+                {"description_raw": "A", "line_total_cents": 100},
+                {"description_raw": "B", "line_total_cents": 200},
+            ],
+            "total_cents": 350,
+        },
+    }))
+    revised_ids = {
+        line["description_raw"]: line["receipt_line_id"]
+        for line in inserted["lines"]
+    }
+    check("line IDs survive insertions instead of shifting by position", (
+        revised_ids.get("A") == original_ids.get("A")
+        and revised_ids.get("B") == original_ids.get("B")
+        and revised_ids.get("INSERTED") not in set(original_ids.values())
+    ), str(inserted))
+    invented_id = parse(correct_purchase_receipt({
+        "receipt_id": stable_id,
+        "expected_revision": 2,
+        "reason": "must reject caller-invented stable ID",
+        "changes": {
+            "lines": [
+                {
+                    "receipt_line_id": "rline_" + "f" * 32,
+                    "description_raw": "A",
+                    "line_total_cents": 100,
+                }
+            ],
+            "total_cents": 100,
+        },
+    }))
+    check("correction cannot inject an unknown stable line ID", (
+        "unknown receipt_line_id" in invented_id.get("error", "")
+    ), str(invented_id))
+
+    other = parse(record_purchase_receipt({
+        "merchant_name_raw": "Other Store",
+        "purchased_at": "2026-08-04",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "C", "line_total_cents": 400}],
+        "total_cents": 400,
+        "evidence": {"source_kind": "manual", "content_sha256": "3" * 64},
+    }))
+    cross_duplicate = parse(correct_purchase_receipt({
+        "receipt_id": other["receipt_id"],
+        "expected_revision": 1,
+        "reason": "must not collide with another active receipt",
+        "changes": {
+            "merchant_name_raw": "Stable Line Store",
+            "purchased_at": "2026-08-06",
+            "lines": [
+                {"description_raw": "INSERTED", "line_total_cents": 50},
+                {"description_raw": "A", "line_total_cents": 100},
+                {"description_raw": "B", "line_total_cents": 200},
+            ],
+            "total_cents": 350,
+        },
+    }))
+    other_after = parse(get_purchase_receipt({
+        "receipt_id": other["receipt_id"], "include_revisions": True,
+    }))
+    check("correction cannot create cross-receipt semantic duplicates", (
+        "duplicate canonical semantics" in cross_duplicate.get("error", "")
+        and len(other_after.get("revisions", [])) == 1
+    ), str(cross_duplicate))
+
+    for merchant, currency, total, evidence_hash in (
+        ("Case Store", "EUR", 111, "6" * 64),
+        ("CASE STORE", "USD", 222, "7" * 64),
+    ):
+        adjustment = -11 if currency == "EUR" else 22
+        adjustment_kind = "discount" if currency == "EUR" else "deposit"
+        parse(record_purchase_receipt({
+            "merchant_name_raw": merchant,
+            "purchased_at": "2026-08-12",
+            "time_precision": "date",
+            "currency": currency,
+            "lines": [
+                {
+                    "description_raw": currency,
+                    "kind": "product",
+                    "line_total_cents": total - adjustment,
+                },
+                {
+                    "description_raw": adjustment_kind,
+                    "kind": adjustment_kind,
+                    "line_total_cents": adjustment,
+                },
+            ],
+            "total_cents": total,
+            "evidence": {"source_kind": "manual", "content_sha256": evidence_hash},
+        }))
+    mixed = parse(get_purchase_analytics({
+        "from_date": "2026-08-12", "to_date": "2026-08-12",
+    }))
+    case_store = mixed.get("by_merchant", {}).get("case store", {})
+    mixed_day = mixed.get("by_day", {}).get("2026-08-12", {})
+    check("merchant case variants aggregate without summing currencies", (
+        case_store.get("receipt_count") == 2
+        and case_store.get("spend_cents") is None
+        and case_store.get("merchant_names_raw") == ["CASE STORE", "Case Store"]
+        and set(case_store.get("by_currency", {})) == {"EUR", "USD"}
+        and mixed_day.get("spend_cents") is None
+        and mixed.get("total_spend_cents") is None
+        and mixed.get("signed_adjustments_cents") is None
+        and mixed.get("discount_savings_cents") is None
+        and mixed.get("deposit_and_fee_cents") is None
+        and mixed.get("adjustments_by_currency", {}).get("EUR", {}).get(
+            "signed_adjustments_cents"
+        ) == -11
+        and mixed.get("adjustments_by_currency", {}).get("EUR", {}).get(
+            "discount_savings_cents"
+        ) == 11
+        and mixed.get("adjustments_by_currency", {}).get("USD", {}).get(
+            "signed_adjustments_cents"
+        ) == 22
+        and mixed.get("adjustments_by_currency", {}).get("USD", {}).get(
+            "deposit_and_fee_cents"
+        ) == 22
+    ), str(mixed))
+
+    for raw_label, normalized_label, cents, evidence_hash in (
+        ("Normalized Product", "shared-key", 301, "8" * 64),
+        ("shared-key", None, 302, "9" * 64),
+    ):
+        parse(record_purchase_receipt({
+            "merchant_name_raw": "Price Namespace Store",
+            "purchased_at": "2026-08-13",
+            "time_precision": "date",
+            "currency": "EUR",
+            "lines": [{
+                "description_raw": raw_label,
+                "normalized_label": normalized_label,
+                "kind": "product",
+                "unit_price_cents": cents,
+                "line_total_cents": cents,
+            }],
+            "total_cents": cents,
+            "evidence": {"source_kind": "manual", "content_sha256": evidence_hash},
+        }))
+    namespaced_prices = parse(get_purchase_analytics({
+        "from_date": "2026-08-13", "to_date": "2026-08-13",
+    })).get("price_history", {})
+    check("raw and normalized price-history identities have separate namespaces", (
+        set(namespaced_prices) == {"normalized:shared-key", "raw:shared-key"}
+        and namespaced_prices["normalized:shared-key"][0].get("identity_kind") == "normalized"
+        and namespaced_prices["raw:shared-key"][0].get("identity_kind") == "raw"
+    ), str(namespaced_prices))
+
+
+def test_audit_target_blob_directory_substitution_is_fail_closed():
+    print("\n-- AUDIT target-blob descriptor pinning --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        data_dir = base / "data"
+        external = base / "external"
+        data_dir.mkdir()
+        external.mkdir()
+        swapped = False
+
+        def swap_targets(stage):
+            nonlocal swapped
+            if stage != "after_targets_open" or swapped:
+                return
+            transaction_dirs = [
+                path for month in (data_dir / "audit" / "transactions").iterdir()
+                for path in month.iterdir()
+            ]
+            transaction_dir = transaction_dirs[0]
+            targets = transaction_dir / "targets"
+            targets.rename(transaction_dir / "targets-original")
+            targets.symlink_to(external, target_is_directory=True)
+            swapped = True
+
+        manager = audit_mod.AuditTransactionManager(
+            data_dir, fault_injector=swap_targets
+        )
+        try:
+            manager.commit(
+                operation="receipt_blob_substitution_probe",
+                targets={"receipts.json": b'{"private":"receipt-after-image"}\n'},
+                events=[{
+                    "event_type": "receipt_blob_substitution_probe",
+                    "entity": {"type": "purchase_receipt", "id": "receipt_probe"},
+                    "payload": {"revision": 1},
+                }],
+                context={
+                    "actor": {"type": "test"},
+                    "surface": {"kind": "test"},
+                },
+            )
+            substitution_error = ""
+        except Exception as exc:
+            substitution_error = str(exc)
+        check("audit after-images never follow a substituted targets directory", (
+            swapped
+            and bool(substitution_error)
+            and list(external.iterdir()) == []
+            and not (data_dir / "receipts.json").exists()
+        ), str({
+            "error": substitution_error,
+            "external": [path.name for path in external.iterdir()],
+        }))
+
+
+def test_purchase_receipt_read_recovers_pending_audit_transaction():
+    print("\n-- RECEIPT-1 read-side audit recovery --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    receipt_mod = importlib.import_module(".src.receipt", _PLUGIN_DIR.name)
+    commands_mod = importlib.import_module(".src.receipt_commands", _PLUGIN_DIR.name)
+    repo_mod = importlib.import_module(
+        ".src.repositories.json_receipt", _PLUGIN_DIR.name
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = Path(tmp)
+        repository = repo_mod.JsonReceiptRepository(data_dir / "receipts.json")
+        revision = receipt_mod.build_revision(
+            {
+                "merchant_name_raw": "Recovery Store",
+                "purchased_at": "2026-08-05",
+                "time_precision": "date",
+                "currency": "EUR",
+                "lines": [{"description_raw": "A", "line_total_cents": 100}],
+                "total_cents": 100,
+                "evidence": {
+                    "source_kind": "manual",
+                    "content_sha256": "2" * 64,
+                },
+            },
+            revision=1,
+            requested_status="confirmed",
+            reason=None,
+            provenance={"actor_type": "test", "surface_kind": "test"},
+        )
+        receipt = receipt_mod.new_receipt(revision)
+
+        def crash_after_target(stage):
+            if stage == "after_all_targets":
+                raise RuntimeError("simulated receipt process death")
+
+        manager = audit_mod.AuditTransactionManager(
+            data_dir, fault_injector=crash_after_target
+        )
+        try:
+            manager.commit(
+                operation="record_purchase_receipt",
+                targets={"receipts.json": repository.serialize([receipt])},
+                events=[{
+                    "event_type": "purchase_receipt_recorded",
+                    "entity": {"type": "purchase_receipt", "id": receipt.receipt_id},
+                    "payload": {"revision": 1},
+                }],
+                context={
+                    "actor": {"type": "test"},
+                    "surface": {"kind": "test"},
+                },
+            )
+        except RuntimeError:
+            pass
+        manager._fault_injector = None
+        loaded = commands_mod.load_receipts(
+            repository=repository, manager=manager
+        )
+        events = manager.list_events(
+            entity_type="purchase_receipt", entity_id=receipt.receipt_id
+        )
+        check("first receipt read resolves all-after crash as committed", (
+            [item.receipt_id for item in loaded] == [receipt.receipt_id]
+            and len(events) == 1
+            and events[0].get("event_type") == "purchase_receipt_recorded"
+        ), str(events))
+
+
+def test_purchase_receipt_commands_pin_data_root_descriptor():
+    print("\n-- RECEIPT-1 descriptor-pinned root --")
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    receipt_mod = importlib.import_module(".src.receipt", _PLUGIN_DIR.name)
+    commands_mod = importlib.import_module(".src.receipt_commands", _PLUGIN_DIR.name)
+    repo_mod = importlib.import_module(
+        ".src.repositories.json_receipt", _PLUGIN_DIR.name
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        data_dir = base / "data"
+        data_dir.mkdir()
+        repository = repo_mod.JsonReceiptRepository(data_dir / "receipts.json")
+        manager = audit_mod.AuditTransactionManager(data_dir)
+
+        first_payload = {
+            "merchant_name_raw": "Pinned Store A",
+            "purchased_at": "2026-08-03",
+            "time_precision": "date",
+            "currency": "EUR",
+            "lines": [{"description_raw": "A", "line_total_cents": 100}],
+            "total_cents": 100,
+            "evidence": {"source_kind": "manual", "content_sha256": "4" * 64},
+        }
+        commands_mod.record_receipt(
+            first_payload, repository=repository, manager=manager
+        )
+
+        second_payload = {
+            "merchant_name_raw": "Pinned Store B",
+            "purchased_at": "2026-08-02",
+            "time_precision": "date",
+            "currency": "EUR",
+            "lines": [{"description_raw": "B", "line_total_cents": 200}],
+            "total_cents": 200,
+            "evidence": {"source_kind": "manual", "content_sha256": "5" * 64},
+        }
+        evil_revision = receipt_mod.build_revision(
+            second_payload,
+            revision=1,
+            requested_status="confirmed",
+            reason=None,
+            provenance={"actor_type": "test", "surface_kind": "test"},
+        )
+        evil_receipt = receipt_mod.new_receipt(evil_revision)
+
+        pinned_dir = base / "pinned-data"
+        data_dir.rename(pinned_dir)
+        external = base / "external"
+        external.mkdir()
+        external_receipts = external / "receipts.json"
+        external_receipts.write_bytes(repository.serialize([evil_receipt]))
+        external_before = external_receipts.read_bytes()
+        data_dir.symlink_to(external, target_is_directory=True)
+
+        try:
+            commands_mod.record_receipt(
+                second_payload, repository=repository, manager=manager
+            )
+            root_swap_error = ""
+        except (ValueError, audit_mod.AuditConflictError) as exc:
+            root_swap_error = str(exc)
+        pinned = repository.load_bytes_strict(
+            (pinned_dir / "receipts.json").read_bytes()
+        )
+        check("receipt commands fail closed on a swapped parent symlink", (
+            "data root" in root_swap_error.lower().replace("-", " ")
+            and len(pinned) == 1
+            and external_receipts.read_bytes() == external_before
+            and not (external / "receipts.json.lock").exists()
+        ), root_swap_error)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        data_dir = base / "data"
+        data_dir.mkdir()
+        repository = repo_mod.JsonReceiptRepository(data_dir / "receipts.json")
+        manager = audit_mod.AuditTransactionManager(data_dir)
+        detached = base / "detached-data"
+        data_dir.rename(detached)
+        data_dir.mkdir()
+        try:
+            commands_mod.record_receipt({
+                "merchant_name_raw": "Ordinary Root Swap",
+                "purchased_at": "2026-08-03",
+                "time_precision": "date",
+                "currency": "EUR",
+                "lines": [{
+                    "description_raw": "A",
+                    "kind": "product",
+                    "line_total_cents": 100,
+                }],
+                "total_cents": 100,
+                "evidence": {"source_kind": "manual", "content_sha256": "a" * 64},
+            }, repository=repository, manager=manager)
+            ordinary_swap_error = ""
+        except (ValueError, audit_mod.AuditConflictError) as exc:
+            ordinary_swap_error = str(exc)
+        check("receipt commands fail closed on ordinary root inode replacement", (
+            "data root" in ordinary_swap_error.lower().replace("-", " ")
+            and not (data_dir / "receipts.json").exists()
+            and not (detached / "receipts.json").exists()
+        ), ordinary_swap_error)
+
+
+def test_purchase_receipt_independent_review_regressions():
+    print("\n-- RECEIPT-1 independent-review regressions --")
+    assert _TMP_DATA_DIR is not None
+    import hashlib
+    from datetime import datetime, timedelta, timezone
+
+    def review_hash(label):
+        return hashlib.sha256(f"receipt-review:{label}".encode()).hexdigest()
+
+    receipt_mod = importlib.import_module(".src.receipt", _PLUGIN_DIR.name)
+    commands_mod = importlib.import_module(".src.receipt_commands", _PLUGIN_DIR.name)
+    audit_mod = importlib.import_module(".src.audit.transaction", _PLUGIN_DIR.name)
+    repo_mod = importlib.import_module(
+        ".src.repositories.json_receipt", _PLUGIN_DIR.name
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        overflow_root = Path(tmp)
+        overflow_repository = repo_mod.JsonReceiptRepository(
+            overflow_root / "receipts.json"
+        )
+        overflow_manager = audit_mod.AuditTransactionManager(overflow_root)
+        try:
+            commands_mod.record_receipt({
+                "merchant_name_raw": "Overflow Store",
+                "purchased_at": "2026-08-15",
+                "time_precision": "date",
+                "currency": "EUR",
+                "lines": [
+                    {"description_raw": "A", "line_total_cents": 1_000_000_000_000},
+                    {"description_raw": "B", "line_total_cents": 1_000_000_000_000},
+                ],
+                "total_cents": 1_000_000_000_000,
+                "evidence": {
+                    "source_kind": "manual",
+                    "content_sha256": review_hash("overflow"),
+                },
+            }, repository=overflow_repository, manager=overflow_manager)
+            overflow_error = ""
+        except ValueError as exc:
+            overflow_error = str(exc)
+        try:
+            overflow_count = len(overflow_repository.load_strict())
+        except Exception:
+            overflow_count = -1
+    check("derived cent overflow is rejected before persistence", (
+        "lines_total_cents" in overflow_error
+        and overflow_count == 0
+    ), overflow_error)
+
+    unknown_kind = parse(record_purchase_receipt({
+        "merchant_name_raw": "Unknown Kind Store",
+        "purchased_at": "2026-08-16",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "Unreadable", "line_total_cents": 100}],
+        "total_cents": 100,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("kind")},
+    }))
+    check("omitted receipt-line kind remains unknown", (
+        unknown_kind.get("receipt_id")
+        and unknown_kind.get("lines", [{}])[0].get("kind") is None
+    ), str(unknown_kind))
+
+    retry_source = parse(record_purchase_receipt({
+        "merchant_name_raw": "Retraction Replay Store",
+        "purchased_at": "2026-08-17",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 100}],
+        "total_cents": 100,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("retract")},
+    }))
+    retracted = parse(retract_purchase_receipt({
+        "receipt_id": retry_source["receipt_id"],
+        "expected_revision": 1,
+        "reason": "duplicate intake",
+    }))
+    events_before_retry = importlib.import_module(
+        ".src.audit", _PLUGIN_DIR.name
+    ).audit_manager.list_events(
+        entity_type="purchase_receipt",
+        entity_id=retry_source["receipt_id"],
+        limit=1000,
+    )
+    replayed_retraction = parse(retract_purchase_receipt({
+        "receipt_id": retry_source["receipt_id"],
+        "expected_revision": 1,
+        "reason": "duplicate intake",
+    }))
+    events_after_retry = importlib.import_module(
+        ".src.audit", _PLUGIN_DIR.name
+    ).audit_manager.list_events(
+        entity_type="purchase_receipt",
+        entity_id=retry_source["receipt_id"],
+        limit=1000,
+    )
+    check("identical retraction retry is idempotent", (
+        retracted.get("revision") == 2
+        and replayed_retraction.get("revision") == 2
+        and replayed_retraction.get("idempotent") is True
+        and len(events_after_retry) == len(events_before_retry)
+    ), str(replayed_retraction))
+
+    original = parse(record_purchase_receipt({
+        "merchant_name_raw": "Historical Owner",
+        "purchased_at": "2026-08-18",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "S1", "kind": "product", "line_total_cents": 101}],
+        "total_cents": 101,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("history-owner")},
+    }))
+    parse(correct_purchase_receipt({
+        "receipt_id": original["receipt_id"],
+        "expected_revision": 1,
+        "reason": "correct product",
+        "changes": {
+            "lines": [{
+                "receipt_line_id": original["lines"][0]["receipt_line_id"],
+                "description_raw": "S2",
+                "kind": "product",
+                "line_total_cents": 102,
+            }],
+            "total_cents": 102,
+        },
+    }))
+    contender = parse(record_purchase_receipt({
+        "merchant_name_raw": "Other Historical Store",
+        "purchased_at": "2026-08-19",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "T", "kind": "product", "line_total_cents": 103}],
+        "total_cents": 103,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("history-other")},
+    }))
+    historical_collision = parse(correct_purchase_receipt({
+        "receipt_id": contender["receipt_id"],
+        "expected_revision": 1,
+        "reason": "must preserve historical ownership",
+        "changes": {
+            "merchant_name_raw": "Historical Owner",
+            "purchased_at": "2026-08-18",
+            "lines": [{
+                "receipt_line_id": contender["lines"][0]["receipt_line_id"],
+                "description_raw": "S1",
+                "kind": "product",
+                "line_total_cents": 101,
+            }],
+            "total_cents": 101,
+        },
+    }))
+    contender_after = parse(get_purchase_receipt({
+        "receipt_id": contender["receipt_id"], "include_revisions": True,
+    }))
+    check("historical fingerprints retain one canonical owner", (
+        "duplicate canonical semantics" in historical_collision.get("error", "")
+        and len(contender_after.get("revisions", [])) == 1
+    ), str(historical_collision))
+
+    evidence_owner = parse(record_purchase_receipt({
+        "merchant_name_raw": "Evidence Owner",
+        "purchased_at": "2026-08-20",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "E", "kind": "product", "line_total_cents": 104}],
+        "total_cents": 104,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("evidence-owner")},
+    }))
+    evidence_contender = parse(record_purchase_receipt({
+        "merchant_name_raw": "Evidence Other",
+        "purchased_at": "2026-08-21",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "F", "kind": "product", "line_total_cents": 105}],
+        "total_cents": 105,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("evidence-other")},
+    }))
+    evidence_collision = parse(correct_purchase_receipt({
+        "receipt_id": evidence_contender["receipt_id"],
+        "expected_revision": 1,
+        "reason": "must not steal evidence",
+        "changes": {"evidence": {"content_sha256": review_hash("evidence-owner")}},
+    }))
+    check("evidence hashes retain one canonical owner", (
+        evidence_owner.get("receipt_id")
+        and "evidence hash belongs to another receipt" in evidence_collision.get("error", "")
+    ), str(evidence_collision))
+
+    cross_owner_replay = parse(record_purchase_receipt({
+        "merchant_name_raw": "Evidence Owner",
+        "purchased_at": "2026-08-20",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{
+            "description_raw": "E",
+            "kind": "product",
+            "line_total_cents": 104,
+        }],
+        "total_cents": 104,
+        "evidence": {
+            "source_kind": "manual",
+            "content_sha256": review_hash("evidence-other"),
+        },
+    }))
+    check("semantic and evidence owners are resolved globally before idempotence", (
+        "different receipts" in cross_owner_replay.get("error", "").lower()
+        and cross_owner_replay.get("idempotent") is not True
+    ), str(cross_owner_replay))
+
+    sensitive = parse(record_purchase_receipt({
+        "merchant_name_raw": "Privacy Store",
+        "purchased_at": "2026-08-22",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 106}],
+        "total_cents": 106,
+        "evidence": {
+            "source_kind": "manual",
+            "notes": "VISA 4111 1111 1111 1111; loyalty 99887766",
+        },
+    }))
+    check("recognizable payment and loyalty identifiers are rejected", (
+        "sensitive" in sensitive.get("error", "").lower()
+    ), str(sensitive))
+    authorization_code = parse(record_purchase_receipt({
+        "merchant_name_raw": "Authorization Privacy Store",
+        "purchased_at": "2026-08-22",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 106}],
+        "total_cents": 106,
+        "evidence": {
+            "source_kind": "manual",
+            "notes": "payment authorization code AUTHCODE-731942",
+        },
+    }))
+    transaction_reference = parse(record_purchase_receipt({
+        "merchant_name_raw": "Transaction Privacy Store",
+        "purchased_at": "2026-08-22",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 106}],
+        "total_cents": 106,
+        "evidence": {
+            "source_kind": "manual",
+            "notes": "payment transaction reference TXN-ABC12345",
+        },
+    }))
+    transcription_pan = parse(record_purchase_receipt({
+        "merchant_name_raw": "Transcription Privacy Store",
+        "purchased_at": "2026-08-22",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 107}],
+        "total_cents": 107,
+        "evidence": {
+            "source_kind": "manual",
+            "transcription_method": "4111111111111111",
+        },
+    }))
+    line_pan = parse(record_purchase_receipt({
+        "merchant_name_raw": "Line Privacy Store",
+        "purchased_at": "2026-08-22",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{
+            "description_raw": "4111111111111111",
+            "kind": "other",
+            "line_total_cents": 0,
+        }],
+        "total_cents": 0,
+        "evidence": {"source_kind": "manual"},
+    }))
+    check("authorization codes and sensitive free-text metadata are rejected", (
+        "sensitive" in authorization_code.get("error", "").lower()
+        and "sensitive" in transaction_reference.get("error", "").lower()
+        and "sensitive" in transcription_pan.get("error", "").lower()
+        and "sensitive" in line_pan.get("error", "").lower()
+    ), str({
+        "authorization": authorization_code,
+        "transaction_reference": transaction_reference,
+        "method": transcription_pan,
+        "line": line_pan,
+    }))
+
+    reason_target = parse(record_purchase_receipt({
+        "merchant_name_raw": "Private Reason Store",
+        "purchased_at": "2026-08-23",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 107}],
+        "total_cents": 107,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("reason")},
+    }))
+    sensitive_reason = parse(retract_purchase_receipt({
+        "receipt_id": reason_target["receipt_id"],
+        "expected_revision": 1,
+        "reason": "card 4111111111111111 was duplicated",
+    }))
+    reason_after = parse(get_purchase_receipt({
+        "receipt_id": reason_target["receipt_id"], "include_revisions": True,
+    }))
+    check("sensitive correction reasons never enter ledger or audit", (
+        "sensitive" in sensitive_reason.get("error", "").lower()
+        and len(reason_after.get("revisions", [])) == 1
+    ), str(sensitive_reason))
+    authorization_reason = parse(retract_purchase_receipt({
+        "receipt_id": reason_target["receipt_id"],
+        "expected_revision": 1,
+        "reason": "payment authorization code AUTHCODE-731942",
+    }))
+    terminal_reason = parse(correct_purchase_receipt({
+        "receipt_id": reason_target["receipt_id"],
+        "expected_revision": 1,
+        "reason": "payment terminal ID TERM-ABC12345",
+        "changes": {"merchant_name_normalized": "private reason store"},
+    }))
+    token_reason = parse(retract_purchase_receipt({
+        "receipt_id": reason_target["receipt_id"],
+        "expected_revision": 1,
+        "reason": "payment token TOK-ABC12345",
+    }))
+    check("payment identifiers never enter revision or audit reasons", (
+        "sensitive" in authorization_reason.get("error", "").lower()
+        and "sensitive" in terminal_reason.get("error", "").lower()
+        and "sensitive" in token_reason.get("error", "").lower()
+        and len(parse(get_purchase_receipt({
+            "receipt_id": reason_target["receipt_id"],
+            "include_revisions": True,
+        })).get("revisions", [])) == 1
+    ), str({
+        "authorization": authorization_reason,
+        "terminal": terminal_reason,
+        "token": token_reason,
+    }))
+    boolean_retraction_retry = parse(retract_purchase_receipt({
+        "receipt_id": retry_source["receipt_id"],
+        "expected_revision": True,
+        "reason": "duplicate intake",
+    }))
+    check("boolean expected_revision is rejected even on idempotent retry", (
+        "positive integer" in boolean_retraction_retry.get("error", "")
+    ), str(boolean_retraction_retry))
+
+    identity_source = parse(record_purchase_receipt({
+        "merchant_name_raw": "Line Identity Priority",
+        "purchased_at": "2026-08-24",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "B", "kind": "product", "line_total_cents": 200},
+        ],
+        "total_cents": 300,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("line-priority")},
+    }))
+    identity_corrected = parse(correct_purchase_receipt({
+        "receipt_id": identity_source["receipt_id"],
+        "expected_revision": 1,
+        "reason": "same-length insert/delete",
+        "changes": {
+            "lines": [
+                {"description_raw": "X", "kind": "product", "line_total_cents": 50},
+                {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            ],
+            "total_cents": 150,
+        },
+    }))
+    original_ids = [line["receipt_line_id"] for line in identity_source["lines"]]
+    corrected_ids = [line["receipt_line_id"] for line in identity_corrected.get("lines", [])]
+    check("exact line matches preserve only matching identities", (
+        len(corrected_ids) == 2
+        and corrected_ids[1] == original_ids[0]
+        and corrected_ids[0] not in original_ids
+    ), str(identity_corrected))
+
+    link_carry = parse(record_purchase_receipt({
+        "merchant_name_raw": "Link Carry Probe",
+        "purchased_at": "2026-08-23",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "B", "kind": "product", "line_total_cents": 200},
+        ],
+        "total_cents": 300,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("link-carry")},
+    }))
+    old_b_id = link_carry["lines"][1]["receipt_line_id"]
+    known_inventory_id = importlib.import_module(
+        ".src.repositories", _PLUGIN_DIR.name
+    ).fridge_repo.load_catalog_items()[0].id
+    link_carry = parse(link_purchase_receipt_line({
+        "receipt_id": link_carry["receipt_id"],
+        "receipt_line_id": old_b_id,
+        "expected_revision": 1,
+        "action": "link",
+        "inventory_item_id": known_inventory_id,
+    }))
+    replaced_without_identity = parse(correct_purchase_receipt({
+        "receipt_id": link_carry["receipt_id"],
+        "expected_revision": 2,
+        "reason": "replace B with unrelated X",
+        "changes": {"lines": [
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "X", "kind": "product", "line_total_cents": 200},
+        ]},
+    }))
+    replacement_x = next(
+        line for line in replaced_without_identity.get("lines", [])
+        if line.get("description_raw") == "X"
+    )
+    check("unrelated replacements never inherit removed line IDs or links", (
+        replacement_x.get("receipt_line_id") != old_b_id
+        and all(not values for values in replacement_x.get("links", {}).values())
+    ), str(replacement_x))
+
+    duplicate_source = parse(record_purchase_receipt({
+        "merchant_name_raw": "Duplicate Lines",
+        "purchased_at": "2026-08-25",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+        ],
+        "total_cents": 200,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("duplicate-lines")},
+    }))
+    ambiguous_identity = parse(correct_purchase_receipt({
+        "receipt_id": duplicate_source["receipt_id"],
+        "expected_revision": 1,
+        "reason": "ambiguous duplicate deletion",
+        "changes": {
+            "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 100}],
+            "total_cents": 100,
+        },
+    }))
+    check("ambiguous duplicate-line identity requires stable IDs", (
+        "ambiguous receipt line identity" in ambiguous_identity.get("error", "")
+    ), str(ambiguous_identity))
+
+    duplicate_cardinality = parse(record_purchase_receipt({
+        "merchant_name_raw": "Duplicate Cardinality",
+        "purchased_at": "2026-08-25",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "B", "kind": "product", "line_total_cents": 200},
+        ],
+        "total_cents": 400,
+        "evidence": {
+            "source_kind": "manual",
+            "content_sha256": review_hash("duplicate-cardinality"),
+        },
+    }))
+    linked_duplicate_id = duplicate_cardinality["lines"][0]["receipt_line_id"]
+    duplicate_cardinality = parse(link_purchase_receipt_line({
+        "receipt_id": duplicate_cardinality["receipt_id"],
+        "receipt_line_id": linked_duplicate_id,
+        "expected_revision": 1,
+        "action": "link",
+        "inventory_item_id": known_inventory_id,
+    }))
+    ambiguous_same_length = parse(correct_purchase_receipt({
+        "receipt_id": duplicate_cardinality["receipt_id"],
+        "expected_revision": 2,
+        "reason": "remove one duplicate and add unrelated row",
+        "changes": {
+            "lines": [
+                {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+                {"description_raw": "B", "kind": "product", "line_total_cents": 200},
+                {"description_raw": "X", "kind": "product", "line_total_cents": 100},
+            ],
+            "total_cents": 400,
+        },
+    }))
+    check("duplicate cardinality changes fail closed despite unchanged total line count", (
+        "ambiguous receipt line identity" in ambiguous_same_length.get("error", "")
+    ), str(ambiguous_same_length))
+
+    unique_to_duplicate = parse(record_purchase_receipt({
+        "merchant_name_raw": "Unique To Duplicate",
+        "purchased_at": "2026-08-25",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 100}],
+        "total_cents": 100,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("unique-to-duplicate")},
+    }))
+    unique_to_duplicate = parse(link_purchase_receipt_line({
+        "receipt_id": unique_to_duplicate["receipt_id"],
+        "receipt_line_id": unique_to_duplicate["lines"][0]["receipt_line_id"],
+        "expected_revision": 1,
+        "action": "link",
+        "inventory_item_id": known_inventory_id,
+    }))
+    unique_to_duplicate_change = parse(correct_purchase_receipt({
+        "receipt_id": unique_to_duplicate["receipt_id"],
+        "expected_revision": 2,
+        "reason": "split one indistinguishable row into two",
+        "changes": {
+            "lines": [
+                {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+                {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            ],
+            "total_cents": 200,
+        },
+    }))
+    unique_to_duplicate_after = parse(get_purchase_receipt({
+        "receipt_id": unique_to_duplicate["receipt_id"],
+    }))
+    check("unique-to-duplicate correction cannot choose which new row inherits identity", (
+        "ambiguous receipt line identity" in unique_to_duplicate_change.get("error", "")
+        and unique_to_duplicate_after.get("revision") == 2
+        and unique_to_duplicate_after.get("lines", [{}])[0].get("links", {}).get("inventory_item_ids") == [known_inventory_id]
+    ), f"change={unique_to_duplicate_change}; after={unique_to_duplicate_after}")
+
+    explicit_duplicate_decrease = parse(record_purchase_receipt({
+        "merchant_name_raw": "Explicit Duplicate Decrease",
+        "purchased_at": "2026-08-25",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+        ],
+        "total_cents": 300,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("explicit-duplicate-decrease")},
+    }))
+    explicit_ids = [line["receipt_line_id"] for line in explicit_duplicate_decrease["lines"]]
+    explicit_duplicate_decrease = parse(link_purchase_receipt_line({
+        "receipt_id": explicit_duplicate_decrease["receipt_id"],
+        "receipt_line_id": explicit_ids[2],
+        "expected_revision": 1,
+        "action": "link",
+        "inventory_item_id": known_inventory_id,
+    }))
+    explicit_decrease_change = parse(correct_purchase_receipt({
+        "receipt_id": explicit_duplicate_decrease["receipt_id"],
+        "expected_revision": 2,
+        "reason": "retain one duplicate explicitly and one implicitly",
+        "changes": {
+            "lines": [
+                {"receipt_line_id": explicit_ids[0], "description_raw": "A", "kind": "product", "line_total_cents": 100},
+                {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            ],
+            "total_cents": 200,
+        },
+    }))
+    explicit_decrease_after = parse(get_purchase_receipt({
+        "receipt_id": explicit_duplicate_decrease["receipt_id"],
+    }))
+    check("explicit reservation does not make remaining duplicate identity inferable", (
+        "ambiguous receipt line identity" in explicit_decrease_change.get("error", "")
+        and explicit_decrease_after.get("revision") == 2
+        and explicit_decrease_after.get("lines", [{}, {}, {}])[2].get("links", {}).get("inventory_item_ids") == [known_inventory_id]
+    ), f"change={explicit_decrease_change}; after={explicit_decrease_after}")
+
+    link_target = parse(record_purchase_receipt({
+        "merchant_name_raw": "Link Guard Store",
+        "purchased_at": "2026-08-26",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 108}],
+        "total_cents": 108,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("link-guard")},
+    }))
+    generic_link = parse(correct_purchase_receipt({
+        "receipt_id": link_target["receipt_id"],
+        "expected_revision": 1,
+        "reason": "must use dedicated link operation",
+        "changes": {"lines": [{
+            "receipt_line_id": link_target["lines"][0]["receipt_line_id"],
+            "description_raw": link_target["lines"][0]["description_raw"],
+            "kind": link_target["lines"][0]["kind"],
+            "line_total_cents": link_target["lines"][0]["line_total_cents"],
+            "links": {"product_ids": ["ghost_product"]},
+        }]},
+    }))
+    nonexistent_link = parse(link_purchase_receipt_line({
+        "receipt_id": link_target["receipt_id"],
+        "receipt_line_id": link_target["lines"][0]["receipt_line_id"],
+        "expected_revision": 1,
+        "action": "link",
+        "product_id": "ghost_product",
+    }))
+    check("generic corrections cannot mutate analytical links", (
+        "dedicated link" in generic_link.get("error", "")
+    ), str(generic_link))
+    check("analytical links require a real local identity", (
+        "known catalog item" in nonexistent_link.get("error", "").lower()
+    ), str(nonexistent_link))
+
+    merge_target_item = _repos_mod.fridge_repo.add_item(name="receipt merge target")
+    merge_source_item = _repos_mod.fridge_repo.add_item(name="receipt merge source")
+    merge_source_item = _repos_mod.fridge_repo.remove_item(merge_source_item.id)
+    merge_receipt = parse(record_purchase_receipt({
+        "merchant_name_raw": "Merge Link Guard",
+        "purchased_at": "2026-08-27",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{"description_raw": "SOURCE PRODUCT", "kind": "product", "line_total_cents": 111}],
+        "total_cents": 111,
+        "evidence": {
+            "source_kind": "manual",
+            "content_sha256": review_hash("merge-link-guard"),
+        },
+    }))
+    merge_receipt = parse(link_purchase_receipt_line({
+        "receipt_id": merge_receipt["receipt_id"],
+        "receipt_line_id": merge_receipt["lines"][0]["receipt_line_id"],
+        "expected_revision": 1,
+        "action": "link",
+        "product_id": merge_source_item.id,
+    }))
+    merge_with_receipt_reference = parse(_load_handler("merge_product_identity")({
+        "source_item_id": merge_source_item.id,
+        "target_item_id": merge_target_item.id,
+        "expected_source_updated_at": merge_source_item.updated_at,
+        "expected_target_updated_at": merge_target_item.updated_at,
+    }))
+    catalog_after_blocked_merge = _repos_mod.fridge_repo.load_catalog_items()
+    check("product merge rejects all-history purchase-receipt references", (
+        "purchase receipt references" in merge_with_receipt_reference.get("error", "")
+        and any(item.id == merge_source_item.id for item in catalog_after_blocked_merge)
+    ), str(merge_with_receipt_reference))
+    _repos_mod.fridge_repo.remove_item(merge_target_item.id)
+
+    shopping_path = _TMP_DATA_DIR / "shopping_requests.json"
+    shopping_before = shopping_path.read_bytes() if shopping_path.exists() else None
+    shopping_path.write_text("{broken", encoding="utf-8")
+    corrupt_shopping_link = parse(link_purchase_receipt_line({
+        "receipt_id": link_target["receipt_id"],
+        "receipt_line_id": link_target["lines"][0]["receipt_line_id"],
+        "expected_revision": 1,
+        "action": "link",
+        "shopping_occurrence_id": "occurrence_missing",
+    }))
+    if shopping_before is None:
+        shopping_path.unlink(missing_ok=True)
+    else:
+        shopping_path.write_bytes(shopping_before)
+    check("shopping-request parser failures are sanitized by receipt link handler", (
+        corrupt_shopping_link == {"error": "Storage is temporarily unavailable"}
+    ), str(corrupt_shopping_link))
+
+    record_schema = importlib.import_module(
+        ".src.handlers.record_purchase_receipt", _PLUGIN_DIR.name
+    ).SCHEMA
+    correction_schema = importlib.import_module(
+        ".src.handlers.correct_purchase_receipt", _PLUGIN_DIR.name
+    ).SCHEMA
+    link_schema = importlib.import_module(
+        ".src.handlers.link_purchase_receipt_line", _PLUGIN_DIR.name
+    ).SCHEMA
+    record_line_properties = record_schema["properties"]["lines"]["items"]["properties"]
+    correction_line_properties = (
+        correction_schema["properties"]["changes"]["properties"]["lines"]["items"]["properties"]
+    )
+    link_exact_one = link_schema.get("oneOf", [])
+    check("native schemas match server-owned line and link identities", (
+        "receipt_line_id" not in record_line_properties
+        and "links" not in record_line_properties
+        and "receipt_line_id" in correction_line_properties
+        and "links" not in correction_line_properties
+        and len(link_exact_one) == 3
+    ), str({"record": record_line_properties, "link_one_of": link_exact_one}))
+    analytics_handler = importlib.import_module(
+        ".src.handlers.get_purchase_analytics", _PLUGIN_DIR.name
+    )
+    list_handler = importlib.import_module(
+        ".src.handlers.list_purchase_receipts", _PLUGIN_DIR.name
+    )
+    retract_schema = importlib.import_module(
+        ".src.handlers.retract_purchase_receipt", _PLUGIN_DIR.name
+    ).SCHEMA
+    record_properties = record_schema["properties"]
+    evidence_properties = record_properties["evidence"]["properties"]
+    check("native schemas expose canonical receipt text bounds", (
+        record_properties["branch"].get("oneOf", [{}])[0].get("maxLength") == 1000
+        and evidence_properties["source_reference"].get("oneOf", [{}])[0].get(
+            "maxLength"
+        ) == 4096
+        and "pattern" in correction_schema["properties"]["reason"]
+        and "pattern" in retract_schema["properties"]["reason"]
+        and link_schema["properties"]["inventory_item_id"].get("minLength") == 1
+    ), str({
+        "branch": record_properties["branch"],
+        "source_reference": evidence_properties["source_reference"],
+    }))
+    invalid_currency_filter = parse(analytics_handler.HANDLER({"currency": "123"}))
+    long_merchant_filter = "M" * 501
+    invalid_analytics_merchant = parse(analytics_handler.HANDLER({
+        "merchant_name": long_merchant_filter,
+    }))
+    invalid_list_merchant = parse(list_handler.HANDLER({
+        "merchant_name": long_merchant_filter,
+    }))
+    check("native filter runtime rejects schema-invalid values", (
+        "currency" in invalid_currency_filter.get("error", "").lower()
+        and "merchant_name" in invalid_analytics_merchant.get("error", "")
+        and "merchant_name" in invalid_list_merchant.get("error", "")
+    ), str({
+        "currency": invalid_currency_filter,
+        "analytics": invalid_analytics_merchant,
+        "list": invalid_list_merchant,
+    }))
+
+    from jsonschema import Draft7Validator, FormatChecker
+
+    record_validator = Draft7Validator(record_schema, format_checker=FormatChecker())
+    schema_probe = {
+        "merchant_name_raw": "Schema Probe",
+        "purchased_at": "2026-08-28",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{
+            "description_raw": "A",
+            "kind": "product",
+            "quantity": "1",
+            "line_total_cents": 100,
+        }],
+        "evidence": {"source_kind": "manual"},
+    }
+    schema_adversarial = []
+    for label, mutate in (
+        ("nonnumeric quantity", lambda value: value["lines"][0].update(quantity="abc")),
+        ("zero quantity", lambda value: value["lines"][0].update(quantity="0")),
+        ("malformed date", lambda value: value.update(purchased_at="2026-99-99")),
+        ("naive datetime", lambda value: value.update(
+            purchased_at="2026-08-28T12:00:00", time_precision="datetime",
+        )),
+        ("unknown time with value", lambda value: value.update(time_precision="unknown")),
+        ("known time with null", lambda value: value.update(purchased_at=None)),
+        ("positive discount", lambda value: value["lines"][0].update(
+            kind="discount", line_total_cents=100,
+        )),
+    ):
+        candidate = json.loads(json.dumps(schema_probe))
+        mutate(candidate)
+        schema_adversarial.append((label, candidate))
+    schema_failures = {
+        label: [error.message for error in record_validator.iter_errors(candidate)]
+        for label, candidate in schema_adversarial
+    }
+    runtime_failures = {
+        label: parse(record_purchase_receipt(candidate)).get("error")
+        for label, candidate in schema_adversarial
+    }
+    check("record schema and runtime reject the same structural adversarial matrix", (
+        all(schema_failures.values()) and all(runtime_failures.values())
+    ), str({"schema": schema_failures, "runtime": runtime_failures}))
+
+    list_null = {"status": None}
+    analytics_null = {"currency": None}
+    link_null = {
+        "receipt_id": link_target["receipt_id"],
+        "receipt_line_id": link_target["lines"][0]["receipt_line_id"],
+        "expected_revision": 1,
+        "action": "link",
+        "product_id": known_inventory_id,
+        "inventory_item_id": None,
+    }
+    null_schema_results = {
+        "list": list(Draft7Validator(list_handler.SCHEMA).iter_errors(list_null)),
+        "analytics": list(Draft7Validator(analytics_handler.SCHEMA).iter_errors(analytics_null)),
+        "link": list(Draft7Validator(link_schema).iter_errors(link_null)),
+    }
+    null_runtime_results = {
+        "list": parse(list_handler.HANDLER(list_null)),
+        "analytics": parse(analytics_handler.HANDLER(analytics_null)),
+        "link": parse(link_purchase_receipt_line(link_null)),
+    }
+    check("explicit-null filter and unused-link semantics match native schemas", (
+        all(null_schema_results.values())
+        and all("error" in result for result in null_runtime_results.values())
+    ), str(null_runtime_results))
+
+    injected_id = parse(record_purchase_receipt({
+        "merchant_name_raw": "Injected Initial ID",
+        "purchased_at": "2026-08-26",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{
+            "receipt_line_id": "rline_" + "1" * 32,
+            "description_raw": "A",
+            "kind": "product",
+            "line_total_cents": 109,
+        }],
+        "total_cents": 109,
+        "evidence": {
+            "source_kind": "manual",
+            "content_sha256": review_hash("injected-initial-id"),
+        },
+    }))
+    injected_links = parse(record_purchase_receipt({
+        "merchant_name_raw": "Injected Initial Links",
+        "purchased_at": "2026-08-26",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [{
+            "description_raw": "A",
+            "kind": "product",
+            "line_total_cents": 110,
+            "links": {"product_ids": ["ghost_product"]},
+        }],
+        "total_cents": 110,
+        "evidence": {
+            "source_kind": "manual",
+            "content_sha256": review_hash("injected-initial-links"),
+        },
+    }))
+    check("runtime also rejects client-owned initial identities", (
+        "assigned by the server" in injected_id.get("error", "")
+        and "dedicated link operation" in injected_links.get("error", "")
+    ), str({"id": injected_id, "links": injected_links}))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        isolated = Path(tmp)
+        history_path = isolated / "history.json"
+        history_path.write_text('{"sentinel":true}', encoding="utf-8")
+        wrong_repository = repo_mod.JsonReceiptRepository(history_path)
+        wrong_manager = audit_mod.AuditTransactionManager(isolated)
+        try:
+            commands_mod.record_receipt(
+                {
+                    "merchant_name_raw": "Wrong Target",
+                    "purchased_at": "2026-08-27",
+                    "time_precision": "date",
+                    "currency": "EUR",
+                    "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 100}],
+                    "total_cents": 100,
+                    "evidence": {"source_kind": "manual"},
+                },
+                repository=wrong_repository,
+                manager=wrong_manager,
+            )
+            wrong_target_error = ""
+        except ValueError as exc:
+            wrong_target_error = str(exc)
+        check("receipt commands only target canonical receipts.json", (
+            "canonical receipts.json" in wrong_target_error
+            and history_path.read_text(encoding="utf-8") == '{"sentinel":true}'
+        ), wrong_target_error)
+
+    import multiprocessing
+    with tempfile.TemporaryDirectory() as tmp:
+        race_root = Path(tmp)
+        race_payload = {
+            "merchant_name_raw": "Concurrent Receipt Store",
+            "purchased_at": "2026-08-27",
+            "time_precision": "date",
+            "currency": "EUR",
+            "lines": [{
+                "description_raw": "CONCURRENT ITEM",
+                "kind": "product",
+                "line_total_cents": 333,
+            }],
+            "total_cents": 333,
+            "evidence": {
+                "source_kind": "manual",
+                "content_sha256": review_hash("cross-process-race"),
+            },
+        }
+        context = multiprocessing.get_context("fork")
+        start = context.Event()
+        results = context.Queue()
+
+        def receipt_record_worker(data_root, payload, ready, output):
+            worker_root = Path(data_root)
+            worker_repository = repo_mod.JsonReceiptRepository(
+                worker_root / "receipts.json"
+            )
+            worker_manager = audit_mod.AuditTransactionManager(worker_root)
+            ready.wait()
+            try:
+                value = commands_mod.record_receipt(
+                    payload,
+                    repository=worker_repository,
+                    manager=worker_manager,
+                )
+                output.put(("ok", value["receipt_id"], value.get("idempotent", False)))
+            except Exception as exc:
+                output.put(("error", type(exc).__name__, str(exc)))
+
+        processes = [
+            context.Process(
+                target=receipt_record_worker,
+                args=(race_root, race_payload, start, results),
+            )
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(20)
+        race_results = [results.get(timeout=5) for _ in processes]
+        final_repository = repo_mod.JsonReceiptRepository(
+            race_root / "receipts.json"
+        )
+        final_manager = audit_mod.AuditTransactionManager(race_root)
+        final_manager.recover()
+        race_receipts = final_repository.load_strict()
+        race_events = final_manager.list_events(
+            entity_type="purchase_receipt", limit=1000
+        )
+        check("cross-process duplicate intake has one canonical winner", (
+            all(process.exitcode == 0 for process in processes)
+            and all(result[0] == "ok" for result in race_results)
+            and len({result[1] for result in race_results}) == 1
+            and sorted(result[2] for result in race_results) == [False, True]
+            and len(race_receipts) == 1
+            and sum(
+                event.get("event_type") == "purchase_receipt.recorded.v1"
+                for event in race_events
+            ) == 1
+        ), str({"results": race_results, "events": race_events}))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        isolated = Path(tmp)
+        repository = repo_mod.JsonReceiptRepository(isolated / "receipts.json")
+        revision = receipt_mod.build_revision(
+            {
+                "merchant_name_raw": "Corrupt History",
+                "purchased_at": "2026-08-28",
+                "time_precision": "date",
+                "currency": "EUR",
+                "lines": [{"description_raw": "A", "kind": "product", "line_total_cents": 100}],
+                "total_cents": 100,
+                "evidence": {"source_kind": "manual"},
+            },
+            revision=1,
+            requested_status="confirmed",
+            reason=None,
+            provenance={"actor_type": "test", "surface_kind": "test"},
+        )
+        receipt = receipt_mod.new_receipt(revision)
+        raw = receipt.to_dict()
+        duplicate_revision = dict(raw["revisions"][0])
+        duplicate_revision["revision"] = 2
+        duplicate_revision["reason"] = "synthetic no-op revision"
+        duplicate_revision["recorded_at"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=1)
+        ).isoformat().replace("+00:00", "Z")
+        raw["revisions"].append(duplicate_revision)
+        repository.path.write_text(json.dumps({
+            "schema_version": 1, "receipts": [raw],
+        }), encoding="utf-8")
+        try:
+            repository.load_strict()
+            malformed_history_error = ""
+        except Exception as exc:
+            malformed_history_error = str(exc) + " " + str(exc.__cause__ or "")
+        check("strict load rejects malformed revision state transitions", (
+            bool(malformed_history_error.strip())
+        ), malformed_history_error)
+
+    def strict_load_error(raw_receipt):
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = repo_mod.JsonReceiptRepository(Path(tmp) / "receipts.json")
+            repository.path.write_text(json.dumps({
+                "schema_version": 1,
+                "receipts": [raw_receipt],
+            }), encoding="utf-8")
+            try:
+                repository.load_strict()
+                return ""
+            except Exception as exc:
+                return str(exc) + " " + str(exc.__cause__ or "")
+
+    base_payload = {
+        "merchant_name_raw": "Strict Identity Store",
+        "purchased_at": "2026-08-29",
+        "time_precision": "date",
+        "currency": "EUR",
+        "lines": [
+            {"description_raw": "A", "kind": "product", "line_total_cents": 100},
+            {"description_raw": "B", "kind": "product", "line_total_cents": 200},
+        ],
+        "total_cents": 300,
+        "evidence": {"source_kind": "manual", "content_sha256": review_hash("strict")},
+    }
+    strict_initial = receipt_mod.new_receipt(receipt_mod.build_revision(
+        base_payload,
+        revision=1,
+        requested_status="confirmed",
+        reason=None,
+        provenance={"actor_type": "test", "surface_kind": "test"},
+    ))
+    linked_initial_raw = strict_initial.to_dict()
+    linked_initial_raw["revisions"][0]["lines"][0]["links"][
+        "product_ids"
+    ] = ["ghost_product"]
+    linked_initial_error = strict_load_error(linked_initial_raw)
+    check("strict load rejects impossible links on the initial revision", (
+        bool(linked_initial_error.strip())
+    ), linked_initial_error)
+
+    first = strict_initial.current
+    unchanged_line_payload = dict(base_payload)
+    unchanged_line_payload["branch"] = "Identity QA"
+    unchanged_second = receipt_mod.build_revision(
+        unchanged_line_payload,
+        revision=2,
+        requested_status="corrected",
+        reason="synthetic identity substitution",
+        provenance={"actor_type": "test", "surface_kind": "test"},
+        previous=first,
+    )
+    unchanged_second.lines[0].receipt_line_id = "rline_" + "c" * 32
+    changed_identity = strict_initial.to_dict()
+    changed_identity["revisions"].append(unchanged_second.to_dict())
+    changed_identity_error = strict_load_error(changed_identity)
+    check("strict load rejects a new ID for an unchanged physical line", (
+        bool(changed_identity_error.strip())
+    ), changed_identity_error)
+
+    id_a, id_b = [line.receipt_line_id for line in first.lines]
+    second_payload = dict(base_payload)
+    second_payload["lines"] = [{
+        "receipt_line_id": id_a,
+        "description_raw": "A",
+        "kind": "product",
+        "line_total_cents": 100,
+    }]
+    second_payload["total_cents"] = 100
+    second = receipt_mod.build_revision(
+        second_payload,
+        revision=2,
+        requested_status="corrected",
+        reason="remove B",
+        provenance={"actor_type": "test", "surface_kind": "test"},
+        previous=first,
+    )
+    third_payload = dict(base_payload)
+    third_payload["lines"] = [
+        {
+            "receipt_line_id": id_a,
+            "description_raw": "A",
+            "kind": "product",
+            "line_total_cents": 100,
+        },
+        {"description_raw": "C", "kind": "product", "line_total_cents": 300},
+    ]
+    third_payload["total_cents"] = 400
+    third = receipt_mod.build_revision(
+        third_payload,
+        revision=3,
+        requested_status="corrected",
+        reason="add C",
+        provenance={"actor_type": "test", "surface_kind": "test"},
+        previous=second,
+    )
+    third.lines[1].receipt_line_id = id_b
+    retired_reuse = strict_initial.to_dict()
+    retired_reuse["revisions"].extend([second.to_dict(), third.to_dict()])
+    retired_reuse_error = strict_load_error(retired_reuse)
+    check("strict load rejects reuse of a retired receipt-line ID", (
+        bool(retired_reuse_error.strip())
+    ), retired_reuse_error)
+
+
 def main():
     _setup_tmp_data()
     try:
@@ -6382,7 +8259,7 @@ def main():
         test_correction_history_lineage_corruption_fails_closed()
         test_audit_transaction_recovers_mixed_state_to_before_images()
         test_audit_transaction_recovers_all_after_as_committed()
-        test_audit_recovery_accepts_legacy_receipt_proof_without_enabling_writes()
+        test_audit_recovery_accepts_legacy_receipt_proof_and_current_writes()
         test_audit_recovery_exports_committed_event_after_export_crash()
         test_audit_hardening_rejects_symlinks_and_repairs_projection()
         test_audit_hardening_blocks_parent_swap_and_corrupt_proof()
@@ -6395,7 +8272,13 @@ def main():
         test_unscoped_repository_reads_and_awareness_fail_closed()
         test_history_dependent_recommendations_fail_closed()
         test_audit_attempt_identity_metadata_and_fd_cleanup()
+        test_audit_target_blob_directory_substitution_is_fail_closed()
         test_audit1a_migration_reconstructs_w29_idempotently()
+        test_purchase_receipt_ledger_native_lifecycle_and_analytics()
+        test_purchase_receipt_edge_semantics_and_deduplication()
+        test_purchase_receipt_read_recovers_pending_audit_transaction()
+        test_purchase_receipt_commands_pin_data_root_descriptor()
+        test_purchase_receipt_independent_review_regressions()
         test_history_migrates_to_stable_cooking_occurrences()
         test_native_history_and_audit_corruption_is_sanitized()
         test_register_cooked_meal_completes_planned_occurrence()
@@ -6429,6 +8312,7 @@ def main():
         test_cooking_rejects_total_yield_below_served_portions()
         test_correction_distinguishes_omitted_and_null_cooked_at()
         test_cooking_correction_preserves_consumed_leftover_boundary()
+
         test_delete_history_entry()
         test_delete_history_entry_bogus()
         test_add_dish_dict()

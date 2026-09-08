@@ -19,6 +19,7 @@ _ALLOWED_ROOTS = {
     "dishes.json",
     "fridge.json",
     "history.json",
+    "receipts.json",
     "prep_items.json",
     "shopping_requests.json",
     "tuning.json",
@@ -141,6 +142,41 @@ def _atomic_write_bytes(path, data, *, mode=0o600):
         raise
 
 
+def _atomic_write_bytes_at(directory_fd, name, data, *, mode=0o600):
+    """Atomically publish a regular file relative to one pinned directory."""
+
+    if not isinstance(name, str) or not name or PurePosixPath(name).name != name:
+        raise ValueError("descriptor-relative file name is invalid")
+    temporary = "." + name + "." + uuid.uuid4().hex + ".tmp"
+    descriptor = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+
 def _exclusive_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -188,6 +224,7 @@ class AuditTransactionManager:
         resolved = Path(os.path.abspath(data_dir))
         existing_lock = getattr(self, "lock", None)
         if getattr(self, "data_dir", None) == resolved and existing_lock is not None:
+            self._assert_data_root_current()
             return
         if existing_lock is not None and existing_lock.active_path is not None:
             raise RuntimeError("cannot reconfigure active audit transaction manager")
@@ -509,6 +546,38 @@ class AuditTransactionManager:
             finally:
                 self._assert_root_identity()
 
+    def _assert_data_root_current(self):
+        """Fail when the configured logical root no longer names the pinned inode."""
+
+        pairs = [
+            (self.data_dir, self._data_fd, "data root"),
+            (self.data_dir / "audit", self._audit_fd, "audit directory"),
+            (
+                self.data_dir / "audit" / "transactions",
+                self._transactions_fd,
+                "audit transactions directory",
+            ),
+            (
+                self.data_dir / "audit" / "events",
+                self._events_fd,
+                "audit events directory",
+            ),
+        ]
+        try:
+            identities = [
+                (path, label, os.stat(path, follow_symlinks=False), os.fstat(descriptor))
+                for path, descriptor, label in pairs
+            ]
+        except OSError as exc:
+            raise ValueError("configured audit data root is unavailable") from exc
+        for _path, label, logical, pinned in identities:
+            if (
+                not stat.S_ISDIR(logical.st_mode)
+                or logical.st_dev != pinned.st_dev
+                or logical.st_ino != pinned.st_ino
+            ):
+                raise ValueError(f"configured {label} identity changed")
+
     def _open_or_create_directory(self, parent_fd, name):
         flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -664,7 +733,6 @@ class AuditTransactionManager:
             raise ValueError("audit targets must be JSON files")
         return pure.as_posix()
 
-
     def _open_target_parent(self, relative):
         pure = PurePosixPath(relative)
         if len(pure.parts) == 1:
@@ -736,6 +804,13 @@ class AuditTransactionManager:
         finally:
             if owns_parent:
                 os.close(parent)
+
+    def read_target(self, raw_path):
+        """Read one allowlisted target through the pinned data-root descriptor."""
+
+        relative = self._relative_target(raw_path)
+        self._assert_root_identity()
+        return self._read_target(relative)
 
     def _write_target(self, relative, payload, *, pinned=None):
         owns_parent = pinned is None
@@ -992,33 +1067,41 @@ class AuditTransactionManager:
         )
         os.chmod(transaction_dir, 0o700)
         targets_fd = self._open_or_create_directory(transaction_fd, "targets")
-        os.close(targets_fd)
-
-        manifest_targets = []
-        for index, (relative, after) in enumerate(sorted(normalized_targets.items())):
-            before = self._read_target(
-                relative, pinned=target_parents[relative]
-            )
-            parent_stat = os.fstat(target_parents[relative][0])
-            before_name = f"targets/{index:03d}.before"
-            after_name = f"targets/{index:03d}.after"
-            if before is not None:
-                _atomic_write_bytes(transaction_dir / before_name, before)
-            if after is not None:
-                _atomic_write_bytes(transaction_dir / after_name, after)
-            manifest_targets.append({
-                "relative_path": relative,
-                "before_exists": before is not None,
-                "before_sha256": _sha256(before),
-                "before_blob": before_name if before is not None else None,
-                "after_exists": after is not None,
-                "after_sha256": _sha256(after),
-                "after_blob": after_name if after is not None else None,
-                "parent_dir": {
-                    "dev": parent_stat.st_dev,
-                    "ino": parent_stat.st_ino,
-                },
-            })
+        try:
+            self._fault("after_targets_open")
+            manifest_targets = []
+            for index, (relative, after) in enumerate(
+                sorted(normalized_targets.items())
+            ):
+                before = self._read_target(
+                    relative, pinned=target_parents[relative]
+                )
+                parent_stat = os.fstat(target_parents[relative][0])
+                before_name = f"targets/{index:03d}.before"
+                after_name = f"targets/{index:03d}.after"
+                if before is not None:
+                    _atomic_write_bytes_at(
+                        targets_fd, f"{index:03d}.before", before
+                    )
+                if after is not None:
+                    _atomic_write_bytes_at(
+                        targets_fd, f"{index:03d}.after", after
+                    )
+                manifest_targets.append({
+                    "relative_path": relative,
+                    "before_exists": before is not None,
+                    "before_sha256": _sha256(before),
+                    "before_blob": before_name if before is not None else None,
+                    "after_exists": after is not None,
+                    "after_sha256": _sha256(after),
+                    "after_blob": after_name if after is not None else None,
+                    "parent_dir": {
+                        "dev": parent_stat.st_dev,
+                        "ino": parent_stat.st_ino,
+                    },
+                })
+        finally:
+            os.close(targets_fd)
 
         prepare = {
             "schema_version": 2,
@@ -1109,6 +1192,7 @@ class AuditTransactionManager:
             "transaction_dir": str(canonical_transaction_dir),
             "event_ids": [event["event_id"] for event in events_prepared],
         }
+
 
     def recover(self):
         with self.lock:
@@ -1348,7 +1432,9 @@ class AuditTransactionManager:
                         raise AuditConflictError("audit target blob hash mismatch")
                 elif digest is not None:
                     raise AuditConflictError("absent audit target has a digest")
-        if any(path in _LEGACY_RECOVERY_ROOTS for path in relative_paths):
+        if version == 1 and any(
+            path in _LEGACY_RECOVERY_ROOTS for path in relative_paths
+        ):
             event = events[0] if len(events) == 1 else None
             entity = event.get("entity") if isinstance(event, dict) else None
             if (
@@ -1492,6 +1578,7 @@ class AuditTransactionManager:
         return ordered
 
     def _recover_unlocked(self):
+        self._assert_data_root_current()
         recovered = []
         committed_records = []
         seen_transaction_ids = set()

@@ -32,6 +32,7 @@ from .base import (
 from .json_dish import JsonDishRepository
 from .json_fridge import JsonFridgeRepository
 from .json_history import JsonHistoryRepository
+from .json_receipt import JsonReceiptRepository
 from .json_plan import JsonPlanRepository
 from .json_shopping_request import JsonShoppingRequestRepository
 from .json_prep_item import JsonPrepItemRepository
@@ -49,6 +50,7 @@ _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 dish_repo: DishRepository = JsonDishRepository(_DEFAULT_DATA_DIR / "dishes.json")
 fridge_repo: FridgeRepository = JsonFridgeRepository(_DEFAULT_DATA_DIR / "fridge.json")
 history_repo: HistoryRepository = JsonHistoryRepository(_DEFAULT_DATA_DIR / "history.json")
+receipt_repo = JsonReceiptRepository(_DEFAULT_DATA_DIR / "receipts.json")
 tuning_repo: TuningRepository = JsonTuningRepository(_DEFAULT_DATA_DIR / "tuning.json")
 prep_repo: PrepItemRepository = JsonPrepItemRepository(_DEFAULT_DATA_DIR / "prep_items.json")
 plan_repo: PlanRepository = JsonPlanRepository(_DEFAULT_DATA_DIR / "plans")
@@ -73,6 +75,7 @@ def configure(data_dir) -> None:
     dish_repo.path = data_dir / "dishes.json"
     fridge_repo.path = data_dir / "fridge.json"
     history_repo.path = data_dir / "history.json"
+    receipt_repo.path = data_dir / "receipts.json"
     tuning_repo.path = data_dir / "tuning.json"
     prep_repo.path = data_dir / "prep_items.json"
     plan_repo.plans_dir = data_dir / "plans"
@@ -92,6 +95,7 @@ __all__ = [
     "JsonDishRepository",
     "JsonFridgeRepository",
     "JsonHistoryRepository",
+    "JsonReceiptRepository",
     "JsonPlanRepository",
     "JsonPrepItemRepository",
     "JsonShoppingRequestRepository",
@@ -100,6 +104,7 @@ __all__ = [
     "dish_repo",
     "fridge_repo",
     "history_repo",
+    "receipt_repo",
     "plan_repo",
     "prep_repo",
     "shopping_request_repo",

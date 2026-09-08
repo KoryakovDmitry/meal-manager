@@ -1,0 +1,6 @@
+# These tracked compatibility files intentionally use CRLF.
+README.md whitespace=cr-at-eol
+CLAUDE.md whitespace=cr-at-eol
+plugin.yaml whitespace=cr-at-eol
+skill.md whitespace=cr-at-eol
+.gitignore whitespace=cr-at-eol
