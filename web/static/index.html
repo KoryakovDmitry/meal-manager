@@ -844,6 +844,7 @@ function selectTab(tab) {
   document.getElementById('page-' + tab.dataset.tab).classList.add('active');
   document.getElementById('page-title').textContent = tab.dataset.title;
   document.getElementById('page-subtitle').textContent = pageSubtitles[tab.dataset.tab] || '';
+  if (tab.dataset.tab === 'receipts') loadReceipts();
   if (window.matchMedia('(max-width: 768px)').matches) setMobileMenu(false);
 }
 
@@ -920,6 +921,7 @@ async function refreshAll() {
 
 function renderAll() {
   renderStats(); renderDishes(); renderFridge(); renderProductCatalog(); renderSuggestions(); renderShopping(); renderPlans(); renderPlanDetail(); renderHistory(); renderReceipts(); renderReceiptDetail();
+  if (document.getElementById('page-receipts').classList.contains('active')) loadReceipts();
 }
 
 function escapeHtml(value) {
