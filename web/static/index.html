@@ -343,6 +343,17 @@ textarea { resize: vertical; min-height: 60px; }
 .history-item.history-retracted { opacity:.58; }
 .history-item.history-retracted .dish-name { text-decoration:line-through; }
 
+/* ─── Receipts ─── */
+.receipt-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  width: 100%; min-height: 46px; padding: 8px 10px; margin: 0;
+  background: none; border: 0; border-radius: 10px; cursor: pointer;
+  color: inherit; text-align: left;
+}
+.receipt-row:hover { background: rgba(255,255,255,0.045); }
+.receipt-total { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.receipts-analytics p { margin: 6px 0 10px; }
+
 /* ─── Weekly plans ─── */
 .plan-history { display: grid; gap: 8px; margin-bottom: 16px; }
 .plan-row {
@@ -488,6 +499,7 @@ textarea { resize: vertical; min-height: 60px; }
       <button class="tab" data-tab="products" data-title="Каталог продуктов" title="Каталог продуктов"><span class="tab-icon">▦</span><span class="tab-label">Каталог продуктов</span></button>
       <button class="tab" data-tab="suggestions" data-title="Рекомендации" title="Рекомендации"><span class="tab-icon">✦</span><span class="tab-label">Рекомендации</span></button>
       <button class="tab" data-tab="shopping" data-title="Покупки" title="Покупки"><span class="tab-icon">⌑</span><span class="tab-label">Покупки</span></button>
+      <button class="tab" data-tab="receipts" data-title="Чеки" title="Чеки и покупки"><span class="tab-icon">▤</span><span class="tab-label">Чеки</span></button>
       <button class="tab" data-tab="plans" data-title="Планы" title="Планы"><span class="tab-icon">▣</span><span class="tab-label">Планы</span></button>
       <button class="tab" data-tab="history" data-title="История" title="История"><span class="tab-icon">↺</span><span class="tab-label">История</span></button>
     </nav>
@@ -645,6 +657,35 @@ textarea { resize: vertical; min-height: 60px; }
       <div id="history-container"></div>
     </div>
   </div>
+
+  <!-- ═══ Receipts ═══ -->
+  <div class="page" id="page-receipts">
+    <div class="card">
+      <div class="section-title">🧾 Чеки и покупки</div>
+      <div class="inventory-filter-bar">
+        <label class="sr-only" for="receipt-status-filter">Фильтр статуса чека</label>
+        <select id="receipt-status-filter">
+          <option value="">Все статусы</option>
+          <option value="confirmed">Подтверждён</option>
+          <option value="corrected">Исправлен</option>
+          <option value="needs_review">Нужна проверка</option>
+          <option value="retracted">Отозван</option>
+        </select>
+        <label class="sr-only" for="receipt-from">Дата с</label>
+        <input id="receipt-from" type="date" aria-label="Дата с">
+        <label class="sr-only" for="receipt-to">Дата по</label>
+        <input id="receipt-to" type="date" aria-label="Дата по">
+        <button class="btn btn-ghost btn-sm" type="button" data-action="receipts-apply">Применить</button>
+      </div>
+      <div id="receipts-analytics" class="receipts-analytics" aria-live="polite"></div>
+      <div id="receipts-container"></div>
+    </div>
+    <div class="card" id="receipt-detail-card" style="display:none">
+      <div class="section-title" id="receipt-detail-title">Чек</div>
+      <div id="receipt-detail-body"></div>
+      <button class="btn btn-ghost btn-sm" type="button" id="receipt-detail-close">← К списку чеков</button>
+    </div>
+  </div>
     </main>
   </div>
 </div>
@@ -654,7 +695,7 @@ textarea { resize: vertical; min-height: 60px; }
 
 <script>
 const API = '';
-let CACHE = { dishes: [], dishesVersion: null, fridge: [], inventory: [], products: [], suggestions: [], shopping: [], shoppingWeek: null, shoppingProjectionError: null, history: [], plans: [], selectedPlan: null, selectedPlanVersion: null, selectedPlanProjectionError: null, stats: {} };
+let CACHE = { dishes: [], dishesVersion: null, fridge: [], inventory: [], products: [], suggestions: [], shopping: [], shoppingWeek: null, shoppingProjectionError: null, history: [], plans: [], selectedPlan: null, selectedPlanVersion: null, selectedPlanProjectionError: null, stats: {}, receipts: [], receiptsTotal: 0, receiptsAnalytics: null, selectedReceipt: null };
 let editingFridgeItem = null;
 let fridgeEditSaving = false;
 
@@ -705,6 +746,7 @@ const pageSubtitles = {
   suggestions: 'Что можно приготовить из имеющегося',
   shopping: 'Покупки для текущего недельного плана',
   plans: 'Недельные планы, покупки и бюджет',
+  receipts: 'История покупок, цены и сверка',
   history: 'Что и когда вы готовили'
 };
 
@@ -877,7 +919,7 @@ async function refreshAll() {
 }
 
 function renderAll() {
-  renderStats(); renderDishes(); renderFridge(); renderProductCatalog(); renderSuggestions(); renderShopping(); renderPlans(); renderPlanDetail(); renderHistory();
+  renderStats(); renderDishes(); renderFridge(); renderProductCatalog(); renderSuggestions(); renderShopping(); renderPlans(); renderPlanDetail(); renderHistory(); renderReceipts(); renderReceiptDetail();
 }
 
 function escapeHtml(value) {
@@ -2013,6 +2055,139 @@ async function deleteHistory(eventId) {
     await refreshAll();
   } catch (e) { toast(e.message, true); }
 }
+
+// ─── Receipts (RECEIPT-2, read-only) ───
+const RECEIPT_STATUS_LABELS = {
+  confirmed: 'подтверждён',
+  corrected: 'исправлен',
+  needs_review: 'нужна проверка',
+  retracted: 'отозван',
+};
+
+function formatCents(value, currency) {
+  if (value === null || value === undefined) return '—';
+  const amount = (value / 100).toLocaleString('ru', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  return currency ? `${amount} ${currency}` : amount;
+}
+
+function receiptFilters() {
+  const params = new URLSearchParams();
+  const status = document.getElementById('receipt-status-filter').value;
+  const from = document.getElementById('receipt-from').value;
+  const to = document.getElementById('receipt-to').value;
+  if (status) params.set('status', status);
+  if (from) params.set('from_date', from);
+  if (to) params.set('to_date', to);
+  return params;
+}
+
+async function loadReceipts() {
+  const params = receiptFilters();
+  const [receiptsResult, analyticsResult] = await Promise.allSettled([
+    api('/api/receipts' + (params.toString() ? '?' + params : '')),
+    api('/api/purchase-analytics' + (params.toString() ? '?' + params : '')),
+  ]);
+  if (receiptsResult.status === 'rejected') {
+    toast('Не удалось загрузить чеки: ' + receiptsResult.reason.message, true);
+    CACHE.receipts = [];
+    CACHE.receiptsTotal = 0;
+  } else {
+    CACHE.receipts = receiptsResult.value.receipts || [];
+    CACHE.receiptsTotal = receiptsResult.value.total || 0;
+  }
+  if (analyticsResult.status === 'rejected') {
+    CACHE.receiptsAnalytics = null;
+  } else {
+    CACHE.receiptsAnalytics = analyticsResult.value;
+  }
+  renderReceipts();
+}
+
+function renderReceipts() {
+  const c = document.getElementById('receipts-container');
+  if (!c) return;
+  renderReceiptsAnalytics();
+  if (CACHE.receipts.length === 0) {
+    c.innerHTML = '<p style="color:var(--text-dim)">Чеки не найдены</p>';
+    return;
+  }
+  c.innerHTML = CACHE.receipts.map(r => {
+    const id = escapeHtml(r.receipt_id);
+    const merchant = escapeHtml(r.merchant_name_raw || '—');
+    const date = escapeHtml(r.purchased_on || 'дата неизвестна');
+    const status = escapeHtml(RECEIPT_STATUS_LABELS[r.status] || r.status);
+    const statusClass = r.status === 'needs_review' ? 'cancelled'
+      : r.status === 'retracted' ? 'cancelled' : 'cooked';
+    const total = escapeHtml(formatCents(r.total_cents, r.currency));
+    return `<div class="history-item">
+      <button class="receipt-row" type="button" data-action="receipt-open" data-value="${id}"
+        aria-label="Открыть чек ${merchant} от ${date}">
+        <div>
+          <div class="dish-name">${merchant}<span class="plan-meal-status ${statusClass}">${status}</span></div>
+          <div class="date">${date} · ${escapeHtml(String(r.line_count ?? '—'))} поз.</div>
+        </div>
+        <div class="receipt-total">${total}</div>
+      </button>
+    </div>`;
+  }).join('');
+  bindDataActions(c, {'receipt-open': openReceipt});
+}
+
+function renderReceiptsAnalytics() {
+  const box = document.getElementById('receipts-analytics');
+  if (!box) return;
+  const a = CACHE.receiptsAnalytics;
+  if (!a) { box.innerHTML = ''; return; }
+  const currency = a.by_currency ? Object.keys(a.by_currency).sort().join(', ') : '';
+  const spend = a.by_currency && Object.keys(a.by_currency).length
+    ? Object.values(a.by_currency).map(b => formatCents(b.spend_cents, null)).join(' / ')
+    : '—';
+  box.innerHTML = `<p style="color:var(--text-dim)">Чеков: ${escapeHtml(String(a.receipt_count))}`
+    + ` · Сумма: ${escapeHtml(spend)}${currency ? ' (' + escapeHtml(currency) + ')' : ''}`
+    + `${a.reconciliation_gaps && a.reconciliation_gaps.length ? ' · ⚠ Расхождений: ' + escapeHtml(String(a.reconciliation_gaps.length)) : ''}</p>`;
+}
+
+async function openReceipt(receiptId) {
+  try {
+    CACHE.selectedReceipt = await api('/api/receipts/' + encodeURIComponent(receiptId));
+    renderReceiptDetail();
+    document.getElementById('receipt-detail-title')?.focus();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderReceiptDetail() {
+  const card = document.getElementById('receipt-detail-card');
+  if (!card) return;
+  const r = CACHE.selectedReceipt;
+  if (!r) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  const title = document.getElementById('receipt-detail-title');
+  title.textContent = `🧾 ${(r.merchant_name_raw || 'Чек')}${r.purchased_on ? ' · ' + r.purchased_on : ''}`;
+  title.setAttribute('tabindex', '-1');
+  const rows = (r.lines || []).map(line => {
+    const qty = line.quantity ? ` × ${escapeHtml(line.quantity)}${line.unit ? ' ' + escapeHtml(line.unit) : ''}` : '';
+    const kind = line.kind && line.kind !== 'product' ? ` (${escapeHtml(line.kind)})` : '';
+    const amount = escapeHtml(formatCents(line.line_total_cents, r.currency));
+    const note = line.ambiguity_note ? `<div class="date">⚠ ${escapeHtml(line.ambiguity_note)}</div>` : '';
+    return `<div class="history-item"><div><div class="dish-name">${escapeHtml(line.description_raw)}${kind}${note}</div>`
+      + `<div class="date">${qty}</div></div><div class="receipt-total">${amount}</div></div>`;
+  }).join('');
+  const delta = r.reconciliation_delta_cents;
+  const deltaText = delta === null || delta === undefined ? ''
+    : delta === 0 ? '<div class="date">Сверка сошлась</div>'
+    : `<div class="date">⚠ Расхождение: ${escapeHtml(formatCents(delta, r.currency))}</div>`;
+  document.getElementById('receipt-detail-body').innerHTML =
+    `<div class="history-item"><div><div class="dish-name">Итого</div>${deltaText}</div>`
+    + `<div class="receipt-total">${escapeHtml(formatCents(r.total_cents, r.currency))}</div></div>${rows}`;
+}
+
+document.getElementById('receipt-detail-close')?.addEventListener('click', () => {
+  CACHE.selectedReceipt = null;
+  renderReceiptDetail();
+  document.querySelector('[data-action="receipts-apply"]')?.focus();
+});
+
+document.querySelector('[data-action="receipts-apply"]')?.addEventListener('click', () => loadReceipts());
 
 // ─── Init ───
 refreshAll();

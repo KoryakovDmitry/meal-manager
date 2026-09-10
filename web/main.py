@@ -57,6 +57,15 @@ _shopping_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src.shopping")
 _shopping_request_repository_module = importlib.import_module(
     f"{PLUGIN_ROOT.name}.src.repositories.json_shopping_request"
 )
+_receipt_repository_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.repositories.json_receipt"
+)
+_receipt_commands_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.receipt_commands"
+)
+_receipt_analytics_module = importlib.import_module(
+    f"{PLUGIN_ROOT.name}.src.receipt_analytics"
+)
 _src_module = importlib.import_module(f"{PLUGIN_ROOT.name}.src")
 JsonFridgeRepository = _inventory_repository_module.JsonFridgeRepository
 JsonDishRepository = _dish_repository_module.JsonDishRepository
@@ -73,6 +82,10 @@ retract_cooked = _cooking_module.retract_cooked
 CookingConflictError = _cooking_module.CookingConflictError
 JsonPrepItemRepository = _prep_repository_module.JsonPrepItemRepository
 JsonShoppingRequestRepository = _shopping_request_repository_module.JsonShoppingRequestRepository
+JsonReceiptRepository = _receipt_repository_module.JsonReceiptRepository
+ReceiptDataError = _receipt_repository_module.ReceiptDataError
+load_receipts = _receipt_commands_module.load_receipts
+build_purchase_analytics = _receipt_analytics_module.build_purchase_analytics
 project_plan_shopping = _shopping_module.project_plan_shopping
 merge_manual_requests = _shopping_module.merge_manual_requests
 InventoryDataError = _inventory_repository_module.InventoryDataError
@@ -90,6 +103,7 @@ HISTORY_PATH = DATA_DIR / "history.json"
 TUNING_PATH = DATA_DIR / "tuning.json"
 PREP_ITEMS_PATH = DATA_DIR / "prep_items.json"
 SHOPPING_REQUESTS_PATH = DATA_DIR / "shopping_requests.json"
+RECEIPTS_PATH = DATA_DIR / "receipts.json"
 PLANS_DIR = DATA_DIR / "plans"
 _structured_dish_repo = JsonDishRepository(DISHES_PATH)
 _structured_fridge_repo = JsonFridgeRepository(FRIDGE_PATH)
@@ -100,6 +114,7 @@ _structured_prep_repo = JsonPrepItemRepository(DATA_DIR / "prep_items.json")
 _structured_shopping_request_repo = JsonShoppingRequestRepository(
     DATA_DIR / "shopping_requests.json"
 )
+_structured_receipt_repo = JsonReceiptRepository(DATA_DIR / "receipts.json")
 
 _WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
 _PLAN_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
@@ -156,6 +171,50 @@ def _prep_repository():
 def _shopping_request_repository():
     _structured_shopping_request_repo.path = Path(SHOPPING_REQUESTS_PATH)
     return _structured_shopping_request_repo
+
+
+def _receipt_repository():
+    _structured_receipt_repo.path = Path(RECEIPTS_PATH)
+    return _structured_receipt_repo
+
+
+_RECEIPT_STATUSES = {"needs_review", "confirmed", "corrected", "retracted"}
+_RECEIPT_ID_RE = re.compile(r"^receipt_[0-9a-f]{32}$")
+
+
+def _receipt_date_filters(from_date: str | None, to_date: str | None):
+    start = None
+    end = None
+    if from_date is not None:
+        if not from_date.strip():
+            raise HTTPException(400, "from_date must be a non-empty ISO date")
+        try:
+            start = date.fromisoformat(from_date).isoformat()
+        except ValueError as exc:
+            raise HTTPException(400, "from_date must be an ISO date") from exc
+    if to_date is not None:
+        if not to_date.strip():
+            raise HTTPException(400, "to_date must be a non-empty ISO date")
+        try:
+            end = date.fromisoformat(to_date).isoformat()
+        except ValueError as exc:
+            raise HTTPException(400, "to_date must be an ISO date") from exc
+    if start is not None and end is not None and start > end:
+        raise HTTPException(400, "from_date cannot be after to_date")
+    return start, end
+
+
+def _receipt_load_receipts_web():
+    """Load receipts under the coherent web read (lock + recovery + strict)."""
+
+    manager = _audit_transaction_manager()
+    with manager.lock:
+        manager.recover()
+        with _receipt_repository().mutation_lock(manager):
+            target = "receipts.json"
+            return _receipt_repository().load_bytes_strict(
+                manager.read_target(target)
+            )
 
 
 def load_fridge():
@@ -1717,6 +1776,139 @@ def delete_week_plan(week_id: str, expected_version: str):
         if not repo.delete(normalized_week):
             raise HTTPException(404, f"Plan '{normalized_week}' not found")
     return {"status": "ok", "week": normalized_week}
+
+# ─── API: Purchase receipts (RECEIPT-2, read-only) ──────────────────────
+@app.get("/api/receipts")
+def list_receipts_web(
+    status: str | None = None,
+    merchant_name: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    include_retracted: bool = False,
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    if status is not None and status not in _RECEIPT_STATUSES:
+        raise HTTPException(400, "status is invalid")
+    start, end = _receipt_date_filters(from_date, to_date)
+    merchant = None
+    if merchant_name is not None:
+        if not merchant_name.strip() or len(merchant_name) > 500:
+            raise HTTPException(
+                400, "merchant_name must be a non-empty string up to 500 chars"
+            )
+        merchant = " ".join(merchant_name.casefold().split())
+    try:
+        receipts = _receipt_load_receipts_web()
+    except ReceiptDataError as exc:
+        logger.error("Receipt ledger storage failure", exc_info=exc)
+        raise HTTPException(
+            503, "Receipt storage is temporarily unavailable"
+        ) from exc
+    except (AuditConflictError, OSError) as exc:
+        logger.error("Receipt ledger storage failure", exc_info=exc)
+        raise HTTPException(
+            503, "Receipt storage is temporarily unavailable"
+        ) from exc
+
+    filtered = []
+    for receipt in sorted(
+        receipts,
+        key=lambda item: (
+            item.current.purchased_on or "",
+            item.current.recorded_at,
+            item.receipt_id,
+        ),
+        reverse=True,
+    ):
+        current = receipt.current
+        if current.status == "retracted" and not include_retracted:
+            continue
+        if status is not None and current.status != status:
+            continue
+        if merchant is not None and current.merchant_name_normalized != merchant:
+            continue
+        purchased_on = current.purchased_on
+        if start is not None and (purchased_on is None or purchased_on < start):
+            continue
+        if end is not None and (purchased_on is None or purchased_on > end):
+            continue
+        filtered.append(receipt)
+    return {
+        "receipts": [receipt.summary() for receipt in filtered[:limit]],
+        "total": len(filtered),
+    }
+
+
+@app.get("/api/receipts/{receipt_id}")
+def get_receipt_web(receipt_id: str, include_revisions: bool = False):
+    if _RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+        raise HTTPException(404, "Purchase receipt not found")
+    try:
+        receipts = _receipt_load_receipts_web()
+    except ReceiptDataError as exc:
+        logger.error("Receipt ledger storage failure", exc_info=exc)
+        raise HTTPException(
+            503, "Receipt storage is temporarily unavailable"
+        ) from exc
+    except (AuditConflictError, OSError) as exc:
+        logger.error("Receipt ledger storage failure", exc_info=exc)
+        raise HTTPException(
+            503, "Receipt storage is temporarily unavailable"
+        ) from exc
+    matches = [
+        receipt for receipt in receipts if receipt.receipt_id == receipt_id
+    ]
+    if len(matches) != 1:
+        raise HTTPException(404, "Purchase receipt not found")
+    return matches[0].to_public(include_revisions=include_revisions)
+
+
+@app.get("/api/purchase-analytics")
+def purchase_analytics_web(
+    from_date: str | None = None,
+    to_date: str | None = None,
+    merchant_name: str | None = None,
+    include_needs_review: bool = False,
+    currency: str | None = None,
+):
+    start, end = _receipt_date_filters(from_date, to_date)
+    merchant = None
+    if merchant_name is not None:
+        if not merchant_name.strip() or len(merchant_name) > 500:
+            raise HTTPException(
+                400, "merchant_name must be a non-empty string up to 500 chars"
+            )
+        merchant = merchant_name
+    if currency is not None and (
+        len(currency) != 3
+        or not currency.isascii()
+        or not currency.isalpha()
+    ):
+        raise HTTPException(400, "currency must be a three-letter code")
+    try:
+        receipts = _receipt_load_receipts_web()
+    except ReceiptDataError as exc:
+        logger.error("Receipt ledger storage failure", exc_info=exc)
+        raise HTTPException(
+            503, "Receipt storage is temporarily unavailable"
+        ) from exc
+    except (AuditConflictError, OSError) as exc:
+        logger.error("Receipt ledger storage failure", exc_info=exc)
+        raise HTTPException(
+            503, "Receipt storage is temporarily unavailable"
+        ) from exc
+    try:
+        return build_purchase_analytics(
+            receipts,
+            from_date=start,
+            to_date=end,
+            merchant_name=merchant,
+            include_needs_review=include_needs_review,
+            currency=currency,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
 
 # ─── API: Audit ──────────────────────────────────────────────────────────
 @app.get("/api/audit/events")

@@ -144,6 +144,29 @@ setTimeout(async () => {
     category:'ready_meal', updated_at:null,
     quantity:null, unit:null, package_count:null, storage:null, expires_on:null,
     comment:null, expiry_status:'unknown', recipe_count:1, in_recipes:true}];
+  CACHE.receipts = [{
+    receipt_id: 'receipt_' + 'a'.repeat(32), revision: 1, status: 'needs_review',
+    merchant_name_raw: attack, branch: null, purchased_at: '2026-08-13T19:48:04Z',
+    purchased_on: '2026-08-13', time_precision: 'datetime', currency: 'EUR',
+    line_count: 2, subtotal_cents: null, total_cents: 5833, lines_total_cents: 5833,
+    reconciliation_delta_cents: 0, recorded_at: '2026-08-13T17:56:09Z'
+  }];
+  CACHE.receiptsAnalytics = {receipt_count: 1,
+    by_currency: {EUR: {spend_cents: 5833, known_spend_cents: 5833,
+      receipt_count: 1, known_total_count: 1, unknown_total_count: 0, complete: true}},
+    reconciliation_gaps: []};
+  CACHE.selectedReceipt = {
+    receipt_id: 'receipt_' + 'a'.repeat(32), revision: 1, status: 'needs_review',
+    merchant_name_raw: attack, branch: null, address: attack,
+    purchased_at: '2026-08-13T19:48:04Z', purchased_on: '2026-08-13',
+    time_precision: 'datetime', currency: 'EUR', total_cents: 5833,
+    lines_total_cents: 5833, reconciliation_delta_cents: 0,
+    lines: [{receipt_line_id: 'rline_' + 'a'.repeat(32), position: 1,
+      description_raw: attack, normalized_label: null, category: null, kind: 'product',
+      quantity: '1', unit: 'pack', package_description: null, unit_price_cents: 405,
+      price_per_base_unit_cents: null, line_total_cents: 405, confidence: null,
+      ambiguity_note: attack, links: {}}]
+  };
   renderStats();
   renderDishes();
   const dishInstructionsCard = document.querySelector('.dish-instructions');
@@ -180,6 +203,21 @@ setTimeout(async () => {
   renderHistory();
   renderPlans();
   renderPlanDetail();
+  renderReceipts();
+  renderReceiptDetail();
+  const receiptsRowNative = document.querySelector('#receipts-container .receipt-row')?.tagName === 'BUTTON';
+  const receiptsAnalyticsText = document.getElementById('receipts-analytics').textContent;
+  const receiptsAnalyticsSafe = receiptsAnalyticsText.includes('58,33') &&
+    document.querySelectorAll('#receipts-analytics img').length === 0;
+  const receiptDetailText = document.getElementById('receipt-detail-body').textContent;
+  const receiptDetailXssSafe = document.querySelectorAll('#receipt-detail-body img').length === 0 &&
+    receiptDetailText.includes(attack);
+  document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
+  document.getElementById('page-receipts').classList.add('active');
+  document.querySelector('[data-action="receipts-apply"]').click();
+  const receiptsApplyFocusable = document.querySelector('[data-action="receipts-apply"]')?.tabIndex === 0;
+  document.getElementById('page-receipts').classList.remove('active');
+  document.getElementById('page-dishes').classList.add('active');
   const planDetailXssSafe = document.querySelectorAll('#plan-detail img').length === 0 &&
     document.getElementById('plan-detail').textContent.includes(attack);
   renderProductCatalog();
@@ -398,7 +436,8 @@ setTimeout(async () => {
   const dynamicContainers = [
     'stats-grid', 'unused-list', 'top-ing-list', 'dishes-container',
     'fridge-container', 'product-catalog-container', 'suggestions-container', 'shopping-container',
-    'plans-history', 'plan-detail', 'history-container'
+    'plans-history', 'plan-detail', 'history-container',
+    'receipts-container', 'receipts-analytics', 'receipt-detail-body'
   ].map(id => document.getElementById(id));
   const xssImages = dynamicContainers.flatMap(container => [...container.querySelectorAll('img')]);
   const xssImageCount = xssImages.length;
@@ -547,6 +586,7 @@ setTimeout(async () => {
     shoppingProjectionFailsClosed, planShoppingProjectionFailsClosed,
     shoppingCheckboxDoesNotMutateInventory,
     dishInstructionsVisible, dishInstructionsPrefilled, dishInstructionsSaved,
+    receiptsRowNative, receiptsAnalyticsSafe, receiptDetailXssSafe, receiptsApplyFocusable,
     window.__qaErrors.length
   ].join(';'));
 }, 500);
@@ -622,7 +662,7 @@ setTimeout(() => {
             f"{expected_width};true|true|false;mobile-menu-close|false|true|true;"
             "mobile-menu-close;true;qa-last;true;"
             "mobile-menu-toggle|true|false|false;true;-1;"
-            + ";".join(["true"] * 49) + ";0"
+            + ";".join(["true"] * 53) + ";0"
         ), f"{mobile.group(1)} :: {controls.group(1)} :: xss={xss.group(1)}"
     desktop = re.search(r'data-qa-desktop="([^"]+)"', desktop_dom)
     assert desktop, "desktop behavior probe did not finish"
