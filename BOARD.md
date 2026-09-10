@@ -101,7 +101,15 @@
 
 ## 📐 READY INTERMEDIATE ISSUES
 
-Готовых промежуточных issues сейчас нет.
+### RECEIPT-2 — Web receipts surface («Чеки / Покупки») 📐
+
+**Происхождение.** Post-release QA (cron `31f7a645ed70`, 10.09.2026) подтвердила: native RECEIPT-1 в порядке (7 tools, happy-path, идемпотентность, strict-валидация, legacy чек читается), но Web-API не содержит receipt-эндпоинтов (`openapi.json`: 24 пути без receipt/purchase; `web/main.py` без упоминаний). Это ожидаемое состояние, а не регрессия: Web-поверхность явно отложена за пределы native MVP (тикет RECEIPT-1, раздел «Web UX — следующая поверхность»), в preserved WIP 13.08 веб-кода не было, и релиз `792d4dc` восстановил scope 1:1.
+
+**Первый срез — read-only.** Поверх существующих command/repository без второй mutation schema: `GET /api/receipts` (фильтры status/merchant/period, limit/offset), `GET /api/receipts/{id}` (+`include_revisions`), `GET /api/purchase-analytics` (те же фильтры, что native), страница «Чеки»: список (магазин, дата, total, review badge), карточка с ordered raw lines, ценами и reconciliation, фильтры period/store/status и price history. `needs_review` виден в списке, в подтверждённую аналитику не попадает; `retracted` скрыт по умолчанию. Весь пользовательский/OCR-текст рендерится XSS-safe.
+
+**Границы.** Web create/correct/retract/link и upload/OCR pipeline — осознанно следующие шаги: мутации чеков остаются в native (агент), Web первым срезом только читает. Ledger — единственный источник; inventory/shopping/plans Web не трогает.
+
+**Acceptance gate.** RED→GREEN FastAPI-тесты `web/test_web_receipts.py`: фильтры, пагинация, 404, sanitized 503 path, XSS-safety, статусные фильтры аналитики; Chromium-проверка страницы (badge, фильтры, focus); полный unit/integration/Web/a11y/compile/diff gate; independent review; deploy через `systemctl restart meal-web` (без gateway-зависимости) и live QA на production-данных (чек 13.08 виден в UI).
 
 ## ✅ COMPLETED INTERMEDIATE ISSUES
 
